@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Zorin Explorer
+Comment=An Explorer-style file manager for Linux
+Exec=zorin-explorer %U
+Icon=folder
+Terminal=false
+Type=Application
+Categories=GTK;GNOME;Utility;FileManager;
+MimeType=inode/directory;

@@ -1,0 +1,17 @@
+app-id: com.zorin.Explorer
+runtime: org.gnome.Platform
+runtime-version: '47'
+sdk: org.gnome.Sdk
+command: zorin-explorer
+finish-args:
+  - --filesystem=host
+  - --talk-name=org.freedesktop.FileManager1
+modules:
+  - name: zorin-explorer
+    buildsystem: simple
+    build-commands:
+      - cargo build --release --offline
+      - install -Dm755 target/release/zorin-explorer /app/bin/zorin-explorer
+    sources:
+      - type: dir
+        path: ../..

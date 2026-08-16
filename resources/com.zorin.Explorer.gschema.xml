@@ -1,0 +1,16 @@
+<schemalist>
+  <schema id="com.zorin.Explorer" path="/com/zorin/Explorer/">
+    <key name="startup-location" type="s">
+      <default>"home"</default>
+      <summary>Location opened at startup</summary>
+    </key>
+    <key name="view-mode" type="s">
+      <default>"details"</default>
+      <summary>Default file view mode</summary>
+    </key>
+    <key name="show-sidebar" type="b">
+      <default>true</default>
+      <summary>Show the navigation sidebar</summary>
+    </key>
+  </schema>
+</schemalist>
