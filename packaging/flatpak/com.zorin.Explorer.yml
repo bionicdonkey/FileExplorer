@@ -12,6 +12,9 @@ modules:
     build-commands:
       - cargo build --release --offline
       - install -Dm755 target/release/zorin-explorer /app/bin/zorin-explorer
+      - install -Dm644 resources/com.zorin.Explorer.desktop /app/share/applications/com.zorin.Explorer.desktop
+      - install -Dm644 resources/icons/hicolor/scalable/apps/com.zorin.Explorer.svg /app/share/icons/hicolor/scalable/apps/com.zorin.Explorer.svg
+      - install -Dm644 packaging/com.zorin.Explorer.metainfo.xml /app/share/metainfo/com.zorin.Explorer.metainfo.xml
     sources:
       - type: dir
         path: ../..

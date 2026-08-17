@@ -2,7 +2,7 @@
 Name=Zorin Explorer
 Comment=An Explorer-style file manager for Linux
 Exec=zorin-explorer %U
-Icon=folder
+Icon=com.zorin.Explorer
 Terminal=false
 Type=Application
 Categories=GTK;GNOME;Utility;FileManager;
