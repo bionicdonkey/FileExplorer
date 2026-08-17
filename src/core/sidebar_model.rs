@@ -165,7 +165,7 @@ impl SidebarModel {
     }
 
     pub fn sections(&self) -> Vec<SidebarSection> {
-        vec![self.quick_access(), self.user_folders(), self.this_pc(), self.devices(), self.network_and_online()]
+        vec![self.quick_access(), self.user_folders(), self.this_pc(), self.network_and_online()]
     }
 
     pub fn preferences(&self) -> &SidebarPreferences { &self.preferences }
@@ -213,12 +213,9 @@ impl SidebarModel {
     }
 
     fn this_pc(&self) -> SidebarSection {
-        let nodes = vec![SidebarNode::local(PathBuf::from("/"), "File System", "drive-harddisk-symbolic", true)];
+        let mut nodes = vec![SidebarNode::local(PathBuf::from("/"), "File System", "drive-harddisk-symbolic", true)];
+        nodes.extend(self.local_mounts());
         SidebarSection { title: "This PC".into(), nodes }
-    }
-
-    fn devices(&self) -> SidebarSection {
-        SidebarSection { title: "Devices".into(), nodes: self.local_mounts() }
     }
 
     fn network_and_online(&self) -> SidebarSection {
@@ -232,12 +229,15 @@ impl SidebarModel {
     }
 
     fn local_mounts(&self) -> Vec<SidebarNode> {
-        gio::VolumeMonitor::get().mounts().into_iter().filter_map(|mount| {
+        let mut mounts = gio::VolumeMonitor::get().mounts().into_iter().filter_map(|mount| {
             let root = mount.root();
             let path = root.path()?;
             if path == Path::new("/") || path.starts_with(&self.home) { return None; }
-            Some(SidebarNode::local(path, mount.name(), mount_icon_name(&mount, "drive-harddisk-symbolic"), true))
-        }).collect()
+            let icon = mount_icon_name(&mount, "drive-harddisk-symbolic");
+            Some((device_kind_rank(&icon), mount.name().to_lowercase(), SidebarNode::local(path, mount.name(), icon, true)))
+        }).collect::<Vec<_>>();
+        mounts.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+        mounts.into_iter().map(|(_, _, node)| node).collect()
     }
 
     fn remote_mounts(&self) -> Vec<SidebarNode> {
@@ -287,6 +287,12 @@ fn mount_icon_name(mount: &gio::Mount, fallback: &str) -> String {
         .unwrap_or_else(|| fallback.to_owned())
 }
 
+fn device_kind_rank(icon_name: &str) -> u8 {
+    if icon_name.contains("removable") || icon_name.contains("media") { 0 }
+    else if icon_name.contains("harddisk") { 1 }
+    else { 2 }
+}
+
 fn themed_icon_name(icon: gio::Icon) -> Option<String> {
     icon
         .downcast::<gio::ThemedIcon>()
@@ -318,7 +324,7 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
 
-    use super::{SidebarLocation, SidebarModel, SidebarPreferences};
+    use super::{device_kind_rank, SidebarLocation, SidebarModel, SidebarPreferences};
 
     #[test]
     fn pinning_a_path_is_persisted_once() {
@@ -351,7 +357,13 @@ mod tests {
         let model = SidebarModel::new(SidebarPreferences::in_memory(), home);
 
         let titles = model.sections().into_iter().map(|section| section.title).collect::<Vec<_>>();
-        assert_eq!(titles, ["Quick access", "user", "This PC", "Devices", "Network & online"]);
+        assert_eq!(titles, ["Quick access", "user", "This PC", "Network & online"]);
+    }
+
+    #[test]
+    fn device_sorting_places_removable_media_before_fixed_drives() {
+        assert!(device_kind_rank("drive-removable-media-symbolic") < device_kind_rank("drive-harddisk-symbolic"));
+        assert!(device_kind_rank("drive-harddisk-symbolic") < device_kind_rank("folder-remote-symbolic"));
     }
 
     #[test]
