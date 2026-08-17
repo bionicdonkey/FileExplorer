@@ -280,15 +280,17 @@ fn view_controls(data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, preferences: 
         let options = selected_index(tabs, data).map(|index| data.borrow()[index].view.options()).unwrap_or_default();
         let initial_body = view_menu_body(label, &options, data, tabs, preferences);
         let button = menu_button(label, &initial_body);
+        let popover = button.popover().expect("menu buttons always have a popover");
         let data = data.clone();
         let tabs = tabs.clone();
         let preferences = preferences.clone();
         let label = label.to_string();
-        button.connect_activate(move |button| {
+        // A tab can change its folder while this toolbar remains alive. Refresh
+        // immediately before the popover is shown so its checks mirror the
+        // selected folder, rather than the folder that existed at construction.
+        popover.connect_show(move |popover| {
             let options = selected_index(&tabs, &data).map(|index| data.borrow()[index].view.options()).unwrap_or_default();
-            if let Some(popover) = button.popover() {
-                popover.set_child(Some(&view_menu_body(&label, &options, &data, &tabs, &preferences)));
-            }
+            popover.set_child(Some(&view_menu_body(&label, &options, &data, &tabs, &preferences)));
         });
         controls.append(&button);
     }
