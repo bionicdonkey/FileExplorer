@@ -1,8 +1,9 @@
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::path::Path;
 
-    use super::{GridSize, ViewMode, ViewOptions, ViewPreferencesStore};
+    use super::{GridSize, ListColumn, ListColumnLayout, ViewMode, ViewOptions, ViewPreferencesStore};
 
     #[test]
     fn explicit_folder_options_round_trip() {
@@ -23,6 +24,30 @@ mod tests {
         let store = ViewPreferencesStore::in_memory();
 
         assert_eq!(store.options_for(Path::new("/tmp/Pictures"), &[]).view_mode, ViewMode::IconGrid);
+    }
+
+    #[test]
+    fn explicit_folder_options_keep_custom_list_column_order_and_widths() {
+        let path = Path::new("/tmp/columns");
+        let expected = ViewOptions {
+            list_columns: ListColumnLayout {
+                order: vec![ListColumn::Size, ListColumn::Name, ListColumn::Type, ListColumn::DateModified],
+                widths: BTreeMap::from([(ListColumn::Name, 420), (ListColumn::Size, 110)]),
+            },
+            ..ViewOptions::default()
+        };
+        let mut store = ViewPreferencesStore::in_memory();
+
+        store.set(path, expected.clone());
+
+        assert_eq!(store.options_for(path, &[]), expected);
+    }
+
+    #[test]
+    fn malformed_column_layout_returns_all_columns_once_in_default_order() {
+        let layout = ListColumnLayout { order: vec![ListColumn::Name, ListColumn::Name], widths: BTreeMap::new() };
+
+        assert_eq!(layout.normalized().order, ListColumn::all());
     }
 }
 use std::collections::BTreeMap;
@@ -93,6 +118,64 @@ pub enum GroupField {
     DateModified,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ListColumn {
+    Name,
+    DateModified,
+    Type,
+    Size,
+}
+
+impl ListColumn {
+    pub fn all() -> Vec<Self> {
+        vec![Self::Name, Self::DateModified, Self::Type, Self::Size]
+    }
+
+    pub fn default_width(self) -> i32 {
+        match self {
+            Self::Name => 360,
+            Self::DateModified => 150,
+            Self::Type => 160,
+            Self::Size => 100,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListColumnLayout {
+    pub order: Vec<ListColumn>,
+    pub widths: BTreeMap<ListColumn, i32>,
+}
+
+impl Default for ListColumnLayout {
+    fn default() -> Self {
+        Self { order: ListColumn::all(), widths: BTreeMap::new() }
+    }
+}
+
+impl ListColumnLayout {
+    pub fn normalized(&self) -> Self {
+        let mut order = Vec::with_capacity(ListColumn::all().len());
+        for column in &self.order {
+            if !order.contains(column) {
+                order.push(*column);
+            }
+        }
+        for column in ListColumn::all() {
+            if !order.contains(&column) {
+                order.push(column);
+            }
+        }
+        let widths = self.widths.iter().map(|(column, width)| (*column, (*width).clamp(64, 900))).collect();
+        Self { order, widths }
+    }
+
+    pub fn width_for(&self, column: ListColumn) -> i32 {
+        self.widths.get(&column).copied().unwrap_or_else(|| column.default_width())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ViewOptions {
     pub view_mode: ViewMode,
@@ -102,6 +185,8 @@ pub struct ViewOptions {
     pub folders_first: bool,
     pub group_field: GroupField,
     pub thumbnails: bool,
+    #[serde(default)]
+    pub list_columns: ListColumnLayout,
 }
 
 impl Default for ViewOptions {
@@ -114,6 +199,7 @@ impl Default for ViewOptions {
             folders_first: true,
             group_field: GroupField::None,
             thumbnails: true,
+            list_columns: ListColumnLayout::default(),
         }
     }
 }
@@ -156,7 +242,7 @@ impl ViewPreferencesStore {
     }
 
     pub fn set(&mut self, path: &Path, options: ViewOptions) {
-        self.folders.insert(folder_key(path), options);
+        self.folders.insert(folder_key(path), ViewOptions { list_columns: options.list_columns.normalized(), ..options });
     }
 
     pub fn save(&self) -> io::Result<()> {

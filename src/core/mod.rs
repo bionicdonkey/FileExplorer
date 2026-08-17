@@ -9,4 +9,4 @@ pub use directory_model::DirectoryModel;
 pub use file_item::FileItem;
 pub use location::Location;
 pub use navigation::NavigationHistory;
-pub use view_options::{GridSize, GroupField, SortDirection, SortField, ViewMode, ViewOptions, ViewPreferencesStore};
+pub use view_options::{GridSize, GroupField, ListColumn, ListColumnLayout, SortDirection, SortField, ViewMode, ViewOptions, ViewPreferencesStore};
