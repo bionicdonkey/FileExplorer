@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use gio::prelude::*;
 use serde::{Deserialize, Serialize};
 
+const REMOTE_CHILD_ATTRIBUTES: &str = "standard::name,standard::display-name,standard::type,standard::icon";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SidebarLocationKind {
     Local(PathBuf),
@@ -225,7 +227,7 @@ impl SidebarModel {
 
     fn remote_children(&self, uri: &str) -> Vec<SidebarNode> {
         let file = gio::File::for_uri(uri);
-        let Ok(enumerator) = file.enumerate_children("standard::display-name,standard::type,standard::icon", gio::FileQueryInfoFlags::NONE, gio::Cancellable::NONE) else { return Vec::new(); };
+        let Ok(enumerator) = file.enumerate_children(REMOTE_CHILD_ATTRIBUTES, gio::FileQueryInfoFlags::NONE, gio::Cancellable::NONE) else { return Vec::new(); };
         let mut children = Vec::new();
         while let Ok(Some(info)) = enumerator.next_file(gio::Cancellable::NONE) {
             let child = enumerator.child(&info);
@@ -286,7 +288,7 @@ fn remote_label(uri: &str) -> String {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use super::{SidebarLocation, SidebarPreferences};
+    use super::{SidebarLocation, SidebarModel, SidebarPreferences};
 
     #[test]
     fn pinning_a_path_is_persisted_once() {
@@ -328,5 +330,17 @@ mod tests {
         assert_eq!(preferences.remote_pins(), ["smb://nas.local/media"]);
         preferences.unpin_remote("smb://nas.local/media");
         assert!(preferences.remote_pins().is_empty());
+    }
+
+    #[test]
+    fn remote_enumeration_requests_the_name_required_for_child_uris() {
+        assert!(super::REMOTE_CHILD_ATTRIBUTES.contains("standard::name"));
+    }
+
+    #[test]
+    fn virtual_network_children_can_be_enumerated_without_a_gio_critical() {
+        let model = SidebarModel::new(SidebarPreferences::in_memory(), PathBuf::from("/tmp"));
+        let network = SidebarLocation::from_uri("network:///", "Browse Network", "network-workgroup-symbolic");
+        let _children = model.children_for_location(&network);
     }
 }
