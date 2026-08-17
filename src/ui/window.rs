@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -8,7 +8,7 @@ use gtk::{Align, Box as GtkBox, Button, Label, MenuButton, Orientation, Paned, P
 
 use crate::core::location::Location;
 use crate::core::navigation::NavigationHistory;
-use crate::core::{GridSize, GroupField, SortDirection, SortField, ViewMode, ViewPreferencesStore};
+use crate::core::{GridSize, GroupField, SortDirection, SortField, ViewMode, ViewOptions, ViewPreferencesStore};
 use crate::ui::file_view::FileView;
 use crate::ui::header::{HeaderControls, NavigationAction};
 use crate::ui::sidebar::Sidebar;
@@ -95,9 +95,6 @@ impl ExplorerWindow {
         content.set_margin_end(12);
 
         let search = SearchEntry::builder().placeholder_text("Search this folder").hexpand(true).build();
-        search.set_margin_start(8);
-        search.set_margin_end(8);
-        search.set_margin_bottom(6);
         let status = Label::new(Some("Ready"));
         status.set_halign(Align::Start);
         status.add_css_class("dim-label");
@@ -107,8 +104,7 @@ impl ExplorerWindow {
 
         let body = GtkBox::new(Orientation::Vertical, 0);
         body.append(&header_controls.widget);
-        body.append(&view_controls(&tabs_data, &tabs.view, &preferences));
-        body.append(&search);
+        body.append(&file_toolbar(search, view_controls(&tabs_data, &tabs.view, &preferences)));
         body.append(&content);
         body.append(&status);
         let toolbar = ToolbarView::new();
@@ -210,6 +206,15 @@ fn history_with(path: PathBuf) -> Rc<RefCell<NavigationHistory>> {
 fn wire_tab(page: TabPage, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, header: &HeaderControls, preferences: &Rc<RefCell<ViewPreferencesStore>>) {
     let view = data.borrow().iter().find(|tab| tab.page == page).map(|tab| tab.view.clone())
         .expect("a tab page should have corresponding tab data");
+    let options_data = data.clone();
+    let options_preferences = preferences.clone();
+    let options_page = page.clone();
+    view.set_options_changed_handler(move |options| {
+        let path = options_data.borrow().iter().find(|tab| tab.page == options_page).map(|tab| tab.location.borrow().clone());
+        if let Some(path) = path {
+            persist_options(&mut options_preferences.borrow_mut(), &path, options);
+        }
+    });
     let data = data.clone();
     let tabs = tabs.clone();
     let header = header.clone();
@@ -271,7 +276,6 @@ fn apply_tab_layout(window: &ApplicationWindow, tabs: &TabStrip) {
 
 fn view_controls(data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, preferences: &Rc<RefCell<ViewPreferencesStore>>) -> GtkBox {
     let controls = GtkBox::new(Orientation::Horizontal, 6);
-    controls.set_margin_start(8); controls.set_margin_end(8); controls.set_margin_bottom(6);
     for (label, entries) in [
         ("Sort", vec!["Name", "Date modified", "Type", "Size", "Ascending", "Descending", "Toggle folders first"]),
         ("Group", vec!["None", "Type", "Size", "Date modified"]),
@@ -284,6 +288,17 @@ fn view_controls(data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, preferences: 
         popover.set_child(Some(&menu)); button.set_popover(Some(&popover)); controls.append(&button);
     }
     controls
+}
+
+fn file_toolbar(search: SearchEntry, controls: GtkBox) -> GtkBox {
+    search.set_hexpand(true);
+    let row = GtkBox::new(Orientation::Horizontal, 6);
+    row.set_margin_start(8);
+    row.set_margin_end(8);
+    row.set_margin_bottom(6);
+    row.append(&search);
+    row.append(&controls);
+    row
 }
 
 fn update_active_options(data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, preferences: &Rc<RefCell<ViewPreferencesStore>>, entry: &str) {
@@ -312,14 +327,24 @@ fn update_active_options(data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, prefe
         _ => return,
     }
     let path = tab.location.borrow().clone(); tab.view.set_options(options.clone());
-    preferences.borrow_mut().set(&path, options); let _ = preferences.borrow().save();
+    persist_options(&mut preferences.borrow_mut(), &path, options);
+}
+
+fn persist_options(store: &mut ViewPreferencesStore, path: &Path, options: ViewOptions) {
+    store.set(path, options);
+    let _ = store.save();
 }
 
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::path::PathBuf;
 
-    use super::{matching_index, remove_matching};
+    use gtk::prelude::{OrientableExt, WidgetExt};
+    use gtk::{Box as GtkBox, Orientation, SearchEntry};
+
+    use super::{file_toolbar, matching_index, persist_options, remove_matching};
+    use crate::core::{SortField, ViewOptions, ViewPreferencesStore};
 
     #[test]
     fn remove_matching_releases_the_read_borrow_before_removing_the_middle_item() {
@@ -335,5 +360,27 @@ mod tests {
         pages.remove(0);
 
         assert_eq!(matching_index(&pages, |page| *page == "last"), Some(1));
+    }
+
+    #[test]
+    fn save_active_options_updates_the_selected_folder() {
+        let path = PathBuf::from("/tmp/selected-folder");
+        let mut store = ViewPreferencesStore::in_memory();
+
+        persist_options(&mut store, &path, ViewOptions { sort_field: SortField::Size, ..ViewOptions::default() });
+
+        assert_eq!(store.options_for(&path, &[]).sort_field, SortField::Size);
+    }
+
+    #[test]
+    #[ignore = "requires a GTK desktop session"]
+    fn file_toolbar_places_search_and_view_controls_in_one_row() {
+        gtk::init().expect("GTK should initialize for widget tests");
+
+        let row = file_toolbar(SearchEntry::new(), GtkBox::new(Orientation::Horizontal, 6));
+
+        assert_eq!(row.orientation(), Orientation::Horizontal);
+        assert!(row.first_child().is_some());
+        assert!(row.last_child().is_some());
     }
 }

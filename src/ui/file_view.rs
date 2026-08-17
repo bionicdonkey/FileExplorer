@@ -7,7 +7,7 @@ use gtk::{Box as GtkBox, Button, ColumnView, ColumnViewColumn, CustomSorter, Flo
 
 use crate::core::directory_model::DirectoryModel;
 use crate::core::file_item::FileItem;
-use crate::core::{ListColumn, ViewMode, ViewOptions};
+use crate::core::{ListColumn, ListColumnLayout, SortDirection, SortField, ViewMode, ViewOptions};
 
 #[derive(Clone)]
 enum ListRow {
@@ -20,6 +20,7 @@ pub struct FileView {
     pub widget: ScrolledWindow,
     location: Rc<RefCell<PathBuf>>,
     on_navigate: Rc<RefCell<Option<Box<dyn Fn(PathBuf)>>>>,
+    on_options_changed: Rc<RefCell<Option<Box<dyn Fn(ViewOptions)>>>>,
     options: Rc<RefCell<ViewOptions>>,
 }
 
@@ -29,7 +30,7 @@ impl FileView {
         scroll.set_vexpand(true);
         scroll.set_margin_end(12);
         let on_navigate = Rc::new(RefCell::new(None));
-        let view = Self { widget: scroll, location, on_navigate, options: Rc::new(RefCell::new(ViewOptions::default())) };
+        let view = Self { widget: scroll, location, on_navigate, on_options_changed: Rc::new(RefCell::new(None)), options: Rc::new(RefCell::new(ViewOptions::default())) };
         view.reload();
         view
     }
@@ -41,6 +42,10 @@ impl FileView {
 
     pub fn set_navigation_handler<F: Fn(PathBuf) + 'static>(&self, callback: F) {
         *self.on_navigate.borrow_mut() = Some(Box::new(callback));
+    }
+
+    pub fn set_options_changed_handler<F: Fn(ViewOptions) + 'static>(&self, callback: F) {
+        *self.on_options_changed.borrow_mut() = Some(Box::new(callback));
     }
 
     pub fn set_options(&self, options: ViewOptions) {
@@ -95,9 +100,36 @@ impl FileView {
             column.set_fixed_width(options.list_columns.width_for(column_id));
             column.set_expand(column_id == ListColumn::Name);
             column.set_sorter(Some(&column_sorter(column_id)));
+            let options_state = self.options.clone();
+            let changed = self.on_options_changed.clone();
+            let layout_view = view.clone();
+            column.connect_fixed_width_notify(move |_| publish_column_layout(&layout_view, &options_state, &changed));
             view.append_column(&column);
         }
         sorted.set_sorter(view.sorter().as_ref());
+
+        let options_state = self.options.clone();
+        let changed = self.on_options_changed.clone();
+        let layout_view = view.clone();
+        view.columns().connect_items_changed(move |_, _, _, _| publish_column_layout(&layout_view, &options_state, &changed));
+
+        let options_state = self.options.clone();
+        let changed = self.on_options_changed.clone();
+        let column_sorter = view.sorter().and_downcast::<gtk::ColumnViewSorter>().expect("column view uses a column sorter");
+        column_sorter.connect_primary_sort_column_notify(move |sorter| {
+            let Some(column) = sorter.primary_sort_column() else { return; };
+            let Some(field) = column.title().as_deref().and_then(sort_field_for_title) else { return; };
+            let mut options = options_state.borrow().clone();
+            options.sort_field = field;
+            options.sort_direction = match sorter.primary_sort_order() {
+                gtk::SortType::Descending => SortDirection::Descending,
+                _ => SortDirection::Ascending,
+            };
+            *options_state.borrow_mut() = options.clone();
+            if let Some(callback) = changed.borrow().as_ref() {
+                callback(options);
+            }
+        });
 
         let file_view = self.clone();
         view.connect_activate(move |_, position| {
@@ -127,6 +159,48 @@ fn column_title(column: ListColumn) -> &'static str {
         ListColumn::DateModified => "Date modified",
         ListColumn::Type => "Type",
         ListColumn::Size => "Size",
+    }
+}
+
+fn sort_field_for_title(title: &str) -> Option<SortField> {
+    match title {
+        "Name" => Some(SortField::Name),
+        "Date modified" => Some(SortField::DateModified),
+        "Type" => Some(SortField::Type),
+        "Size" => Some(SortField::Size),
+        _ => None,
+    }
+}
+
+fn list_column_for_title(title: &str) -> Option<ListColumn> {
+    match title {
+        "Name" => Some(ListColumn::Name),
+        "Date modified" => Some(ListColumn::DateModified),
+        "Type" => Some(ListColumn::Type),
+        "Size" => Some(ListColumn::Size),
+        _ => None,
+    }
+}
+
+fn publish_column_layout(view: &ColumnView, options_state: &Rc<RefCell<ViewOptions>>, changed: &Rc<RefCell<Option<Box<dyn Fn(ViewOptions)>>>>) {
+    let columns = view.columns();
+    let mut order = Vec::new();
+    let mut widths = std::collections::BTreeMap::new();
+    for index in 0..columns.n_items() {
+        let Some(column) = columns.item(index).and_downcast::<ColumnViewColumn>() else { continue; };
+        let Some(id) = column.title().as_deref().and_then(list_column_for_title) else { continue; };
+        order.push(id);
+        widths.insert(id, column.fixed_width());
+    }
+    let layout = ListColumnLayout { order, widths }.normalized();
+    if options_state.borrow().list_columns == layout {
+        return;
+    }
+    let mut options = options_state.borrow().clone();
+    options.list_columns = layout;
+    *options_state.borrow_mut() = options.clone();
+    if let Some(callback) = changed.borrow().as_ref() {
+        callback(options);
     }
 }
 
