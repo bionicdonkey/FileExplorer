@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use gio::prelude::*;
 use serde::{Deserialize, Serialize};
 
-const REMOTE_CHILD_ATTRIBUTES: &str = "standard::name,standard::display-name,standard::type,standard::icon,standard::target-uri";
+const REMOTE_CHILD_ATTRIBUTES: &str = "standard::name,standard::display-name,standard::type,standard::icon,standard::content-type,standard::target-uri";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SidebarLocationKind {
@@ -345,9 +345,21 @@ mod tests {
     }
 
     #[test]
+    fn remote_enumeration_requests_content_type_for_provider_backends() {
+        assert!(super::REMOTE_CHILD_ATTRIBUTES.contains("standard::content-type"));
+    }
+
+    #[test]
     fn virtual_network_children_can_be_enumerated_without_a_gio_critical() {
         let model = SidebarModel::new(SidebarPreferences::in_memory(), PathBuf::from("/tmp"));
         let network = SidebarLocation::from_uri("network:///", "Browse Network", "network-workgroup-symbolic");
         let _children = model.children_for_location(&network);
+    }
+
+    #[test]
+    fn online_provider_root_can_be_enumerated_without_a_gio_critical() {
+        let model = SidebarModel::new(SidebarPreferences::in_memory(), PathBuf::from("/tmp"));
+        let providers = SidebarLocation::from_uri("computer:///", "Online accounts", "folder-remote-symbolic");
+        let _children = model.children_for_location(&providers);
     }
 }

@@ -62,12 +62,29 @@ impl Sidebar {
     pub fn refresh(&self) {
         while let Some(child) = self.content.first_child() { self.content.remove(&child); }
         for section in self.model.borrow().sections() {
+            let section_is_empty = section.nodes.is_empty();
+            let rows = GtkBox::new(Orientation::Vertical, 0);
+            rows.add_css_class("sidebar-tree");
+            for node in section.nodes { self.append_node(&rows, node, 0); }
+
+            let heading_row = GtkBox::new(Orientation::Horizontal, 0);
+            let toggle = ToggleButton::new();
+            toggle.add_css_class("flat");
+            toggle.add_css_class("sidebar-section-toggle");
+            toggle.set_active(true);
+            toggle.set_child(Some(&Image::from_icon_name("pan-down-symbolic")));
+            let rows_for_toggle = rows.clone();
+            toggle.connect_toggled(move |toggle| {
+                let expanded = toggle.is_active();
+                rows_for_toggle.set_visible(expanded);
+                toggle.set_child(Some(&Image::from_icon_name(if expanded { "pan-down-symbolic" } else { "pan-end-symbolic" })));
+            });
+            heading_row.append(&toggle);
             let heading = Label::new(Some(section.title));
             heading.add_css_class("heading");
             heading.add_css_class("sidebar-section-heading");
             heading.set_xalign(0.0);
             if section.title == "Network & online" {
-                let heading_row = GtkBox::new(Orientation::Horizontal, 0);
                 heading.set_hexpand(true);
                 let add = Button::from_icon_name("list-add-symbolic");
                 add.add_css_class("flat");
@@ -78,10 +95,11 @@ impl Sidebar {
                 heading_row.append(&add);
                 self.content.append(&heading_row);
             } else {
-                self.content.append(&heading);
+                heading_row.append(&heading);
+                self.content.append(&heading_row);
             }
 
-            if section.nodes.is_empty() && section.title == "Quick access" {
+            if section_is_empty && section.title == "Quick access" {
                 let empty = Label::new(Some("Pin folders here for quick access"));
                 empty.add_css_class("dim-label");
                 empty.set_xalign(0.0);
@@ -89,9 +107,6 @@ impl Sidebar {
                 self.content.append(&empty);
             }
 
-            let rows = GtkBox::new(Orientation::Vertical, 0);
-            rows.add_css_class("sidebar-tree");
-            for node in section.nodes { self.append_node(&rows, node, 0); }
             self.content.append(&rows);
         }
     }
