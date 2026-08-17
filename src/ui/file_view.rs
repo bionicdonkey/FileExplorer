@@ -3,11 +3,12 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use gtk::prelude::*;
-use gtk::{Box as GtkBox, Button, ColumnView, ColumnViewColumn, CustomSorter, FlowBox, Image, Label, NoSelection, Orientation, ScrolledWindow, SignalListItemFactory, SortListModel};
+use gtk::{Box as GtkBox, Button, ColumnView, ColumnViewColumn, CustomSorter, FlowBox, GestureClick, Image, Label, MenuButton, NoSelection, Orientation, Popover, ScrolledWindow, SignalListItemFactory, SortListModel};
 
 use crate::core::directory_model::DirectoryModel;
 use crate::core::file_item::FileItem;
 use crate::core::{GroupField, ListColumn, ListColumnLayout, SortDirection, SortField, ViewMode, ViewOptions};
+use crate::ui::context_menu::{item_commands, open_with_apps, ContextCommand, ContextTarget};
 
 #[derive(Clone)]
 enum ListRow {
@@ -20,6 +21,7 @@ pub struct FileView {
     pub widget: ScrolledWindow,
     location: Rc<RefCell<PathBuf>>,
     on_navigate: Rc<RefCell<Option<Box<dyn Fn(PathBuf)>>>>,
+    on_context_command: Rc<RefCell<Option<Box<dyn Fn(ContextTarget, ContextCommand)>>>>,
     on_options_changed: Rc<RefCell<Option<Box<dyn Fn(ViewOptions)>>>>,
     options: Rc<RefCell<ViewOptions>>,
 }
@@ -29,7 +31,7 @@ impl FileView {
         let scroll = ScrolledWindow::new();
         scroll.set_vexpand(true);
         let on_navigate = Rc::new(RefCell::new(None));
-        let view = Self { widget: scroll, location, on_navigate, on_options_changed: Rc::new(RefCell::new(None)), options: Rc::new(RefCell::new(ViewOptions::default())) };
+        let view = Self { widget: scroll, location, on_navigate, on_context_command: Rc::new(RefCell::new(None)), on_options_changed: Rc::new(RefCell::new(None)), options: Rc::new(RefCell::new(ViewOptions::default())) };
         view.reload();
         view
     }
@@ -41,6 +43,10 @@ impl FileView {
 
     pub fn set_navigation_handler<F: Fn(PathBuf) + 'static>(&self, callback: F) {
         *self.on_navigate.borrow_mut() = Some(Box::new(callback));
+    }
+
+    pub fn set_context_handler<F: Fn(ContextTarget, ContextCommand) + 'static>(&self, callback: F) {
+        *self.on_context_command.borrow_mut() = Some(Box::new(callback));
     }
 
     pub fn set_options_changed_handler<F: Fn(ViewOptions) + 'static>(&self, callback: F) {
@@ -162,7 +168,7 @@ impl FileView {
     fn grid_view(&self, items: &[FileItem], options: &ViewOptions) -> FlowBox {
         let layout = options.grid_size.grid_layout();
         let grid = FlowBox::new(); grid.set_selection_mode(gtk::SelectionMode::None); grid.set_column_spacing(layout.gap.try_into().expect("grid gaps are positive")); grid.set_row_spacing(layout.gap.try_into().expect("grid gaps are positive")); grid.set_margin_top(12); grid.set_margin_start(12); grid.set_margin_end(12);
-        for item in items { let tile = Button::new(); tile.add_css_class("flat"); tile.add_css_class("icon-grid-tile"); tile.set_size_request(layout.tile_width, -1); tile.set_tooltip_text(Some(item.name())); let body = GtkBox::new(Orientation::Vertical, layout.gap / 2); body.set_halign(gtk::Align::Center); let icon = item_image(item, options.thumbnails); icon.set_pixel_size(options.grid_size.icon_size()); body.append(&icon); body.append(&grid_tile_label(item.name(), layout.label_width_chars)); tile.set_child(Some(&body)); let view = self.clone(); let path = item.path().to_path_buf(); tile.connect_clicked(move |_| activate_path(&view, path.clone())); grid.append(&tile); }
+        for item in items { let tile = Button::new(); tile.add_css_class("flat"); tile.add_css_class("icon-grid-tile"); tile.set_size_request(layout.tile_width, -1); tile.set_tooltip_text(Some(item.name())); let body = GtkBox::new(Orientation::Vertical, layout.gap / 2); body.set_halign(gtk::Align::Center); let icon = item_image(item, options.thumbnails); icon.set_pixel_size(options.grid_size.icon_size()); body.append(&icon); body.append(&grid_tile_label(item.name(), layout.label_width_chars)); tile.set_child(Some(&body)); let view = self.clone(); let path = item.path().to_path_buf(); tile.connect_clicked(move |_| activate_path(&view, path.clone())); let target = if item.is_dir() { ContextTarget::Folder(item.path().to_path_buf()) } else { ContextTarget::File { path: item.path().to_path_buf(), content_type: item.content_type().to_string() } }; let view = self.clone(); let gesture = GestureClick::new(); gesture.set_button(3); let menu_tile = tile.clone(); gesture.connect_pressed(move |_, _, x, y| show_item_context_menu(&menu_tile, x, y, target.clone(), &view)); tile.add_controller(gesture); grid.append(&tile); }
         grid
     }
 
@@ -203,6 +209,39 @@ fn grid_tile_label(name: &str, width_chars: i32) -> Label {
     label.set_justify(gtk::Justification::Center);
     label.set_xalign(0.5);
     label
+}
+
+fn show_item_context_menu(parent: &impl IsA<gtk::Widget>, x: f64, y: f64, target: ContextTarget, view: &FileView) {
+    let popover = Popover::new();
+    popover.set_parent(parent);
+    popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+    let menu = GtkBox::new(Orientation::Vertical, 2);
+    menu.set_margin_top(6); menu.set_margin_bottom(6);
+    for command in item_commands(&target) {
+        if command == ContextCommand::OpenWith {
+            let button = MenuButton::builder().label("Open With").build();
+            let apps = GtkBox::new(Orientation::Vertical, 2);
+            let content_type = match &target { ContextTarget::File { content_type, .. } => content_type, _ => unreachable!() };
+            for app in open_with_apps(content_type) {
+                let app_button = Button::with_label(&app.display_name());
+                let path = match &target { ContextTarget::File { path, .. } => path.clone(), _ => unreachable!() };
+                app_button.connect_clicked(move |_| { let _ = app.launch(&[gio::File::for_path(&path)], None::<&gio::AppLaunchContext>); });
+                apps.append(&app_button);
+            }
+            let apps_popover = Popover::new(); apps_popover.set_child(Some(&apps)); button.set_popover(Some(&apps_popover)); menu.append(&button);
+            continue;
+        }
+        let button = Button::with_label(context_command_label(command));
+        let target = target.clone(); let view = view.clone(); let popover = popover.clone();
+        button.connect_clicked(move |_| { popover.popdown(); if command == ContextCommand::Open { if let ContextTarget::Folder(path) | ContextTarget::File { path, .. } = &target { activate_path(&view, path.clone()); return; } } if let Some(callback) = view.on_context_command.borrow().as_ref() { callback(target.clone(), command); } });
+        menu.append(&button);
+    }
+    popover.set_child(Some(&menu));
+    popover.popup();
+}
+
+fn context_command_label(command: ContextCommand) -> &'static str {
+    match command { ContextCommand::Open => "Open", ContextCommand::OpenInNewTab => "Open in New Tab", ContextCommand::OpenInNewWindow => "Open in New Window", ContextCommand::OpenInTerminal => "Open in Terminal", ContextCommand::Cut => "Cut", ContextCommand::Copy => "Copy", ContextCommand::Rename => "Rename", ContextCommand::MoveToTrash => "Move to Trash", ContextCommand::Properties => "Properties", ContextCommand::NewFolder => "New Folder", ContextCommand::Paste => "Paste", ContextCommand::Refresh => "Refresh", ContextCommand::CloseTab => "Close Tab", ContextCommand::CloseOtherTabs => "Close Other Tabs", ContextCommand::DuplicateTab => "Duplicate Tab", ContextCommand::OpenWith => "Open With" }
 }
 
 fn column_title(column: ListColumn) -> &'static str {
