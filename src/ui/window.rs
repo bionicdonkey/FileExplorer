@@ -4,7 +4,7 @@ use std::rc::Rc;
 
 use adw::prelude::*;
 use adw::{Application, ApplicationWindow, HeaderBar, TabPage, TabView, ToolbarView};
-use gtk::{Align, Box as GtkBox, Button, CheckButton, Label, MenuButton, Orientation, Paned, Popover, SearchEntry, Separator};
+use gtk::{Align, Box as GtkBox, Button, CheckButton, Entry, Label, MenuButton, Orientation, Paned, Popover, SearchEntry, Separator};
 
 use crate::core::location::Location;
 use crate::core::navigation::NavigationHistory;
@@ -320,9 +320,87 @@ fn wire_tab(page: TabPage, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, hea
                     command_view.set_location(destination);
                 }
             }
+            ContextCommand::NewFolder => {
+                if let Some(parent) = path {
+                    let refresh = command_view.clone();
+                    show_name_dialog(&command_view, "New Folder", "Folder name", "New Folder", "Create", move |name| FileOperations::create_folder(&parent, &name).map(|_| ()), move || refresh.set_location(refresh.location()));
+                }
+            }
+            ContextCommand::Rename => {
+                if let Some(path) = path {
+                    let initial = path.file_name().and_then(|name| name.to_str()).unwrap_or_default().to_owned();
+                    let refresh = command_view.clone();
+                    show_name_dialog(&command_view, "Rename", "New name", &initial, "Rename", move |name| FileOperations::rename(&path, &name).map(|_| ()), move || refresh.set_location(refresh.location()));
+                }
+            }
+            ContextCommand::MoveToTrash => {
+                if let Some(path) = path {
+                    if FileOperations::move_to_trash(&[path]).is_ok() { command_view.set_location(command_view.location()); }
+                }
+            }
+            ContextCommand::Properties => {
+                if let Some(path) = path { show_properties_dialog(&command_view, &path); }
+            }
+            ContextCommand::Refresh => command_view.set_location(command_view.location()),
             _ => {}
         }
     });
+}
+
+#[allow(deprecated)]
+fn show_name_dialog<F, S>(view: &FileView, title: &str, prompt: &str, initial: &str, accept_label: &str, action: F, on_success: S)
+where F: Fn(String) -> std::io::Result<()> + 'static, S: Fn() + 'static {
+    let dialog = gtk::Dialog::new();
+    dialog.set_title(Some(title));
+    dialog.set_modal(true);
+    if let Some(window) = view.widget.root().and_downcast::<gtk::Window>() { dialog.set_transient_for(Some(&window)); }
+    dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+    dialog.add_button(accept_label, gtk::ResponseType::Accept);
+    let content = dialog.content_area();
+    content.set_spacing(8);
+    content.set_margin_top(12); content.set_margin_bottom(12); content.set_margin_start(12); content.set_margin_end(12);
+    content.append(&Label::new(Some(prompt)));
+    let entry = Entry::new();
+    entry.set_text(initial);
+    entry.set_activates_default(true);
+    dialog.set_default_response(gtk::ResponseType::Accept);
+    content.append(&entry);
+    dialog.connect_response(move |dialog, response| {
+        if response == gtk::ResponseType::Accept {
+            let name = entry.text().trim().to_owned();
+            if !name.is_empty() && action(name).is_ok() { on_success(); }
+        }
+        dialog.close();
+    });
+    dialog.present();
+}
+
+#[allow(deprecated)]
+fn show_properties_dialog(view: &FileView, path: &Path) {
+    let dialog = gtk::Dialog::new();
+    dialog.set_title(Some("Properties"));
+    dialog.set_modal(true);
+    if let Some(window) = view.widget.root().and_downcast::<gtk::Window>() { dialog.set_transient_for(Some(&window)); }
+    dialog.add_button("Close", gtk::ResponseType::Close);
+    let content = dialog.content_area();
+    content.set_spacing(6);
+    content.set_margin_top(16); content.set_margin_bottom(16); content.set_margin_start(16); content.set_margin_end(16);
+    let metadata = std::fs::metadata(path).ok();
+    let kind = metadata.as_ref().map(|meta| if meta.is_dir() { "Folder" } else { "File" }).unwrap_or("Unavailable");
+    let size = metadata.as_ref().map(|meta| meta.len()).unwrap_or_default();
+    for text in [
+        path.file_name().and_then(|name| name.to_str()).unwrap_or("/").to_owned(),
+        format!("Type: {kind}"),
+        format!("Location: {}", path.parent().unwrap_or(path).display()),
+        format!("Size: {} bytes", size),
+    ] {
+        let label = Label::new(Some(&text));
+        label.set_xalign(0.0);
+        label.set_selectable(true);
+        content.append(&label);
+    }
+    dialog.connect_response(|dialog, _| dialog.close());
+    dialog.present();
 }
 
 fn target_path(target: &ContextTarget) -> Option<PathBuf> {
