@@ -22,11 +22,13 @@ impl PropertiesDialog {
         let content = dialog.content_area();
         content.set_margin_top(12); content.set_margin_bottom(12); content.set_margin_start(16); content.set_margin_end(16);
         let stack = Stack::new();
+        stack.set_vexpand(true);
+        stack.set_hexpand(true);
         let switcher = StackSwitcher::new(); switcher.set_stack(Some(&stack));
         content.append(&switcher);
         let name = Entry::new(); name.set_text(&details.name);
         stack.add_titled(&general_page(&details, &name), Some("general"), "General");
-        let checks = permission_page(details.permissions);
+        let checks = permission_page(details.permissions, &details.owner, &details.group);
         stack.add_titled(&checks.0, Some("permissions"), "Permissions");
         stack.add_titled(&sharing_page(details.is_dir), Some("sharing"), "Sharing");
         content.append(&stack);
@@ -65,16 +67,16 @@ fn general_page(details: &PropertyDetails, name: &Entry) -> GtkBox {
     page.append(&grid); page
 }
 
-fn permission_page(bits: PermissionBits) -> (GtkBox, Vec<CheckButton>) {
+fn permission_page(bits: PermissionBits, owner: &str, group: &str) -> (GtkBox, Vec<CheckButton>) {
     let page = GtkBox::new(Orientation::Vertical, 10); page.set_margin_top(16);
     page.append(&Label::new(Some("Access permissions")));
     let grid = Grid::new(); grid.set_column_spacing(12); grid.set_row_spacing(8);
     for (column, title) in ["Read", "Write", "Execute"].into_iter().enumerate() { grid.attach(&Label::new(Some(title)), (column + 1) as i32, 0, 1, 1); }
     let values = [bits.owner_read,bits.owner_write,bits.owner_execute,bits.group_read,bits.group_write,bits.group_execute,bits.other_read,bits.other_write,bits.other_execute];
     let mut checks = Vec::new();
-    for (row, title) in ["Owner", "Group", "Others"].into_iter().enumerate() { grid.attach(&Label::new(Some(title)), 0, (row + 1) as i32, 1, 1); for column in 0..3 { let check = CheckButton::new(); check.set_active(values[row * 3 + column]); grid.attach(&check, (column + 1) as i32, (row + 1) as i32, 1, 1); checks.push(check); } }
+    for (row, title) in [format!("Owner ({owner})"), format!("Group ({group})"), "Others".into()].into_iter().enumerate() { grid.attach(&Label::new(Some(&title)), 0, (row + 1) as i32, 1, 1); for column in 0..3 { let check = CheckButton::new(); check.set_active(values[row * 3 + column]); grid.attach(&check, (column + 1) as i32, (row + 1) as i32, 1, 1); checks.push(check); } }
     page.append(&grid); (page, checks)
 }
 
 fn sharing_page(is_folder: bool) -> GtkBox { let page = GtkBox::new(Orientation::Vertical, 12); page.set_margin_top(16); page.append(&Label::new(Some(if is_folder { "Folder sharing will be available when Samba user shares are configured on this system." } else { "Sharing is available for folders only." }))); page }
-fn format_time(time: Option<std::time::SystemTime>) -> String { time.and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok()).map(|value| format!("{} seconds since Unix epoch", value.as_secs())).unwrap_or_else(|| "Unavailable".into()) }
+fn format_time(time: Option<std::time::SystemTime>) -> String { time.and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok()).and_then(|value| glib::DateTime::from_unix_local(value.as_secs() as i64).ok()).and_then(|value| value.format("%a, %d %b %Y %H:%M:%S").ok()).map(|value| value.to_string()).unwrap_or_else(|| "Unavailable".into()) }

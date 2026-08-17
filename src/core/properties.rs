@@ -42,6 +42,8 @@ pub struct PropertyDetails {
     pub created: Option<SystemTime>,
     pub modified: Option<SystemTime>,
     pub accessed: Option<SystemTime>,
+    pub owner: String,
+    pub group: String,
     pub permissions: PermissionBits,
 }
 
@@ -52,15 +54,33 @@ impl PropertyDetails {
         use std::os::unix::fs::PermissionsExt;
         #[cfg(unix)]
         let mode = metadata.permissions().mode();
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
         #[cfg(not(unix))]
         let mode = 0o644;
         let (content_type, _) = gio::content_type_guess(Some(path), &[]);
+        #[cfg(unix)]
+        let owner = account_name("passwd", metadata.uid());
+        #[cfg(unix)]
+        let group = account_name("group", metadata.gid());
+        #[cfg(not(unix))]
+        let (owner, group) = ("Unavailable".into(), "Unavailable".into());
         Ok(Self {
             path: path.to_path_buf(),
             name: path.file_name().and_then(|name| name.to_str()).unwrap_or("/").to_owned(),
             is_dir: metadata.is_dir(), content_type: content_type.to_string(), size: metadata.len(),
             created: metadata.created().ok(), modified: metadata.modified().ok(), accessed: metadata.accessed().ok(),
+            owner, group,
             permissions: PermissionBits::from_mode(mode),
         })
     }
+}
+
+#[cfg(unix)]
+fn account_name(database: &str, id: u32) -> String {
+    std::process::Command::new("getent").arg(database).arg(id.to_string()).output().ok()
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .and_then(|line| line.split(':').next().map(str::to_owned))
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| id.to_string())
 }
