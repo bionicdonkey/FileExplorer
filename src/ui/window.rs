@@ -4,7 +4,6 @@ use std::rc::Rc;
 
 use adw::prelude::*;
 use adw::{Application, ApplicationWindow, HeaderBar, TabPage, TabView, ToolbarView};
-use gtk::gdk;
 use gtk::{Align, Box as GtkBox, Button, Label, Orientation, Paned, SearchEntry};
 
 use crate::core::location::Location;
@@ -12,7 +11,7 @@ use crate::core::navigation::NavigationHistory;
 use crate::ui::file_view::FileView;
 use crate::ui::header::{HeaderControls, NavigationAction};
 use crate::ui::sidebar::Sidebar;
-use crate::ui::tab_layout::{calculate_tab_layout, TabLayoutInput, BASE_WINDOW_WIDTH, MONITOR_MARGIN};
+use crate::ui::tab_layout::{calculate_tab_layout, TabLayoutInput};
 use crate::ui::tabs::TabStrip;
 
 struct TabData {
@@ -232,33 +231,11 @@ fn tab_title(path: &std::path::Path) -> String {
 }
 
 fn apply_tab_layout(window: &ApplicationWindow, tabs: &TabStrip) {
-    let maximized = window.is_maximized();
-    let fullscreen = window.is_fullscreen();
-    let layout = calculate_tab_layout(TabLayoutInput {
-        page_count: tabs.view.n_pages(),
-        current_window_width: window.width().max(BASE_WINDOW_WIDTH),
-        monitor_width: monitor_width(window),
-        maximized,
-        fullscreen,
-    });
+    let window_width = window.width();
+    let layout = calculate_tab_layout(TabLayoutInput::new(
+        tabs.view.n_pages(),
+        if window_width > 0 { window_width } else { 1280 },
+    ));
 
     tabs.set_layout(layout);
-    if !maximized && !fullscreen {
-        window.set_default_size(layout.window_width, window.height().max(800));
-    }
-}
-
-fn monitor_width(window: &ApplicationWindow) -> i32 {
-    let fallback = window.width().max(BASE_WINDOW_WIDTH) + MONITOR_MARGIN;
-    let Some(surface) = window.surface() else {
-        return fallback;
-    };
-    let Some(display) = gdk::Display::default() else {
-        return fallback;
-    };
-
-    display
-        .monitor_at_surface(&surface)
-        .map(|monitor| monitor.geometry().width())
-        .unwrap_or(fallback)
 }
