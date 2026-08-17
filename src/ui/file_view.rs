@@ -162,7 +162,7 @@ impl FileView {
 
     fn grid_view(&self, items: &[FileItem], options: &ViewOptions) -> FlowBox {
         let grid = FlowBox::new(); grid.set_selection_mode(gtk::SelectionMode::None); grid.set_column_spacing(12); grid.set_row_spacing(12); grid.set_margin_top(12); grid.set_margin_start(12); grid.set_margin_end(12);
-        for item in items { let tile = Button::new(); tile.add_css_class("flat"); let body = GtkBox::new(Orientation::Vertical, 6); let icon = item_image(item, options.thumbnails); icon.set_pixel_size(options.grid_size.icon_size()); body.append(&icon); let label = Label::new(Some(item.name())); label.set_wrap(true); label.set_max_width_chars(18); body.append(&label); tile.set_child(Some(&body)); let view = self.clone(); let path = item.path().to_path_buf(); tile.connect_clicked(move |_| activate_path(&view, path.clone())); grid.append(&tile); }
+        for item in items { let tile = Button::new(); tile.add_css_class("flat"); tile.add_css_class("icon-grid-tile"); tile.set_size_request(172, -1); tile.set_tooltip_text(Some(item.name())); let body = GtkBox::new(Orientation::Vertical, 6); body.set_halign(gtk::Align::Center); let icon = item_image(item, options.thumbnails); icon.set_pixel_size(options.grid_size.icon_size()); body.append(&icon); body.append(&grid_tile_label(item.name())); tile.set_child(Some(&body)); let view = self.clone(); let path = item.path().to_path_buf(); tile.connect_clicked(move |_| activate_path(&view, path.clone())); grid.append(&tile); }
         grid
     }
 
@@ -190,6 +190,19 @@ impl FileView {
 /// lists may be reordered by GTK's live column sorter.
 fn uses_native_row_sorting(group_field: GroupField) -> bool {
     group_field == GroupField::None
+}
+
+fn grid_tile_label(name: &str) -> Label {
+    let label = Label::new(Some(name));
+    label.set_wrap(true);
+    label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+    label.set_lines(2);
+    label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    label.set_width_chars(18);
+    label.set_max_width_chars(18);
+    label.set_justify(gtk::Justification::Center);
+    label.set_xalign(0.5);
+    label
 }
 
 fn column_title(column: ListColumn) -> &'static str {
@@ -345,7 +358,7 @@ mod tests {
 
     use gtk::prelude::ListModelExt;
 
-    use super::{uses_native_row_sorting, FileView};
+    use super::{grid_tile_label, uses_native_row_sorting, FileView};
     use crate::core::{GroupField, ViewMode, ViewOptions};
 
     #[test]
@@ -354,6 +367,19 @@ mod tests {
         assert!(!uses_native_row_sorting(GroupField::DateModified));
         assert!(!uses_native_row_sorting(GroupField::Type));
         assert!(!uses_native_row_sorting(GroupField::Size));
+    }
+
+    #[test]
+    #[ignore = "requires a GTK desktop session"]
+    fn grid_tile_label_reserves_two_wrapped_ellipsized_lines() {
+        gtk::init().expect("GTK should initialize for widget tests");
+
+        let label = grid_tile_label("A deliberately long folder name");
+
+        assert!(label.wraps());
+        assert_eq!(label.lines(), 2);
+        assert_eq!(label.ellipsize(), gtk::pango::EllipsizeMode::End);
+        assert_eq!(label.max_width_chars(), 18);
     }
 
     #[test]
