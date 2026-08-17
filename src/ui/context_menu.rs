@@ -19,6 +19,10 @@ pub enum ContextCommand {
     NewFolder,
     Cut,
     Copy,
+    CopyFilename,
+    CopyFullPath,
+    CopyTo,
+    MoveTo,
     Paste,
     Rename,
     MoveToTrash,
@@ -33,13 +37,16 @@ pub fn item_commands(target: &ContextTarget) -> Vec<ContextCommand> {
     match target {
         ContextTarget::File { .. } => vec![
             ContextCommand::Open, ContextCommand::OpenWith, ContextCommand::Cut,
-            ContextCommand::Copy, ContextCommand::Rename, ContextCommand::MoveToTrash,
+            ContextCommand::Copy, ContextCommand::CopyFilename, ContextCommand::CopyFullPath,
+            ContextCommand::CopyTo, ContextCommand::MoveTo, ContextCommand::Rename, ContextCommand::MoveToTrash,
             ContextCommand::Properties,
         ],
         ContextTarget::Folder(_) | ContextTarget::SidebarLocation(_) => vec![
             ContextCommand::Open, ContextCommand::OpenInNewTab, ContextCommand::OpenInNewWindow,
             ContextCommand::OpenInTerminal, ContextCommand::Cut, ContextCommand::Copy,
-            ContextCommand::Rename, ContextCommand::MoveToTrash, ContextCommand::Properties,
+            ContextCommand::CopyFilename, ContextCommand::CopyFullPath, ContextCommand::CopyTo,
+            ContextCommand::MoveTo, ContextCommand::Rename, ContextCommand::MoveToTrash,
+            ContextCommand::Properties,
         ],
         ContextTarget::Background(_) => vec![
             ContextCommand::NewFolder, ContextCommand::Paste, ContextCommand::Refresh,
@@ -67,5 +74,18 @@ mod tests {
         assert!(commands.contains(&ContextCommand::OpenInTerminal));
         assert!(commands.contains(&ContextCommand::OpenInNewTab));
         assert!(commands.contains(&ContextCommand::OpenInNewWindow));
+    }
+
+    #[test]
+    fn item_commands_include_copy_and_move_destinations() {
+        let commands = item_commands(&ContextTarget::File {
+            path: PathBuf::from("/tmp/report.txt"),
+            content_type: "text/plain".into(),
+        });
+
+        assert!(commands.contains(&ContextCommand::CopyFilename));
+        assert!(commands.contains(&ContextCommand::CopyFullPath));
+        assert!(commands.contains(&ContextCommand::CopyTo));
+        assert!(commands.contains(&ContextCommand::MoveTo));
     }
 }

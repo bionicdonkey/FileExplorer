@@ -8,7 +8,9 @@ use gtk::{Align, Box as GtkBox, Button, CheckButton, Label, MenuButton, Orientat
 
 use crate::core::location::Location;
 use crate::core::navigation::NavigationHistory;
+use crate::core::operations::FileOperations;
 use crate::core::{GridSize, GroupField, SortDirection, SortField, ViewMode, ViewOptions, ViewPreferencesStore};
+use crate::ui::context_menu::{ContextCommand, ContextTarget};
 use crate::ui::file_view::FileView;
 use crate::ui::header::{HeaderControls, NavigationAction};
 use crate::ui::sidebar::Sidebar;
@@ -22,13 +24,22 @@ struct TabData {
     page: TabPage,
 }
 
+#[derive(Clone, Copy)]
+enum ClipboardOperation { Copy, Move }
+
+#[derive(Clone)]
+struct FileClipboard { path: PathBuf, operation: ClipboardOperation }
+
 pub struct ExplorerWindow {
     window: ApplicationWindow,
 }
 
 impl ExplorerWindow {
     pub fn new(app: &Application) -> Self {
-        let initial = Location::home().path().to_path_buf();
+        Self::new_at(app, Location::home().path().to_path_buf())
+    }
+
+    fn new_at(app: &Application, initial: PathBuf) -> Self {
         let window = ApplicationWindow::builder()
             .application(app)
             .title("Zorin Explorer")
@@ -59,6 +70,7 @@ impl ExplorerWindow {
         let header_controls = HeaderControls::new(initial_location.clone());
         let tabs_data: Rc<RefCell<Vec<TabData>>> = Rc::new(RefCell::new(Vec::new()));
         let preferences = Rc::new(RefCell::new(ViewPreferencesStore::load_default().unwrap_or_else(|_| ViewPreferencesStore::in_memory())));
+        let clipboard: Rc<RefCell<Option<FileClipboard>>> = Rc::new(RefCell::new(None));
         let first_view = FileView::new(initial_location.clone());
         first_view.set_options(preferences.borrow().options_for(&initial, &[]));
         let first_page = tabs.view.append(&first_view.widget);
@@ -113,12 +125,14 @@ impl ExplorerWindow {
         toolbar.set_content(Some(&body));
         window.set_content(Some(&toolbar));
 
-        wire_tab(first_page.clone(), &tabs_data, &tabs.view, &header_controls, &preferences);
+        wire_tab(first_page.clone(), &tabs_data, &tabs.view, &header_controls, &preferences, app, &clipboard);
 
         let new_data = tabs_data.clone();
         let new_tabs = tabs.view.clone();
         let new_header = header_controls.clone();
         let new_preferences = preferences.clone();
+        let new_app = app.clone();
+        let new_clipboard = clipboard.clone();
         new_tab.connect_clicked(move |_| {
             let path = Location::home().path().to_path_buf();
             let location = Rc::new(RefCell::new(path.clone()));
@@ -127,7 +141,7 @@ impl ExplorerWindow {
             let page = new_tabs.append(&view.widget);
             page.set_title(&tab_title(&path));
             new_data.borrow_mut().push(TabData { view, location, history: history_with(path), page: page.clone() });
-            wire_tab(page.clone(), &new_data, &new_tabs, &new_header, &new_preferences);
+            wire_tab(page.clone(), &new_data, &new_tabs, &new_header, &new_preferences, &new_app, &new_clipboard);
             new_tabs.set_selected_page(&page);
         });
 
@@ -204,7 +218,7 @@ fn history_with(path: PathBuf) -> Rc<RefCell<NavigationHistory>> {
     history
 }
 
-fn wire_tab(page: TabPage, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, header: &HeaderControls, preferences: &Rc<RefCell<ViewPreferencesStore>>) {
+fn wire_tab(page: TabPage, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, header: &HeaderControls, preferences: &Rc<RefCell<ViewPreferencesStore>>, app: &Application, clipboard: &Rc<RefCell<Option<FileClipboard>>>) {
     let view = data.borrow().iter().find(|tab| tab.page == page).map(|tab| tab.view.clone())
         .expect("a tab page should have corresponding tab data");
     let options_data = data.clone();
@@ -216,16 +230,109 @@ fn wire_tab(page: TabPage, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, hea
             persist_options(&mut options_preferences.borrow_mut(), &path, options);
         }
     });
-    let data = data.clone();
-    let tabs = tabs.clone();
-    let header = header.clone();
-    let preferences = preferences.clone();
+    let navigation_data = data.clone();
+    let navigation_tabs = tabs.clone();
+    let navigation_header = header.clone();
+    let navigation_preferences = preferences.clone();
+    let navigation_page = page.clone();
     view.set_navigation_handler(move |path| {
-        let index = { data.borrow().iter().position(|tab| tab.page == page) };
+        let index = { navigation_data.borrow().iter().position(|tab| tab.page == navigation_page) };
         if let Some(index) = index {
-            navigate_tab(index, path, &data, &tabs, &header, &preferences, true);
+            navigate_tab(index, path, &navigation_data, &navigation_tabs, &navigation_header, &navigation_preferences, true);
         }
     });
+
+    let command_data = data.clone();
+    let command_tabs = tabs.clone();
+    let command_header = header.clone();
+    let command_preferences = preferences.clone();
+    let command_page = page.clone();
+    let command_app = app.clone();
+    let command_clipboard = clipboard.clone();
+    let command_view = view.clone();
+    view.set_context_handler(move |target, command| {
+        let path = target_path(&target);
+        match command {
+            ContextCommand::OpenInNewTab => {
+                if let Some(path) = path {
+                    add_tab_at(path, &command_data, &command_tabs, &command_header, &command_preferences, &command_app, &command_clipboard);
+                }
+            }
+            ContextCommand::OpenInNewWindow => {
+                if let Some(path) = path { ExplorerWindow::new_at(&command_app, path).present(); }
+            }
+            ContextCommand::OpenInTerminal => {
+                if let Some(path) = path { open_terminal(&path); }
+            }
+            ContextCommand::Copy | ContextCommand::Cut => {
+                if let Some(path) = path {
+                    *command_clipboard.borrow_mut() = Some(FileClipboard { path, operation: if command == ContextCommand::Copy { ClipboardOperation::Copy } else { ClipboardOperation::Move } });
+                }
+            }
+            ContextCommand::CopyFilename => {
+                if let Some(path) = path { copy_text(&command_view, path.file_name().and_then(|name| name.to_str()).unwrap_or_default()); }
+            }
+            ContextCommand::CopyFullPath => {
+                if let Some(path) = path { copy_text(&command_view, &path.display().to_string()); }
+            }
+            ContextCommand::CopyTo | ContextCommand::MoveTo => {
+                if let Some(path) = path { choose_destination(&command_view, path, command == ContextCommand::MoveTo); }
+            }
+            ContextCommand::Paste => {
+                let destination = command_data.borrow().iter().find(|tab| tab.page == command_page).map(|tab| tab.location.borrow().clone());
+                if let (Some(clipboard), Some(destination)) = (command_clipboard.borrow().clone(), destination) {
+                    let _ = match clipboard.operation { ClipboardOperation::Copy => FileOperations::copy(&[clipboard.path], &destination), ClipboardOperation::Move => FileOperations::move_to(&[clipboard.path], &destination) };
+                    command_view.set_location(destination);
+                }
+            }
+            _ => {}
+        }
+    });
+}
+
+fn target_path(target: &ContextTarget) -> Option<PathBuf> {
+    match target {
+        ContextTarget::File { path, .. } | ContextTarget::Folder(path) | ContextTarget::SidebarLocation(path) => Some(path.clone()),
+        ContextTarget::Background(path) => Some(path.clone()),
+        ContextTarget::Tab => None,
+    }
+}
+
+fn add_tab_at(path: PathBuf, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, header: &HeaderControls, preferences: &Rc<RefCell<ViewPreferencesStore>>, app: &Application, clipboard: &Rc<RefCell<Option<FileClipboard>>>) {
+    let location = Rc::new(RefCell::new(path.clone()));
+    let view = FileView::new(location.clone());
+    view.set_options(preferences.borrow().options_for(&path, &[]));
+    let page = tabs.append(&view.widget);
+    page.set_title(&tab_title(&path));
+    data.borrow_mut().push(TabData { view, location, history: history_with(path), page: page.clone() });
+    wire_tab(page.clone(), data, tabs, header, preferences, app, clipboard);
+    tabs.set_selected_page(&page);
+}
+
+fn copy_text(view: &FileView, text: &str) {
+    view.widget.display().clipboard().set_text(text);
+}
+
+fn open_terminal(path: &Path) {
+    for terminal in ["kgx", "gnome-terminal", "x-terminal-emulator"] {
+        if std::process::Command::new(terminal).current_dir(path).spawn().is_ok() { break; }
+    }
+}
+
+#[allow(deprecated)]
+fn choose_destination(view: &FileView, source: PathBuf, move_source: bool) {
+    let chooser = gtk::FileChooserNative::new(Some(if move_source { "Move To" } else { "Copy To" }), view.widget.root().and_downcast_ref::<gtk::Window>(), gtk::FileChooserAction::SelectFolder, Some(if move_source { "Move" } else { "Copy" }), Some("Cancel"));
+    let reload = view.clone();
+    chooser.connect_response(move |chooser, response| {
+        if response == gtk::ResponseType::Accept {
+            if let Some(destination) = chooser.file().and_then(|file| file.path()) {
+                let _ = if move_source { FileOperations::move_to(&[source.clone()], &destination) } else { FileOperations::copy(&[source.clone()], &destination) };
+                reload.set_location(reload.location());
+            }
+        }
+        chooser.destroy();
+    });
+    chooser.show();
 }
 
 fn navigate_tab(index: usize, path: PathBuf, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, header: &HeaderControls, preferences: &Rc<RefCell<ViewPreferencesStore>>, record_history: bool) {

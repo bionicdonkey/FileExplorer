@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use gtk::prelude::*;
-use gtk::{Box as GtkBox, Button, ColumnView, ColumnViewColumn, CustomSorter, FlowBox, GestureClick, Image, Label, NoSelection, Orientation, Popover, ScrolledWindow, SignalListItemFactory, SortListModel};
+use gtk::{Box as GtkBox, Button, ColumnView, ColumnViewColumn, CustomSorter, FlowBox, GestureClick, Image, Label, NoSelection, Orientation, Popover, ScrolledWindow, Separator, SignalListItemFactory, SortListModel};
 
 use crate::core::directory_model::DirectoryModel;
 use crate::core::file_item::FileItem;
@@ -59,6 +59,8 @@ impl FileView {
     }
 
     pub fn options(&self) -> ViewOptions { self.options.borrow().clone() }
+
+    pub fn location(&self) -> PathBuf { self.location.borrow().clone() }
 
     fn reload(&self) {
         let options = self.options();
@@ -214,37 +216,119 @@ fn grid_tile_label(name: &str, width_chars: i32) -> Label {
 fn show_item_context_menu(parent: &impl IsA<gtk::Widget>, x: f64, y: f64, target: ContextTarget, view: &FileView) {
     let popover = Popover::new();
     popover.set_parent(parent);
+    popover.set_autohide(true);
     popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
     let menu = GtkBox::new(Orientation::Vertical, 2);
     menu.set_margin_top(6); menu.set_margin_bottom(6);
     for command in item_commands(&target) {
         if command == ContextCommand::OpenWith {
-            let button = Button::with_label("Open With");
-            let popover = popover.clone();
-            let target = target.clone();
-            button.connect_clicked(move |_| {
-            let apps = GtkBox::new(Orientation::Vertical, 2); apps.set_margin_top(6); apps.set_margin_bottom(6);
-            let content_type = match &target { ContextTarget::File { content_type, .. } => content_type, _ => unreachable!() };
-            for app in open_with_apps(content_type) {
-                let app_button = Button::with_label(&app.display_name());
-                let path = match &target { ContextTarget::File { path, .. } => path.clone(), _ => unreachable!() };
-                app_button.connect_clicked(move |_| { let _ = app.launch(&[gio::File::for_path(&path)], None::<&gio::AppLaunchContext>); });
-                apps.append(&app_button);
-            }
-            popover.set_child(Some(&apps)); }); menu.append(&button);
+            menu.append(&open_with_submenu(&target));
             continue;
         }
-        let button = Button::with_label(context_command_label(command));
-        let target = target.clone(); let view = view.clone(); let popover = popover.clone();
-        button.connect_clicked(move |_| { popover.popdown(); if command == ContextCommand::Open { if let ContextTarget::Folder(path) | ContextTarget::File { path, .. } = &target { activate_path(&view, path.clone()); return; } } if let Some(callback) = view.on_context_command.borrow().as_ref() { callback(target.clone(), command); } });
-        menu.append(&button);
+        if command == ContextCommand::Copy {
+            menu.append(&command_submenu("Copy ›", &target, view, &[ContextCommand::Copy, ContextCommand::CopyFilename, ContextCommand::CopyFullPath, ContextCommand::CopyTo]));
+            continue;
+        }
+        if command == ContextCommand::Cut {
+            menu.append(&command_submenu("Move ›", &target, view, &[ContextCommand::Cut, ContextCommand::MoveTo]));
+            continue;
+        }
+        if matches!(command, ContextCommand::CopyFilename | ContextCommand::CopyFullPath | ContextCommand::CopyTo | ContextCommand::MoveTo) {
+            continue;
+        }
+        menu.append(&command_button(context_command_label(command), target.clone(), view.clone(), command, Some(popover.clone())));
     }
     popover.set_child(Some(&menu));
     popover.popup();
 }
 
+fn command_submenu(label: &str, target: &ContextTarget, view: &FileView, commands: &[ContextCommand]) -> Button {
+    let button = Button::with_label(label);
+    let submenu_parent = button.clone();
+    let target = target.clone();
+    let view = view.clone();
+    let commands = commands.to_vec();
+    button.connect_clicked(move |_| {
+        let menu = GtkBox::new(Orientation::Vertical, 2);
+        menu.set_margin_top(6); menu.set_margin_bottom(6);
+        for command in &commands {
+            menu.append(&command_button(context_command_label(*command), target.clone(), view.clone(), *command, None));
+        }
+        show_submenu(&submenu_parent, &menu);
+    });
+    button
+}
+
+fn open_with_submenu(target: &ContextTarget) -> Button {
+    let button = Button::with_label("Open With ›");
+    let submenu_parent = button.clone();
+    let target = target.clone();
+    button.connect_clicked(move |_| {
+        let (path, content_type) = match &target {
+            ContextTarget::File { path, content_type } => (path.clone(), content_type.clone()),
+            _ => return,
+        };
+        let menu = GtkBox::new(Orientation::Vertical, 2);
+        menu.set_margin_top(6); menu.set_margin_bottom(6);
+        for app in open_with_apps(&content_type) {
+            let app_button = Button::with_label(&app.display_name());
+            let path = path.clone();
+            app_button.connect_clicked(move |_| { let _ = app.launch(&[gio::File::for_path(&path)], None::<&gio::AppLaunchContext>); });
+            menu.append(&app_button);
+        }
+        menu.append(&Separator::new(Orientation::Horizontal));
+        let other = Button::with_label("Other Application…");
+        let parent = submenu_parent.clone();
+        other.connect_clicked(move |_| show_application_chooser(&parent, path.clone(), content_type.clone()));
+        menu.append(&other);
+        show_submenu(&submenu_parent, &menu);
+    });
+    button
+}
+
+fn show_submenu(parent: &Button, menu: &GtkBox) {
+    let submenu = Popover::new();
+    submenu.set_parent(parent);
+    submenu.set_position(gtk::PositionType::Right);
+    submenu.set_autohide(true);
+    submenu.set_child(Some(menu));
+    submenu.popup();
+}
+
+#[allow(deprecated)]
+fn show_application_chooser(parent: &Button, path: PathBuf, content_type: String) {
+    let window = parent.root().and_downcast::<gtk::Window>();
+    let dialog = gtk::AppChooserDialog::for_content_type(window.as_ref(), gtk::DialogFlags::MODAL, &content_type);
+    dialog.connect_response(move |dialog, response| {
+        if response == gtk::ResponseType::Ok {
+            if let Some(app) = dialog.app_info() {
+                let _ = app.launch(&[gio::File::for_path(&path)], None::<&gio::AppLaunchContext>);
+            }
+        }
+        dialog.close();
+    });
+    dialog.present();
+}
+
+fn command_button(label: &str, target: ContextTarget, view: FileView, command: ContextCommand, parent: Option<Popover>) -> Button {
+    let button = Button::with_label(label);
+    button.connect_clicked(move |_| {
+        if let Some(popover) = &parent { popover.popdown(); }
+        if command == ContextCommand::Open {
+            if let ContextTarget::Folder(path) | ContextTarget::File { path, .. } = &target {
+                activate_path(&view, path.clone());
+                return;
+            }
+        }
+        if let Some(callback) = view.on_context_command.borrow().as_ref() {
+            callback(target.clone(), command);
+        }
+    });
+    button
+}
+
 fn context_command_label(command: ContextCommand) -> &'static str {
-    match command { ContextCommand::Open => "Open", ContextCommand::OpenInNewTab => "Open in New Tab", ContextCommand::OpenInNewWindow => "Open in New Window", ContextCommand::OpenInTerminal => "Open in Terminal", ContextCommand::Cut => "Cut", ContextCommand::Copy => "Copy", ContextCommand::Rename => "Rename", ContextCommand::MoveToTrash => "Move to Trash", ContextCommand::Properties => "Properties", ContextCommand::NewFolder => "New Folder", ContextCommand::Paste => "Paste", ContextCommand::Refresh => "Refresh", ContextCommand::CloseTab => "Close Tab", ContextCommand::CloseOtherTabs => "Close Other Tabs", ContextCommand::DuplicateTab => "Duplicate Tab", ContextCommand::OpenWith => "Open With" }
+    match command { ContextCommand::Open => "Open", ContextCommand::OpenInNewTab => "Open in New Tab", ContextCommand::OpenInNewWindow => "Open in New Window", ContextCommand::OpenInTerminal => "Open in Terminal", ContextCommand::Cut => "Cut", ContextCommand::Copy => "Copy", ContextCommand::CopyFilename => "Copy Filename", ContextCommand::CopyFullPath => "Copy Full Path", ContextCommand::CopyTo => "Copy To…", ContextCommand::MoveTo => "Move To…", ContextCommand::Rename => "Rename", ContextCommand::MoveToTrash => "Move to Trash", ContextCommand::Properties => "Properties", ContextCommand::NewFolder => "New Folder", ContextCommand::Paste => "Paste", ContextCommand::Refresh => "Refresh", ContextCommand::CloseTab => "Close Tab", ContextCommand::CloseOtherTabs => "Close Other Tabs", ContextCommand::DuplicateTab => "Duplicate Tab", ContextCommand::OpenWith => "Open With" }
 }
 
 fn column_title(column: ListColumn) -> &'static str {
