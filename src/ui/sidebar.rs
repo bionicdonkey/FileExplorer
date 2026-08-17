@@ -17,6 +17,8 @@ pub enum SidebarAction {
     OpenUri(String),
     Pin(PathBuf),
     Unpin(PathBuf),
+    AddNetworkLocation,
+    UnpinRemote(String),
 }
 
 #[derive(Clone)]
@@ -62,7 +64,20 @@ impl Sidebar {
             heading.add_css_class("heading");
             heading.add_css_class("sidebar-section-heading");
             heading.set_xalign(0.0);
-            self.content.append(&heading);
+            if section.title == "Network & online" {
+                let heading_row = GtkBox::new(Orientation::Horizontal, 0);
+                heading.set_hexpand(true);
+                let add = Button::from_icon_name("list-add-symbolic");
+                add.add_css_class("flat");
+                add.set_tooltip_text(Some("Add network location"));
+                let action = self.on_action.clone();
+                add.connect_clicked(move |_| action(SidebarAction::AddNetworkLocation));
+                heading_row.append(&heading);
+                heading_row.append(&add);
+                self.content.append(&heading_row);
+            } else {
+                self.content.append(&heading);
+            }
 
             if section.nodes.is_empty() && section.title == "Quick access" {
                 let empty = Label::new(Some("Pin folders here for quick access"));
@@ -104,7 +119,7 @@ impl Sidebar {
             chevron.set_pixel_size(14);
             expander.set_child(Some(&chevron));
             let children_model = model.clone();
-            let child_path = node.location.local_path().map(ToOwned::to_owned);
+            let child_location = node.location.clone();
             let children_for_toggle = children.clone();
             let children_action = on_action.clone();
             let children_active_path = active_path.clone();
@@ -114,17 +129,15 @@ impl Sidebar {
                 let icon = if expanded { "pan-down-symbolic" } else { "pan-end-symbolic" };
                 button.set_child(Some(&Image::from_icon_name(icon)));
                 if expanded && children_for_toggle.first_child().is_none() {
-                    if let Some(path) = &child_path {
-                        for child in children_model.borrow().children_for(path) {
-                            Self::append_node_inner(
-                                &children_for_toggle,
-                                child,
-                                depth + 1,
-                                children_model.clone(),
-                                children_action.clone(),
-                                children_active_path.clone(),
-                            );
-                        }
+                    for child in children_model.borrow().children_for_location(&child_location) {
+                        Self::append_node_inner(
+                            &children_for_toggle,
+                            child,
+                            depth + 1,
+                            children_model.clone(),
+                            children_action.clone(),
+                            children_active_path.clone(),
+                        );
                     }
                 }
             });
@@ -169,8 +182,8 @@ impl Sidebar {
     }
 
     fn add_context_menu(button: &Button, location: &SidebarLocation, model: Rc<RefCell<SidebarModel>>, action: Rc<dyn Fn(SidebarAction)>) {
-        let Some(path) = location.local_path().map(ToOwned::to_owned) else { return; };
         let context_button = button.clone();
+        let location = location.clone();
         let gesture = GestureClick::new();
         gesture.set_button(3);
         gesture.connect_pressed(move |gesture, _, x, y| {
@@ -182,6 +195,26 @@ impl Sidebar {
             let menu = GtkBox::new(Orientation::Vertical, 2);
             menu.set_margin_top(6);
             menu.set_margin_bottom(6);
+            if location.local_path().is_none() {
+                let open = Button::with_label("Open");
+                let open_action = action.clone();
+                let popover_for_open = popover.clone();
+                let uri = location.uri();
+                open.connect_clicked(move |_| { popover_for_open.popdown(); open_action(SidebarAction::OpenUri(uri.clone())); });
+                menu.append(&open);
+                if model.borrow().preferences().remote_pins().iter().any(|pinned| pinned == &location.uri()) {
+                    let unpin = Button::with_label("Unpin from Network & online");
+                    let action = action.clone();
+                    let popover_for_unpin = popover.clone();
+                    let uri = location.uri();
+                    unpin.connect_clicked(move |_| { popover_for_unpin.popdown(); action(SidebarAction::UnpinRemote(uri.clone())); });
+                    menu.append(&unpin);
+                }
+                popover.set_child(Some(&menu));
+                popover.popup();
+                return;
+            }
+            let path = location.local_path().expect("local location was checked").to_path_buf();
             for (label, sidebar_action) in [
                 ("Open", SidebarAction::Open(path.clone())),
                 ("Open in New Tab", SidebarAction::OpenInNewTab(path.clone())),

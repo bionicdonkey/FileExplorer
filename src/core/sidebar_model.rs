@@ -55,8 +55,8 @@ impl SidebarNode {
         Self { location: SidebarLocation::from_path(path, label, icon_name), expandable, children: Vec::new() }
     }
 
-    fn remote(uri: String, label: impl Into<String>, icon_name: impl Into<String>) -> Self {
-        Self { location: SidebarLocation::from_uri(uri, label, icon_name), expandable: false, children: Vec::new() }
+    fn remote(uri: String, label: impl Into<String>, icon_name: impl Into<String>, expandable: bool) -> Self {
+        Self { location: SidebarLocation::from_uri(uri, label, icon_name), expandable, children: Vec::new() }
     }
 }
 
@@ -70,16 +70,19 @@ pub struct SidebarSection {
 struct StoredPreferences {
     #[serde(default)]
     pins: Vec<PathBuf>,
+    #[serde(default)]
+    remote_pins: Vec<String>,
 }
 
 pub struct SidebarPreferences {
     path: Option<PathBuf>,
     pins: Vec<PathBuf>,
+    remote_pins: Vec<String>,
     needs_defaults: bool,
 }
 
 impl SidebarPreferences {
-    pub fn in_memory() -> Self { Self { path: None, pins: Vec::new(), needs_defaults: false } }
+    pub fn in_memory() -> Self { Self { path: None, pins: Vec::new(), remote_pins: Vec::new(), needs_defaults: false } }
 
     pub fn load_default() -> io::Result<Self> {
         let config_home = env::var_os("XDG_CONFIG_HOME")
@@ -90,15 +93,17 @@ impl SidebarPreferences {
     }
 
     pub fn load_from(path: PathBuf) -> io::Result<Self> {
-        if !path.exists() { return Ok(Self { path: Some(path), pins: Vec::new(), needs_defaults: true }); }
+        if !path.exists() { return Ok(Self { path: Some(path), pins: Vec::new(), remote_pins: Vec::new(), needs_defaults: true }); }
         let stored = serde_json::from_slice::<StoredPreferences>(&fs::read(&path)?)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        let mut preferences = Self { path: Some(path), pins: Vec::new(), needs_defaults: false };
+        let mut preferences = Self { path: Some(path), pins: Vec::new(), remote_pins: Vec::new(), needs_defaults: false };
         for pin in stored.pins { preferences.pin(pin); }
+        for uri in stored.remote_pins { let _ = preferences.pin_remote(uri); }
         Ok(preferences)
     }
 
     pub fn pins(&self) -> &[PathBuf] { &self.pins }
+    pub fn remote_pins(&self) -> &[String] { &self.remote_pins }
 
     pub fn pin(&mut self, path: PathBuf) {
         let path = normalized_path(path);
@@ -112,11 +117,19 @@ impl SidebarPreferences {
 
     pub fn is_pinned(&self, path: &Path) -> bool { self.pins.iter().any(|pinned| pinned == &normalized_path(path.to_path_buf())) }
 
+    pub fn pin_remote(&mut self, uri: String) -> Result<(), String> {
+        let uri = normalized_remote_uri(&uri)?;
+        if !self.remote_pins.contains(&uri) { self.remote_pins.push(uri); }
+        Ok(())
+    }
+
+    pub fn unpin_remote(&mut self, uri: &str) { self.remote_pins.retain(|pinned| pinned != uri); }
+
     pub fn save(&self) -> io::Result<()> {
         let Some(path) = &self.path else { return Ok(()); };
         let parent = path.parent().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "sidebar preference path has no parent"))?;
         fs::create_dir_all(parent)?;
-        let bytes = serde_json::to_vec_pretty(&StoredPreferences { pins: self.pins.clone() })
+        let bytes = serde_json::to_vec_pretty(&StoredPreferences { pins: self.pins.clone(), remote_pins: self.remote_pins.clone() })
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         let temporary = path.with_extension("json.tmp");
         fs::write(&temporary, bytes)?;
@@ -150,7 +163,14 @@ impl SidebarModel {
     pub fn preferences(&self) -> &SidebarPreferences { &self.preferences }
     pub fn preferences_mut(&mut self) -> &mut SidebarPreferences { &mut self.preferences }
 
-    pub fn children_for(&self, path: &Path) -> Vec<SidebarNode> {
+    pub fn children_for_location(&self, location: &SidebarLocation) -> Vec<SidebarNode> {
+        match location.local_path() {
+            Some(path) => self.local_children(path),
+            None => self.remote_children(&location.uri()),
+        }
+    }
+
+    fn local_children(&self, path: &Path) -> Vec<SidebarNode> {
         let mut children = match fs::read_dir(path) { Ok(entries) => entries.flatten().filter_map(|entry| {
             let child = entry.path();
             child.is_dir().then(|| SidebarNode::local(child.clone(), entry.file_name().to_string_lossy(), "folder-symbolic", true))
@@ -178,7 +198,13 @@ impl SidebarModel {
     }
 
     fn network_and_online(&self) -> SidebarSection {
-        SidebarSection { title: "Network & online", nodes: self.remote_mounts() }
+        let mut nodes = vec![
+            SidebarNode::remote("network:///".into(), "Browse Network", "network-workgroup-symbolic", true),
+            SidebarNode::remote("computer:///".into(), "Online accounts", "folder-remote-symbolic", true),
+        ];
+        nodes.extend(self.preferences.remote_pins().iter().map(|uri| SidebarNode::remote(uri.clone(), remote_label(uri), "folder-remote-symbolic", true)));
+        nodes.extend(self.remote_mounts());
+        SidebarSection { title: "Network & online", nodes }
     }
 
     fn local_mounts(&self) -> Vec<SidebarNode> {
@@ -193,8 +219,21 @@ impl SidebarModel {
     fn remote_mounts(&self) -> Vec<SidebarNode> {
         gio::VolumeMonitor::get().mounts().into_iter().filter_map(|mount| {
             let root = mount.root();
-            root.path().is_none().then(|| SidebarNode::remote(root.uri().to_string(), mount.name(), mount_icon_name(&mount, "folder-remote-symbolic")))
+            root.path().is_none().then(|| SidebarNode::remote(root.uri().to_string(), mount.name(), mount_icon_name(&mount, "folder-remote-symbolic"), true))
         }).collect()
+    }
+
+    fn remote_children(&self, uri: &str) -> Vec<SidebarNode> {
+        let file = gio::File::for_uri(uri);
+        let Ok(enumerator) = file.enumerate_children("standard::display-name,standard::type,standard::icon", gio::FileQueryInfoFlags::NONE, gio::Cancellable::NONE) else { return Vec::new(); };
+        let mut children = Vec::new();
+        while let Ok(Some(info)) = enumerator.next_file(gio::Cancellable::NONE) {
+            let child = enumerator.child(&info);
+            let icon = info.icon().and_then(themed_icon_name).unwrap_or_else(|| "folder-remote-symbolic".into());
+            children.push(SidebarNode::remote(child.uri().to_string(), info.display_name(), icon, true));
+        }
+        children.sort_by(|left, right| left.location.label.cmp(&right.location.label));
+        children
     }
 }
 
@@ -217,12 +256,30 @@ fn standard_folder_icon(path: &Path) -> &'static str {
 }
 
 fn mount_icon_name(mount: &gio::Mount, fallback: &str) -> String {
-    mount.icon()
+    themed_icon_name(mount.icon())
+        .unwrap_or_else(|| fallback.to_owned())
+}
+
+fn themed_icon_name(icon: gio::Icon) -> Option<String> {
+    icon
         .downcast::<gio::ThemedIcon>()
         .ok()
         .and_then(|icon| icon.names().into_iter().next())
         .map(|name| name.to_string())
-        .unwrap_or_else(|| fallback.to_owned())
+}
+
+fn normalized_remote_uri(uri: &str) -> Result<String, String> {
+    let uri = uri.trim().trim_end_matches('/');
+    let scheme = uri.split_once("://").map(|(scheme, _)| scheme.to_ascii_lowercase())
+        .ok_or_else(|| "Enter a full network address, such as smb://nas.local/share".to_owned())?;
+    if !matches!(scheme.as_str(), "smb" | "sftp" | "ftp" | "dav" | "davs") {
+        return Err("Use an SMB, SFTP, FTP, WebDAV, or secure WebDAV address".into());
+    }
+    Ok(uri.to_owned())
+}
+
+fn remote_label(uri: &str) -> String {
+    uri.trim_end_matches('/').rsplit('/').next().filter(|name| !name.is_empty()).unwrap_or(uri).to_owned()
 }
 
 #[cfg(test)]
@@ -260,5 +317,16 @@ mod tests {
     fn local_sidebar_location_provides_a_navigation_path() {
         let location = SidebarLocation::from_path(PathBuf::from("/tmp"), "tmp", "folder-symbolic");
         assert_eq!(location.local_path(), Some(Path::new("/tmp")));
+    }
+
+    #[test]
+    fn remote_pin_is_saved_once_and_can_be_removed() {
+        let mut preferences = SidebarPreferences::in_memory();
+        preferences.pin_remote("smb://nas.local/media".into()).unwrap();
+        preferences.pin_remote("smb://nas.local/media".into()).unwrap();
+
+        assert_eq!(preferences.remote_pins(), ["smb://nas.local/media"]);
+        preferences.unpin_remote("smb://nas.local/media");
+        assert!(preferences.remote_pins().is_empty());
     }
 }

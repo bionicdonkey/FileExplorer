@@ -101,6 +101,7 @@ impl ExplorerWindow {
         let sidebar_context_preferences = preferences.clone();
         let sidebar_context_app = app.clone();
         let sidebar_context_clipboard = clipboard.clone();
+        let sidebar_window = window.clone();
         let sidebar_model_actions = sidebar_model.clone();
         let sidebar_holder_actions = sidebar_holder.clone();
         let sidebar = Sidebar::new(sidebar_model, move |action| match action {
@@ -123,6 +124,14 @@ impl ExplorerWindow {
             SidebarAction::Unpin(path) => {
                 let mut model = sidebar_model_actions.borrow_mut();
                 model.preferences_mut().unpin(&path);
+                let _ = model.preferences().save();
+                drop(model);
+                if let Some(sidebar) = sidebar_holder_actions.borrow().as_ref() { sidebar.refresh(); }
+            }
+            SidebarAction::AddNetworkLocation => show_network_location_dialog(&sidebar_window, sidebar_model_actions.clone(), sidebar_holder_actions.clone()),
+            SidebarAction::UnpinRemote(uri) => {
+                let mut model = sidebar_model_actions.borrow_mut();
+                model.preferences_mut().unpin_remote(&uri);
                 let _ = model.preferences().save();
                 drop(model);
                 if let Some(sidebar) = sidebar_holder_actions.borrow().as_ref() { sidebar.refresh(); }
@@ -446,6 +455,44 @@ fn open_terminal(path: &Path) {
     for terminal in ["kgx", "gnome-terminal", "x-terminal-emulator"] {
         if std::process::Command::new(terminal).current_dir(path).spawn().is_ok() { break; }
     }
+}
+
+#[allow(deprecated)]
+fn show_network_location_dialog(parent: &ApplicationWindow, model: Rc<RefCell<SidebarModel>>, sidebar: Rc<RefCell<Option<Sidebar>>>) {
+    let dialog = gtk::Dialog::new();
+    dialog.set_title(Some("Add Network Location"));
+    dialog.set_modal(true);
+    dialog.set_transient_for(Some(parent));
+    dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+    dialog.add_button("Add", gtk::ResponseType::Accept);
+    dialog.set_default_response(gtk::ResponseType::Accept);
+    let content = dialog.content_area();
+    content.set_spacing(8);
+    content.set_margin_top(12); content.set_margin_bottom(12); content.set_margin_start(12); content.set_margin_end(12);
+    let prompt = Label::new(Some("Network address (for example smb://nas.local/share)"));
+    prompt.set_xalign(0.0);
+    content.append(&prompt);
+    let entry = Entry::new();
+    entry.set_placeholder_text(Some("smb://server/share"));
+    entry.set_activates_default(true);
+    content.append(&entry);
+    let error = Label::new(None);
+    error.add_css_class("error");
+    error.set_xalign(0.0);
+    error.set_wrap(true);
+    content.append(&error);
+    dialog.connect_response(move |dialog, response| {
+        if response != gtk::ResponseType::Accept { dialog.close(); return; }
+        match model.borrow_mut().preferences_mut().pin_remote(entry.text().to_string()) {
+            Ok(()) => {
+                let _ = model.borrow().preferences().save();
+                if let Some(sidebar) = sidebar.borrow().as_ref() { sidebar.refresh(); }
+                dialog.close();
+            }
+            Err(message) => error.set_text(&message),
+        }
+    });
+    dialog.present();
 }
 
 #[allow(deprecated)]
