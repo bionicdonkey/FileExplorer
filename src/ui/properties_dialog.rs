@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use gtk::prelude::*;
-use gtk::{Box as GtkBox, CheckButton, Entry, Grid, Image, Label, Orientation, Stack, StackSwitcher};
+use gtk::{Box as GtkBox, CheckButton, Entry, Grid, HeaderBar, Image, Label, Orientation, Stack, StackSwitcher};
 
 use crate::core::{PermissionBits, PropertyDetails};
 
@@ -13,11 +13,15 @@ impl PropertiesDialog {
         let Ok(details) = PropertyDetails::load(&path) else { return; };
         let dialog = gtk::Dialog::new();
         dialog.set_title(Some(&format!("Properties — {}", details.name)));
-        dialog.set_modal(true);
-        dialog.set_decorated(false);
+        dialog.set_modal(false);
+        dialog.set_decorated(true);
         dialog.set_resizable(false);
         dialog.set_default_size(520, 480);
         dialog.set_transient_for(parent);
+        let titlebar = HeaderBar::new();
+        titlebar.set_show_title_buttons(false);
+        titlebar.set_title_widget(Some(&Label::new(Some(&format!("Properties — {}", details.name)))));
+        dialog.set_titlebar(Some(&titlebar));
         dialog.add_button("OK", gtk::ResponseType::Ok);
         let apply = dialog.add_button("Apply", gtk::ResponseType::Apply).downcast::<gtk::Button>().expect("dialog action should be a button");
         dialog.add_button("Cancel", gtk::ResponseType::Cancel);
