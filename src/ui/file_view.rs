@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 
+use gio::prelude::*;
 use gtk::prelude::*;
 use gtk::{Box as GtkBox, Button, ColumnView, ColumnViewColumn, CustomSorter, FlowBox, GestureClick, Image, Label, NoSelection, Orientation, Popover, ScrolledWindow, Separator, SignalListItemFactory, SortListModel};
 
@@ -51,8 +52,35 @@ impl FileView {
     }
 
     pub fn set_uri(&self, uri: String) {
-        *self.remote_uri.borrow_mut() = Some(uri);
-        self.reload();
+        *self.remote_uri.borrow_mut() = Some(uri.clone());
+        self.widget.set_child(Some(&Label::new(Some("Connecting to remote location…"))));
+
+        let location = gio::File::for_uri(&uri);
+        let is_mountable = location
+            .query_info("standard::type", gio::FileQueryInfoFlags::NONE, gio::Cancellable::NONE)
+            .map(|info| is_mountable_file_type(info.file_type()))
+            .unwrap_or(false);
+        let parent = self.widget.root().and_downcast::<gtk::Window>();
+        let operation = gtk::MountOperation::new(parent.as_ref());
+        let keep_operation = operation.clone();
+        let view = self.clone();
+
+        if is_mountable {
+            location.mount_mountable(gio::MountMountFlags::NONE, Some(&operation), gio::Cancellable::NONE, move |result| {
+                let _keep_operation_alive = &keep_operation;
+                if let Ok(mounted_root) = result {
+                    *view.remote_uri.borrow_mut() = Some(mounted_root.uri().to_string());
+                }
+                view.reload();
+            });
+        } else {
+            location.mount_enclosing_volume(gio::MountMountFlags::NONE, Some(&operation), gio::Cancellable::NONE, move |_| {
+                let _keep_operation_alive = &keep_operation;
+                // This operation reports an error when the location is already mounted;
+                // in either case enumeration is the definitive result.
+                view.reload();
+            });
+        }
     }
 
     pub fn set_navigation_handler<F: Fn(PathBuf) + 'static>(&self, callback: F) {
@@ -222,6 +250,10 @@ impl FileView {
 /// lists may be reordered by GTK's live column sorter.
 fn uses_native_row_sorting(group_field: GroupField) -> bool {
     group_field == GroupField::None
+}
+
+fn is_mountable_file_type(file_type: gio::FileType) -> bool {
+    file_type == gio::FileType::Mountable
 }
 
 fn grid_tile_label(name: &str, width_chars: i32) -> Label {
@@ -522,7 +554,7 @@ mod tests {
 
     use gtk::prelude::{ListModelExt, WidgetExt};
 
-    use super::{grid_tile_label, uses_native_row_sorting, FileView};
+    use super::{grid_tile_label, is_mountable_file_type, uses_native_row_sorting, FileView};
     use crate::core::{GroupField, ViewMode, ViewOptions};
 
     #[test]
@@ -531,6 +563,12 @@ mod tests {
         assert!(!uses_native_row_sorting(GroupField::DateModified));
         assert!(!uses_native_row_sorting(GroupField::Type));
         assert!(!uses_native_row_sorting(GroupField::Size));
+    }
+
+    #[test]
+    fn gvfs_mountable_locations_use_the_mountable_operation() {
+        assert!(is_mountable_file_type(gio::FileType::Mountable));
+        assert!(!is_mountable_file_type(gio::FileType::Directory));
     }
 
     #[test]

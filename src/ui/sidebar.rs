@@ -152,6 +152,10 @@ impl Sidebar {
                         Self::append_children(&children_for_toggle, initial_children, depth, children_model.clone(), children_action.clone(), children_active_path.clone(), children_mount_parent.clone());
                     } else {
                         let location_file = gio::File::for_uri(&child_location.uri());
+                        let is_mountable = location_file
+                            .query_info("standard::type", gio::FileQueryInfoFlags::NONE, gio::Cancellable::NONE)
+                            .map(|info| info.file_type() == gio::FileType::Mountable)
+                            .unwrap_or(false);
                         let operation = gtk::MountOperation::new(Some(&children_mount_parent));
                         let keep_operation = operation.clone();
                         let children_after_mount = children_for_toggle.clone();
@@ -160,11 +164,20 @@ impl Sidebar {
                         let active_after_mount = children_active_path.clone();
                         let parent_after_mount = children_mount_parent.clone();
                         let location_after_mount = child_location.clone();
-                        location_file.mount_enclosing_volume(gio::MountMountFlags::NONE, Some(&operation), gio::Cancellable::NONE, move |_| {
-                            let _keep_operation_alive = &keep_operation;
-                            let loaded = model_after_mount.borrow().children_for_location(&location_after_mount);
-                            Self::append_children(&children_after_mount, loaded, depth, model_after_mount.clone(), action_after_mount.clone(), active_after_mount.clone(), parent_after_mount.clone());
-                        });
+                        if is_mountable {
+                            location_file.mount_mountable(gio::MountMountFlags::NONE, Some(&operation), gio::Cancellable::NONE, move |result| {
+                                let _keep_operation_alive = &keep_operation;
+                                let location = result.map(|root| SidebarLocation::from_uri(root.uri().to_string(), location_after_mount.label(), location_after_mount.icon_name())).unwrap_or(location_after_mount);
+                                let loaded = model_after_mount.borrow().children_for_location(&location);
+                                Self::append_children(&children_after_mount, loaded, depth, model_after_mount.clone(), action_after_mount.clone(), active_after_mount.clone(), parent_after_mount.clone());
+                            });
+                        } else {
+                            location_file.mount_enclosing_volume(gio::MountMountFlags::NONE, Some(&operation), gio::Cancellable::NONE, move |_| {
+                                let _keep_operation_alive = &keep_operation;
+                                let loaded = model_after_mount.borrow().children_for_location(&location_after_mount);
+                                Self::append_children(&children_after_mount, loaded, depth, model_after_mount.clone(), action_after_mount.clone(), active_after_mount.clone(), parent_after_mount.clone());
+                            });
+                        }
                     }
                 }
             });
