@@ -277,25 +277,29 @@ fn apply_tab_layout(window: &ApplicationWindow, tabs: &TabStrip) {
 fn view_controls(data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, preferences: &Rc<RefCell<ViewPreferencesStore>>) -> GtkBox {
     let controls = GtkBox::new(Orientation::Horizontal, 6);
     for label in ["Sort", "Group", "View"] {
-        let button = menu_button(label);
+        let options = selected_index(tabs, data).map(|index| data.borrow()[index].view.options()).unwrap_or_default();
+        let initial_body = view_menu_body(label, &options, data, tabs, preferences);
+        let button = menu_button(label, &initial_body);
         let data = data.clone();
         let tabs = tabs.clone();
         let preferences = preferences.clone();
         let label = label.to_string();
         button.connect_activate(move |button| {
             let options = selected_index(&tabs, &data).map(|index| data.borrow()[index].view.options()).unwrap_or_default();
-            let popover = Popover::new();
-            popover.set_child(Some(&view_menu_body(&label, &options, &data, &tabs, &preferences)));
-            button.set_popover(Some(&popover));
+            if let Some(popover) = button.popover() {
+                popover.set_child(Some(&view_menu_body(&label, &options, &data, &tabs, &preferences)));
+            }
         });
         controls.append(&button);
     }
     controls
 }
 
-fn menu_button(label: &str) -> MenuButton {
+fn menu_button(label: &str, child: &impl IsA<gtk::Widget>) -> MenuButton {
     let button = MenuButton::builder().label(label).build();
-    button.set_popover(Some(&Popover::new()));
+    let popover = Popover::new();
+    popover.set_child(Some(child));
+    button.set_popover(Some(&popover));
     button
 }
 
@@ -419,8 +423,8 @@ mod tests {
     use std::cell::RefCell;
     use std::path::PathBuf;
 
-    use gtk::prelude::{OrientableExt, WidgetExt};
-    use gtk::{Box as GtkBox, Orientation, SearchEntry};
+    use gtk::prelude::{OrientableExt, PopoverExt, WidgetExt};
+    use gtk::{Box as GtkBox, Label, Orientation, SearchEntry};
 
     use super::{file_toolbar, menu_button, matching_index, persist_options, remove_matching};
     use crate::core::{SortField, ViewOptions, ViewPreferencesStore};
@@ -465,12 +469,13 @@ mod tests {
 
     #[test]
     #[ignore = "requires a GTK desktop session"]
-    fn stateful_menu_button_has_an_initial_popover_and_is_sensitive() {
+    fn stateful_menu_button_has_visible_initial_content_and_is_sensitive() {
         gtk::init().expect("GTK should initialize for widget tests");
 
-        let button = menu_button("Sort");
+        let button = menu_button("Sort", &Label::new(Some("Sort by")));
 
         assert!(button.popover().is_some());
+        assert!(button.popover().and_then(|popover| popover.child()).is_some());
         assert!(button.is_sensitive());
     }
 }
