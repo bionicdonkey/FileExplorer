@@ -9,12 +9,12 @@ use gtk::{Align, Box as GtkBox, Button, CheckButton, Entry, Label, MenuButton, O
 use crate::core::location::Location;
 use crate::core::navigation::NavigationHistory;
 use crate::core::operations::FileOperations;
-use crate::core::{GridSize, GroupField, SortDirection, SortField, ViewMode, ViewOptions, ViewPreferencesStore};
+use crate::core::{GridSize, GroupField, SidebarModel, SidebarPreferences, SortDirection, SortField, ViewMode, ViewOptions, ViewPreferencesStore};
 use crate::ui::context_menu::{ContextCommand, ContextTarget};
 use crate::ui::file_view::FileView;
 use crate::ui::properties_dialog::PropertiesDialog;
 use crate::ui::header::{HeaderControls, NavigationAction};
-use crate::ui::sidebar::Sidebar;
+use crate::ui::sidebar::{Sidebar, SidebarAction};
 use crate::ui::tab_layout::{calculate_tab_layout, TabLayoutInput};
 use crate::ui::tabs::TabStrip;
 
@@ -79,7 +79,7 @@ impl ExplorerWindow {
         tabs_data.borrow_mut().push(TabData {
             view: first_view,
             location: initial_location,
-            history: history_with(initial),
+            history: history_with(initial.clone()),
             page: first_page.clone(),
         });
 
@@ -90,31 +90,46 @@ impl ExplorerWindow {
             apply_tab_layout(&layout_window, &layout_tabs);
         });
 
-        let sidebar_data = tabs_data.clone();
-        let sidebar_tabs = tabs.view.clone();
-        let sidebar_header = header_controls.clone();
-        let sidebar_preferences = preferences.clone();
+        let sidebar_model = Rc::new(RefCell::new(SidebarModel::new(
+            SidebarPreferences::load_default().unwrap_or_else(|_| SidebarPreferences::in_memory()),
+            Location::home().path().to_path_buf(),
+        )));
+        let sidebar_holder: Rc<RefCell<Option<Sidebar>>> = Rc::new(RefCell::new(None));
         let sidebar_context_data = tabs_data.clone();
         let sidebar_context_tabs = tabs.view.clone();
         let sidebar_context_header = header_controls.clone();
         let sidebar_context_preferences = preferences.clone();
         let sidebar_context_app = app.clone();
         let sidebar_context_clipboard = clipboard.clone();
-        let sidebar = Sidebar::new(move |path| {
-            if let Some(index) = selected_index(&sidebar_tabs, &sidebar_data) {
-                navigate_tab(index, path, &sidebar_data, &sidebar_tabs, &sidebar_header, &sidebar_preferences, true);
-            }
-        }, move |path, command| match command {
-            ContextCommand::Open => {
+        let sidebar_model_actions = sidebar_model.clone();
+        let sidebar_holder_actions = sidebar_holder.clone();
+        let sidebar = Sidebar::new(sidebar_model, move |action| match action {
+            SidebarAction::Open(path) => {
                 if let Some(index) = selected_index(&sidebar_context_tabs, &sidebar_context_data) {
                     navigate_tab(index, path, &sidebar_context_data, &sidebar_context_tabs, &sidebar_context_header, &sidebar_context_preferences, true);
                 }
             }
-            ContextCommand::OpenInNewTab => add_tab_at(path, &sidebar_context_data, &sidebar_context_tabs, &sidebar_context_header, &sidebar_context_preferences, &sidebar_context_app, &sidebar_context_clipboard),
-            ContextCommand::OpenInNewWindow => ExplorerWindow::new_at(&sidebar_context_app, path).present(),
-            ContextCommand::OpenInTerminal => open_terminal(&path),
-            _ => {}
+            SidebarAction::OpenInNewTab(path) => add_tab_at(path, &sidebar_context_data, &sidebar_context_tabs, &sidebar_context_header, &sidebar_context_preferences, &sidebar_context_app, &sidebar_context_clipboard),
+            SidebarAction::OpenInNewWindow(path) => ExplorerWindow::new_at(&sidebar_context_app, path).present(),
+            SidebarAction::OpenInTerminal(path) => open_terminal(&path),
+            SidebarAction::OpenUri(uri) => { let _ = gio::AppInfo::launch_default_for_uri(&uri, None::<&gio::AppLaunchContext>); }
+            SidebarAction::Pin(path) => {
+                let mut model = sidebar_model_actions.borrow_mut();
+                model.preferences_mut().pin(path);
+                let _ = model.preferences().save();
+                drop(model);
+                if let Some(sidebar) = sidebar_holder_actions.borrow().as_ref() { sidebar.refresh(); }
+            }
+            SidebarAction::Unpin(path) => {
+                let mut model = sidebar_model_actions.borrow_mut();
+                model.preferences_mut().unpin(&path);
+                let _ = model.preferences().save();
+                drop(model);
+                if let Some(sidebar) = sidebar_holder_actions.borrow().as_ref() { sidebar.refresh(); }
+            }
         });
+        sidebar.set_active_path(&initial);
+        *sidebar_holder.borrow_mut() = Some(sidebar.clone());
 
         let content = Paned::new(Orientation::Horizontal);
         content.set_position(250);

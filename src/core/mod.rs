@@ -12,5 +12,5 @@ pub use file_item::FileItem;
 pub use location::Location;
 pub use navigation::NavigationHistory;
 pub use properties::{PermissionBits, PropertyDetails};
-pub use sidebar_model::{SidebarLocation, SidebarModel, SidebarPreferences};
+pub use sidebar_model::{SidebarLocation, SidebarModel, SidebarNode, SidebarPreferences};
 pub use view_options::{GridSize, GroupField, ListColumn, ListColumnLayout, SortDirection, SortField, ViewMode, ViewOptions, ViewPreferencesStore};

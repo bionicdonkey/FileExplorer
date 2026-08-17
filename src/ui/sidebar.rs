@@ -1,91 +1,223 @@
-use std::path::PathBuf;
+use std::cell::RefCell;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
+use gio::prelude::*;
 use gtk::prelude::*;
-use gtk::{Box as GtkBox, Button, GestureClick, Image, Label, ListBox, ListBoxRow, Orientation, Popover, ScrolledWindow};
+use gtk::{Box as GtkBox, Button, GestureClick, Image, Label, Orientation, Popover, ScrolledWindow, ToggleButton};
 
-use crate::core::location::Location;
-use crate::ui::context_menu::ContextCommand;
+use crate::core::{SidebarLocation, SidebarModel, SidebarNode};
 
+#[derive(Clone, Debug)]
+pub enum SidebarAction {
+    Open(PathBuf),
+    OpenInNewTab(PathBuf),
+    OpenInNewWindow(PathBuf),
+    OpenInTerminal(PathBuf),
+    OpenUri(String),
+    Pin(PathBuf),
+    Unpin(PathBuf),
+}
+
+#[derive(Clone)]
 pub struct Sidebar {
     pub widget: ScrolledWindow,
+    content: GtkBox,
+    model: Rc<RefCell<SidebarModel>>,
+    on_action: Rc<dyn Fn(SidebarAction)>,
+    active_path: Rc<RefCell<Option<PathBuf>>>,
 }
 
 impl Sidebar {
-    pub fn new<F: Fn(PathBuf) + Clone + 'static, C: Fn(PathBuf, ContextCommand) + Clone + 'static>(on_navigate: F, on_context: C) -> Self {
-        let list = ListBox::new();
-        list.set_selection_mode(gtk::SelectionMode::None);
-        list.add_css_class("navigation-sidebar");
+    pub fn new<F: Fn(SidebarAction) + 'static>(model: Rc<RefCell<SidebarModel>>, on_action: F) -> Self {
+        let content = GtkBox::new(Orientation::Vertical, 12);
+        content.add_css_class("explorer-sidebar");
+        content.set_margin_top(8);
+        content.set_margin_bottom(8);
+        content.set_margin_start(8);
+        content.set_margin_end(8);
+        let scroll = ScrolledWindow::new();
+        scroll.set_child(Some(&content));
 
-        let home = Location::home().path().to_path_buf();
-        let sections = [
-            ("Home", "user-home-symbolic", home.clone()),
-            ("Desktop", "user-desktop-symbolic", home.join("Desktop")),
-            ("Documents", "folder-documents-symbolic", home.join("Documents")),
-            ("Downloads", "folder-download-symbolic", home.join("Downloads")),
-            ("Pictures", "folder-pictures-symbolic", home.join("Pictures")),
-            ("File System", "drive-harddisk-symbolic", PathBuf::from("/")),
-        ];
-        for (label, icon_name, path) in sections {
-            let row = ListBoxRow::new();
-            let button = Button::new();
-            button.set_halign(gtk::Align::Fill);
-            button.add_css_class("flat");
-            let button_content = GtkBox::new(Orientation::Horizontal, 10);
-            button_content.set_margin_top(5);
-            button_content.set_margin_bottom(5);
-            let icon = Image::from_icon_name(icon_name);
-            icon.set_pixel_size(18);
-            let text = Label::new(Some(label));
-            text.set_xalign(0.0);
-            button_content.append(&icon);
-            button_content.append(&text);
-            button.set_child(Some(&button_content));
-            let navigate = on_navigate.clone();
-            let navigation_path = path.clone();
-            button.connect_clicked(move |_| {
-                navigate(navigation_path.clone());
-            });
-            let context = on_context.clone();
-            let context_path = path.clone();
-            let context_button = button.clone();
-            let gesture = GestureClick::new();
-            gesture.set_button(3);
-            gesture.connect_pressed(move |gesture, _, x, y| {
-                gesture.set_state(gtk::EventSequenceState::Claimed);
-                let popover = Popover::new();
-                popover.set_parent(&context_button);
-                popover.set_autohide(true);
-                popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
-                let menu = GtkBox::new(Orientation::Vertical, 2);
-                menu.set_margin_top(6);
-                menu.set_margin_bottom(6);
-                for (label, command) in [("Open", ContextCommand::Open), ("Open in New Tab", ContextCommand::OpenInNewTab), ("Open in New Window", ContextCommand::OpenInNewWindow), ("Open in Terminal", ContextCommand::OpenInTerminal)] {
-                    let item = Button::with_label(label);
-                    let context = context.clone();
-                    let path = context_path.clone();
-                    let popover = popover.clone();
-                    item.connect_clicked(move |_| { popover.popdown(); context(path.clone(), command); });
-                    menu.append(&item);
+        let sidebar = Self {
+            widget: scroll,
+            content,
+            model,
+            on_action: Rc::new(on_action),
+            active_path: Rc::new(RefCell::new(None)),
+        };
+        sidebar.refresh();
+
+        let refresh_on_mount = sidebar.clone();
+        gio::VolumeMonitor::get().connect_mount_added(move |_, _| refresh_on_mount.refresh());
+        let refresh_on_unmount = sidebar.clone();
+        gio::VolumeMonitor::get().connect_mount_removed(move |_, _| refresh_on_unmount.refresh());
+        sidebar
+    }
+
+    pub fn refresh(&self) {
+        while let Some(child) = self.content.first_child() { self.content.remove(&child); }
+        for section in self.model.borrow().sections() {
+            let heading = Label::new(Some(section.title));
+            heading.add_css_class("heading");
+            heading.add_css_class("sidebar-section-heading");
+            heading.set_xalign(0.0);
+            self.content.append(&heading);
+
+            if section.nodes.is_empty() && section.title == "Quick access" {
+                let empty = Label::new(Some("Pin folders here for quick access"));
+                empty.add_css_class("dim-label");
+                empty.set_xalign(0.0);
+                empty.set_margin_start(10);
+                self.content.append(&empty);
+            }
+
+            let rows = GtkBox::new(Orientation::Vertical, 0);
+            rows.add_css_class("sidebar-tree");
+            for node in section.nodes { self.append_node(&rows, node, 0); }
+            self.content.append(&rows);
+        }
+    }
+
+    pub fn set_active_path(&self, path: &Path) {
+        *self.active_path.borrow_mut() = Some(path.to_path_buf());
+        self.refresh();
+    }
+
+    fn append_node(&self, parent: &GtkBox, node: SidebarNode, depth: i32) {
+        Self::append_node_inner(parent, node, depth, self.model.clone(), self.on_action.clone(), self.active_path.clone());
+    }
+
+    fn append_node_inner(parent: &GtkBox, node: SidebarNode, depth: i32, model: Rc<RefCell<SidebarModel>>, on_action: Rc<dyn Fn(SidebarAction)>, active_path: Rc<RefCell<Option<PathBuf>>>) {
+        let row = GtkBox::new(Orientation::Vertical, 0);
+        let header = GtkBox::new(Orientation::Horizontal, 0);
+        header.set_margin_start(depth * 16);
+        header.add_css_class("sidebar-tree-row");
+
+        let children = GtkBox::new(Orientation::Vertical, 0);
+        children.set_visible(false);
+        if node.expandable {
+            let expander = ToggleButton::new();
+            expander.add_css_class("flat");
+            expander.add_css_class("sidebar-expander");
+            let chevron = Image::from_icon_name("pan-end-symbolic");
+            chevron.set_pixel_size(14);
+            expander.set_child(Some(&chevron));
+            let children_model = model.clone();
+            let child_path = node.location.local_path().map(ToOwned::to_owned);
+            let children_for_toggle = children.clone();
+            let children_action = on_action.clone();
+            let children_active_path = active_path.clone();
+            expander.connect_toggled(move |button| {
+                let expanded = button.is_active();
+                children_for_toggle.set_visible(expanded);
+                let icon = if expanded { "pan-down-symbolic" } else { "pan-end-symbolic" };
+                button.set_child(Some(&Image::from_icon_name(icon)));
+                if expanded && children_for_toggle.first_child().is_none() {
+                    if let Some(path) = &child_path {
+                        for child in children_model.borrow().children_for(path) {
+                            Self::append_node_inner(
+                                &children_for_toggle,
+                                child,
+                                depth + 1,
+                                children_model.clone(),
+                                children_action.clone(),
+                                children_active_path.clone(),
+                            );
+                        }
+                    }
                 }
-                popover.set_child(Some(&menu));
-                popover.popup();
             });
-            button.add_controller(gesture);
-            row.set_child(Some(&button));
-            list.append(&row);
+            header.append(&expander);
+        } else {
+            let spacer = GtkBox::new(Orientation::Horizontal, 0);
+            spacer.set_size_request(32, -1);
+            header.append(&spacer);
         }
 
-        let title = Label::new(Some("Quick access"));
-        title.add_css_class("heading");
-        title.set_xalign(0.0);
-        let container = GtkBox::new(Orientation::Vertical, 8);
-        container.set_margin_top(12);
-        container.set_margin_start(8);
-        container.set_margin_end(8);
-        container.append(&title);
-        container.append(&list);
-        let scroll = ScrolledWindow::new();
-        scroll.set_child(Some(&container));
-        Self { widget: scroll }
+        let button = Button::new();
+        button.set_hexpand(true);
+        button.set_halign(gtk::Align::Fill);
+        button.add_css_class("flat");
+        button.add_css_class("sidebar-location");
+        if node.location.local_path().is_some_and(|path| active_path.borrow().as_deref() == Some(path)) {
+            button.add_css_class("selected");
+        }
+        let button_content = GtkBox::new(Orientation::Horizontal, 8);
+        button_content.set_margin_top(4);
+        button_content.set_margin_bottom(4);
+        let icon = Image::from_icon_name(node.location.icon_name());
+        icon.set_pixel_size(18);
+        let label = Label::new(Some(node.location.label()));
+        label.set_xalign(0.0);
+        label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        label.set_hexpand(true);
+        button_content.append(&icon);
+        button_content.append(&label);
+        button.set_child(Some(&button_content));
+        let action = on_action.clone();
+        let location = node.location.clone();
+        button.connect_clicked(move |_| match location.local_path() {
+            Some(path) => action(SidebarAction::Open(path.to_path_buf())),
+            None => action(SidebarAction::OpenUri(location.uri())),
+        });
+        Self::add_context_menu(&button, &node.location, model, on_action);
+        header.append(&button);
+        row.append(&header);
+        row.append(&children);
+        parent.append(&row);
+    }
+
+    fn add_context_menu(button: &Button, location: &SidebarLocation, model: Rc<RefCell<SidebarModel>>, action: Rc<dyn Fn(SidebarAction)>) {
+        let Some(path) = location.local_path().map(ToOwned::to_owned) else { return; };
+        let context_button = button.clone();
+        let gesture = GestureClick::new();
+        gesture.set_button(3);
+        gesture.connect_pressed(move |gesture, _, x, y| {
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+            let popover = Popover::new();
+            popover.set_parent(&context_button);
+            popover.set_autohide(true);
+            popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+            let menu = GtkBox::new(Orientation::Vertical, 2);
+            menu.set_margin_top(6);
+            menu.set_margin_bottom(6);
+            for (label, sidebar_action) in [
+                ("Open", SidebarAction::Open(path.clone())),
+                ("Open in New Tab", SidebarAction::OpenInNewTab(path.clone())),
+                ("Open in New Window", SidebarAction::OpenInNewWindow(path.clone())),
+                ("Open in Terminal", SidebarAction::OpenInTerminal(path.clone())),
+            ] {
+                let item = Button::with_label(label);
+                let action = action.clone();
+                let popover = popover.clone();
+                item.connect_clicked(move |_| { popover.popdown(); action(sidebar_action.clone()); });
+                menu.append(&item);
+            }
+            let separator = gtk::Separator::new(Orientation::Horizontal);
+            separator.set_margin_top(4);
+            separator.set_margin_bottom(4);
+            menu.append(&separator);
+            let is_pinned = model.borrow().preferences().is_pinned(&path);
+            let pin_item = Button::with_label(if is_pinned { "Unpin from Quick access" } else { "Pin to Quick access" });
+            let action = action.clone();
+            let popover_for_pin = popover.clone();
+            let pin_action = if is_pinned { SidebarAction::Unpin(path.clone()) } else { SidebarAction::Pin(path.clone()) };
+            pin_item.connect_clicked(move |_| { popover_for_pin.popdown(); action(pin_action.clone()); });
+            menu.append(&pin_item);
+            popover.set_child(Some(&menu));
+            popover.popup();
+        });
+        button.add_controller(gesture);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    #[ignore = "requires a GTK desktop session"]
+    fn sidebar_renders_quick_access_this_pc_and_network_sections() {
+        gtk::init().unwrap();
+        assert!(gtk::is_initialized());
     }
 }

@@ -174,14 +174,14 @@ impl SidebarModel {
             let root = mount.root();
             let path = root.path()?;
             if path == Path::new("/") || path.starts_with(&self.home) { return None; }
-            Some(SidebarNode::local(path, mount.name(), "drive-harddisk-symbolic", true))
+            Some(SidebarNode::local(path, mount.name(), mount_icon_name(&mount, "drive-harddisk-symbolic"), true))
         }).collect()
     }
 
     fn remote_mounts(&self) -> Vec<SidebarNode> {
         gio::VolumeMonitor::get().mounts().into_iter().filter_map(|mount| {
             let root = mount.root();
-            root.path().is_none().then(|| SidebarNode::remote(root.uri().to_string(), mount.name(), "folder-remote-symbolic"))
+            root.path().is_none().then(|| SidebarNode::remote(root.uri().to_string(), mount.name(), mount_icon_name(&mount, "folder-remote-symbolic")))
         }).collect()
     }
 }
@@ -202,6 +202,15 @@ fn standard_folder_icon(path: &Path) -> &'static str {
         Some("Videos") => "folder-videos-symbolic",
         _ => "folder-symbolic",
     }
+}
+
+fn mount_icon_name(mount: &gio::Mount, fallback: &str) -> String {
+    mount.icon()
+        .downcast::<gio::ThemedIcon>()
+        .ok()
+        .and_then(|icon| icon.names().into_iter().next())
+        .map(|name| name.to_string())
+        .unwrap_or_else(|| fallback.to_owned())
 }
 
 #[cfg(test)]
