@@ -4,6 +4,7 @@ use gtk::prelude::*;
 use gtk::{Box as GtkBox, CheckButton, Entry, Grid, HeaderBar, Image, Label, Orientation, Stack, StackSwitcher};
 
 use crate::core::{PermissionBits, PropertyDetails};
+use crate::core::file_item::format_size;
 
 pub struct PropertiesDialog;
 
@@ -76,7 +77,7 @@ fn general_page(details: &PropertyDetails, name: &Entry) -> GtkBox {
     let page = GtkBox::new(Orientation::Vertical, 12);
     page.set_margin_top(16);
     let grid = Grid::new(); grid.set_column_spacing(18); grid.set_row_spacing(9);
-    for (row, (label, value)) in [("Name", name.text().to_string()), ("Type", if details.is_dir { "Folder".into() } else { gio::content_type_get_description(&details.content_type).to_string() }), ("Location", details.path.parent().unwrap_or(&details.path).display().to_string()), ("Size", format!("{} bytes", details.size)), ("Modified", format_time(details.modified)), ("Accessed", format_time(details.accessed)), ("Created", format_time(details.created))].into_iter().enumerate() {
+    for (row, (label, value)) in [("Name", name.text().to_string()), ("Type", if details.is_dir { "Folder".into() } else { gio::content_type_get_description(&details.content_type).to_string() }), ("Location", details.path.parent().unwrap_or(&details.path).display().to_string()), ("Size", format_size(details.size)), ("Modified", format_time(details.modified)), ("Accessed", format_time(details.accessed)), ("Created", format_time(details.created))].into_iter().enumerate() {
         let key = Label::new(Some(label)); key.set_xalign(0.0); key.add_css_class("dim-label"); grid.attach(&key, 0, row as i32, 1, 1);
         if label == "Name" { grid.attach(name, 1, row as i32, 1, 1); } else { let value = Label::new(Some(&value)); value.set_xalign(0.0); value.set_selectable(true); grid.attach(&value, 1, row as i32, 1, 1); }
     }
