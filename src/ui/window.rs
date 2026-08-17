@@ -93,10 +93,26 @@ impl ExplorerWindow {
         let sidebar_tabs = tabs.view.clone();
         let sidebar_header = header_controls.clone();
         let sidebar_preferences = preferences.clone();
+        let sidebar_context_data = tabs_data.clone();
+        let sidebar_context_tabs = tabs.view.clone();
+        let sidebar_context_header = header_controls.clone();
+        let sidebar_context_preferences = preferences.clone();
+        let sidebar_context_app = app.clone();
+        let sidebar_context_clipboard = clipboard.clone();
         let sidebar = Sidebar::new(move |path| {
             if let Some(index) = selected_index(&sidebar_tabs, &sidebar_data) {
                 navigate_tab(index, path, &sidebar_data, &sidebar_tabs, &sidebar_header, &sidebar_preferences, true);
             }
+        }, move |path, command| match command {
+            ContextCommand::Open => {
+                if let Some(index) = selected_index(&sidebar_context_tabs, &sidebar_context_data) {
+                    navigate_tab(index, path, &sidebar_context_data, &sidebar_context_tabs, &sidebar_context_header, &sidebar_context_preferences, true);
+                }
+            }
+            ContextCommand::OpenInNewTab => add_tab_at(path, &sidebar_context_data, &sidebar_context_tabs, &sidebar_context_header, &sidebar_context_preferences, &sidebar_context_app, &sidebar_context_clipboard),
+            ContextCommand::OpenInNewWindow => ExplorerWindow::new_at(&sidebar_context_app, path).present(),
+            ContextCommand::OpenInTerminal => open_terminal(&path),
+            _ => {}
         });
 
         let content = Paned::new(Orientation::Horizontal);
@@ -153,6 +169,25 @@ impl ExplorerWindow {
             remove_matching(&close_data, |tab| tab.page == *page);
             view.close_page_finish(page, true);
             true
+        });
+
+        let tab_context_data = tabs_data.clone();
+        let tab_context_view = tabs.view.clone();
+        let tab_context_header = header_controls.clone();
+        let tab_context_preferences = preferences.clone();
+        let tab_context_app = app.clone();
+        let tab_context_clipboard = clipboard.clone();
+        tabs.set_context_handler(move |command| {
+            let Some(page) = tab_context_view.selected_page() else { return; };
+            match command {
+                ContextCommand::CloseTab => tab_context_view.close_page(&page),
+                ContextCommand::CloseOtherTabs => tab_context_view.close_other_pages(&page),
+                ContextCommand::DuplicateTab => {
+                    let path = tab_context_data.borrow().iter().find(|tab| tab.page == page).map(|tab| tab.location.borrow().clone());
+                    if let Some(path) = path { add_tab_at(path, &tab_context_data, &tab_context_view, &tab_context_header, &tab_context_preferences, &tab_context_app, &tab_context_clipboard); }
+                }
+                _ => {}
+            }
         });
 
         let select_data = tabs_data.clone();

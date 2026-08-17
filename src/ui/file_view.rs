@@ -32,6 +32,12 @@ impl FileView {
         scroll.set_vexpand(true);
         let on_navigate = Rc::new(RefCell::new(None));
         let view = Self { widget: scroll, location, on_navigate, on_context_command: Rc::new(RefCell::new(None)), on_options_changed: Rc::new(RefCell::new(None)), options: Rc::new(RefCell::new(ViewOptions::default())) };
+        let background_view = view.clone();
+        let background = GestureClick::new();
+        background.set_button(3);
+        let background_parent = view.widget.clone();
+        background.connect_pressed(move |_, _, x, y| show_item_context_menu(&background_parent, x, y, ContextTarget::Background(background_view.location()), &background_view));
+        view.widget.add_controller(background);
         view.reload();
         view
     }
@@ -109,7 +115,7 @@ impl FileView {
         view.add_css_class(if options.view_mode == ViewMode::CompactList { "compact-file-list" } else { "detailed-file-list" });
 
         for column_id in options.list_columns.normalized().order {
-            let column = ColumnViewColumn::new(Some(column_title(column_id)), Some(column_factory(column_id, options.thumbnails)));
+            let column = ColumnViewColumn::new(Some(column_title(column_id)), Some(column_factory(column_id, options.thumbnails, self.clone())));
             column.set_resizable(true);
             column.set_fixed_width(options.list_columns.width_for(column_id));
             column.set_expand(column_id == ListColumn::Name);
@@ -170,7 +176,7 @@ impl FileView {
     fn grid_view(&self, items: &[FileItem], options: &ViewOptions) -> FlowBox {
         let layout = options.grid_size.grid_layout();
         let grid = FlowBox::new(); grid.set_selection_mode(gtk::SelectionMode::None); grid.set_column_spacing(layout.gap.try_into().expect("grid gaps are positive")); grid.set_row_spacing(layout.gap.try_into().expect("grid gaps are positive")); grid.set_margin_top(12); grid.set_margin_start(12); grid.set_margin_end(12);
-        for item in items { let tile = Button::new(); tile.add_css_class("flat"); tile.add_css_class("icon-grid-tile"); tile.set_size_request(layout.tile_width, -1); tile.set_tooltip_text(Some(item.name())); let body = GtkBox::new(Orientation::Vertical, layout.gap / 2); body.set_halign(gtk::Align::Center); let icon = item_image(item, options.thumbnails); icon.set_pixel_size(options.grid_size.icon_size()); body.append(&icon); body.append(&grid_tile_label(item.name(), layout.label_width_chars)); tile.set_child(Some(&body)); let view = self.clone(); let path = item.path().to_path_buf(); tile.connect_clicked(move |_| activate_path(&view, path.clone())); let target = if item.is_dir() { ContextTarget::Folder(item.path().to_path_buf()) } else { ContextTarget::File { path: item.path().to_path_buf(), content_type: item.content_type().to_string() } }; let view = self.clone(); let gesture = GestureClick::new(); gesture.set_button(3); let menu_tile = tile.clone(); gesture.connect_pressed(move |_, _, x, y| show_item_context_menu(&menu_tile, x, y, target.clone(), &view)); tile.add_controller(gesture); grid.append(&tile); }
+        for item in items { let tile = Button::new(); tile.add_css_class("flat"); tile.add_css_class("icon-grid-tile"); tile.set_size_request(layout.tile_width, -1); tile.set_tooltip_text(Some(item.name())); let body = GtkBox::new(Orientation::Vertical, layout.gap / 2); body.set_halign(gtk::Align::Center); let icon = item_image(item, options.thumbnails); icon.set_pixel_size(options.grid_size.icon_size()); body.append(&icon); body.append(&grid_tile_label(item.name(), layout.label_width_chars)); tile.set_child(Some(&body)); let view = self.clone(); let path = item.path().to_path_buf(); tile.connect_clicked(move |_| activate_path(&view, path.clone())); let target = if item.is_dir() { ContextTarget::Folder(item.path().to_path_buf()) } else { ContextTarget::File { path: item.path().to_path_buf(), content_type: item.content_type().to_string() } }; let view = self.clone(); let gesture = GestureClick::new(); gesture.set_button(3); let menu_tile = tile.clone(); gesture.connect_pressed(move |gesture, _, x, y| { gesture.set_state(gtk::EventSequenceState::Claimed); show_item_context_menu(&menu_tile, x, y, target.clone(), &view) }); tile.add_controller(gesture); grid.append(&tile); }
         grid
     }
 
@@ -382,7 +388,7 @@ fn publish_column_layout(view: &ColumnView, options_state: &Rc<RefCell<ViewOptio
     }
 }
 
-fn column_factory(column: ListColumn, thumbnails: bool) -> SignalListItemFactory {
+fn column_factory(column: ListColumn, thumbnails: bool, view: FileView) -> SignalListItemFactory {
     let factory = SignalListItemFactory::new();
     factory.connect_setup(move |_, list_item| {
         let list_item = list_item.downcast_ref::<gtk::ListItem>().expect("column factories receive list items");
@@ -398,6 +404,20 @@ fn column_factory(column: ListColumn, thumbnails: bool) -> SignalListItemFactory
             label.set_xalign(0.0);
             line.append(&icon);
             line.append(&label);
+            let context_item = list_item.clone();
+            let context_view = view.clone();
+            let gesture = GestureClick::new();
+            gesture.set_button(3);
+            gesture.connect_pressed(move |gesture, _, x, y| {
+                let Some(object) = context_item.item().and_downcast::<glib::BoxedAnyObject>() else { return; };
+                let row = object.borrow::<ListRow>();
+                let ListRow::File(item) = &*row else { return; };
+                let target = if item.is_dir() { ContextTarget::Folder(item.path().to_path_buf()) } else { ContextTarget::File { path: item.path().to_path_buf(), content_type: item.content_type().to_string() } };
+                let Some(parent) = context_item.child() else { return; };
+                gesture.set_state(gtk::EventSequenceState::Claimed);
+                show_item_context_menu(&parent, x, y, target, &context_view);
+            });
+            line.add_controller(gesture);
             list_item.set_child(Some(&line));
         } else {
             let label = Label::new(None);

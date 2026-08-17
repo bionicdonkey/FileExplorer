@@ -1,6 +1,8 @@
 use adw::{TabBar, TabView};
 use gtk::prelude::*;
-use gtk::Button;
+use gtk::{Box as GtkBox, Button, GestureClick, Orientation, Popover};
+
+use crate::ui::context_menu::ContextCommand;
 
 use crate::ui::tab_layout::TabLayout;
 
@@ -48,6 +50,33 @@ impl TabStrip {
         } else {
             None
         });
+    }
+
+    pub fn set_context_handler<F: Fn(ContextCommand) + 'static>(&self, callback: F) {
+        let handler = std::rc::Rc::new(callback);
+        let gesture = GestureClick::new();
+        gesture.set_button(3);
+        let bar = self.bar.clone();
+        gesture.connect_pressed(move |gesture, _, x, y| {
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+            let popover = Popover::new();
+            popover.set_parent(&bar);
+            popover.set_autohide(true);
+            popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+            let menu = GtkBox::new(Orientation::Vertical, 2);
+            menu.set_margin_top(6);
+            menu.set_margin_bottom(6);
+            for (label, command) in [("Close Tab", ContextCommand::CloseTab), ("Close Other Tabs", ContextCommand::CloseOtherTabs), ("Duplicate Tab", ContextCommand::DuplicateTab)] {
+                let button = Button::with_label(label);
+                let handler = handler.clone();
+                let popover = popover.clone();
+                button.connect_clicked(move |_| { popover.popdown(); handler(command); });
+                menu.append(&button);
+            }
+            popover.set_child(Some(&menu));
+            popover.popup();
+        });
+        self.bar.add_controller(gesture);
     }
 }
 
