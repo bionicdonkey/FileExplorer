@@ -86,7 +86,7 @@ fn general_page(details: &PropertyDetails, name: &Entry) -> GtkBox {
 fn dialog_header(details: &PropertyDetails) -> GtkBox {
     let header = GtkBox::new(Orientation::Horizontal, 12);
     header.set_margin_bottom(8);
-    let icon = Image::from_gicon(&gio::content_type_get_icon(&details.content_type));
+    let icon = if details.is_dir { Image::from_icon_name("folder") } else { Image::from_gicon(&gio::content_type_get_icon(&details.content_type)) };
     icon.set_pixel_size(48);
     let text = GtkBox::new(Orientation::Vertical, 2);
     let title = Label::new(Some(&details.name)); title.add_css_class("title-3"); title.set_xalign(0.0);
