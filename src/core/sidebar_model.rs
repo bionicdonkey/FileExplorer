@@ -75,10 +75,11 @@ struct StoredPreferences {
 pub struct SidebarPreferences {
     path: Option<PathBuf>,
     pins: Vec<PathBuf>,
+    needs_defaults: bool,
 }
 
 impl SidebarPreferences {
-    pub fn in_memory() -> Self { Self { path: None, pins: Vec::new() } }
+    pub fn in_memory() -> Self { Self { path: None, pins: Vec::new(), needs_defaults: false } }
 
     pub fn load_default() -> io::Result<Self> {
         let config_home = env::var_os("XDG_CONFIG_HOME")
@@ -89,10 +90,10 @@ impl SidebarPreferences {
     }
 
     pub fn load_from(path: PathBuf) -> io::Result<Self> {
-        if !path.exists() { return Ok(Self { path: Some(path), pins: Vec::new() }); }
+        if !path.exists() { return Ok(Self { path: Some(path), pins: Vec::new(), needs_defaults: true }); }
         let stored = serde_json::from_slice::<StoredPreferences>(&fs::read(&path)?)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        let mut preferences = Self { path: Some(path), pins: Vec::new() };
+        let mut preferences = Self { path: Some(path), pins: Vec::new(), needs_defaults: false };
         for pin in stored.pins { preferences.pin(pin); }
         Ok(preferences)
     }
@@ -121,6 +122,14 @@ impl SidebarPreferences {
         fs::write(&temporary, bytes)?;
         fs::rename(temporary, path)
     }
+
+    fn install_default_pins(&mut self, home: &Path) {
+        if !self.needs_defaults { return; }
+        self.needs_defaults = false;
+        for folder in [home.to_path_buf(), home.join("Desktop"), home.join("Documents"), home.join("Downloads"), home.join("Pictures")] {
+            if folder.exists() { self.pin(folder); }
+        }
+    }
 }
 
 pub struct SidebarModel {
@@ -129,7 +138,10 @@ pub struct SidebarModel {
 }
 
 impl SidebarModel {
-    pub fn new(preferences: SidebarPreferences, home: PathBuf) -> Self { Self { preferences, home } }
+    pub fn new(mut preferences: SidebarPreferences, home: PathBuf) -> Self {
+        preferences.install_default_pins(&home);
+        Self { preferences, home }
+    }
 
     pub fn sections(&self) -> Vec<SidebarSection> {
         vec![self.quick_access(), self.this_pc(), self.network_and_online()]
