@@ -38,6 +38,7 @@ impl ExplorerWindow {
 
         let header = HeaderBar::new();
         header.set_show_title(false);
+        header.add_css_class("explorer-titlebar");
         let sidebar_button = Button::from_icon_name("sidebar-show-symbolic");
         sidebar_button.add_css_class("flat");
         sidebar_button.set_tooltip_text(Some("Show or hide sidebar"));
@@ -92,7 +93,7 @@ impl ExplorerWindow {
         content.set_end_child(Some(&tabs.view));
         content.set_shrink_start_child(false);
         content.set_shrink_end_child(false);
-        content.set_margin_end(12);
+        content.set_margin_end(content_right_inset());
 
         let search = SearchEntry::builder().placeholder_text("Search this folder").hexpand(true).build();
         let status = Label::new(Some("Ready"));
@@ -264,6 +265,10 @@ fn tab_title(path: &std::path::Path) -> String {
     path.file_name().and_then(|name| name.to_str()).map(ToOwned::to_owned).unwrap_or_else(|| "/".into())
 }
 
+fn content_right_inset() -> i32 {
+    8
+}
+
 fn apply_tab_layout(window: &ApplicationWindow, tabs: &TabStrip) {
     let window_width = window.width();
     let layout = calculate_tab_layout(TabLayoutInput::new(
@@ -430,7 +435,7 @@ mod tests {
     use gtk::prelude::{OrientableExt, PopoverExt, WidgetExt};
     use gtk::{Box as GtkBox, Label, Orientation, SearchEntry};
 
-    use super::{file_toolbar, menu_button, matching_index, persist_options, remove_matching};
+    use super::{content_right_inset, file_toolbar, menu_button, matching_index, persist_options, remove_matching};
     use crate::core::{SortField, ViewOptions, ViewPreferencesStore};
 
     #[test]
@@ -457,6 +462,11 @@ mod tests {
         persist_options(&mut store, &path, ViewOptions { sort_field: SortField::Size, ..ViewOptions::default() });
 
         assert_eq!(store.options_for(&path, &[]).sort_field, SortField::Size);
+    }
+
+    #[test]
+    fn content_right_inset_matches_toolbar() {
+        assert_eq!(content_right_inset(), 8);
     }
 
     #[test]

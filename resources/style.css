@@ -1,5 +1,24 @@
+.explorer-titlebar {
+  min-height: 42px;
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+.explorer-titlebar .tab-strip {
+  min-height: 38px;
+  margin-top: 0;
+  margin-bottom: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
 .tab-strip tab {
   min-width: 110px;
+  min-height: 36px;
+  margin-top: 0;
+  margin-bottom: 0;
+  padding-top: 0;
+  padding-bottom: 0;
   border-radius: 8px 8px 0 0;
   background-color: alpha(@window_fg_color, 0.045);
 }
