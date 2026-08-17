@@ -1,3 +1,4 @@
+pub mod context_menu;
 pub mod file_view;
 pub mod header;
 pub mod sidebar;
