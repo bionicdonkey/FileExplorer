@@ -3,6 +3,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use gio::prelude::*;
+
 /// Metadata needed to render one row/tile in a directory view.
 #[derive(Clone, Debug)]
 pub struct FileItem {
@@ -12,6 +14,7 @@ pub struct FileItem {
     size: u64,
     modified: SystemTime,
     content_type: String,
+    uri: Option<String>,
 }
 
 impl FileItem {
@@ -36,6 +39,22 @@ impl FileItem {
             size: metadata.len(),
             modified: metadata.modified().unwrap_or(UNIX_EPOCH),
             content_type,
+            uri: None,
+        }
+    }
+
+    pub fn from_gio(parent: &gio::File, info: &gio::FileInfo) -> Self {
+        let name = info.display_name().to_string();
+        let child = parent.resolve_relative_path(info.name());
+        let content_type = info.content_type().map(|value| value.to_string()).unwrap_or_else(|| "application/octet-stream".into());
+        let modified = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(info.attribute_uint64("time::modified"));
+        Self {
+            path: PathBuf::new(), name,
+            is_dir: matches!(info.file_type(), gio::FileType::Directory | gio::FileType::Mountable),
+            size: info.size() as u64,
+            modified,
+            content_type,
+            uri: Some(child.uri().to_string()),
         }
     }
 
@@ -62,6 +81,8 @@ impl FileItem {
     pub fn content_type(&self) -> &str {
         &self.content_type
     }
+
+    pub fn uri(&self) -> Option<&str> { self.uri.as_deref() }
 
     pub fn type_name(&self) -> String {
         if self.is_dir {

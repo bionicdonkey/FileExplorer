@@ -113,7 +113,11 @@ impl ExplorerWindow {
             SidebarAction::OpenInNewTab(path) => add_tab_at(path, &sidebar_context_data, &sidebar_context_tabs, &sidebar_context_header, &sidebar_context_preferences, &sidebar_context_app, &sidebar_context_clipboard),
             SidebarAction::OpenInNewWindow(path) => ExplorerWindow::new_at(&sidebar_context_app, path).present(),
             SidebarAction::OpenInTerminal(path) => open_terminal(&path),
-            SidebarAction::OpenUri(uri) => { let _ = gio::AppInfo::launch_default_for_uri(&uri, None::<&gio::AppLaunchContext>); }
+            SidebarAction::OpenUri(uri) => {
+                if let Some(index) = selected_index(&sidebar_context_tabs, &sidebar_context_data) {
+                    sidebar_context_data.borrow()[index].view.set_uri(uri);
+                }
+            }
             SidebarAction::Pin(path) => {
                 let mut model = sidebar_model_actions.borrow_mut();
                 model.preferences_mut().pin(path);

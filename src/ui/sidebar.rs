@@ -128,7 +128,6 @@ impl Sidebar {
 
         let children = GtkBox::new(Orientation::Vertical, 0);
         children.set_visible(false);
-        let row_expander: Rc<RefCell<Option<ToggleButton>>> = Rc::new(RefCell::new(None));
         if node.expandable {
             let expander = ToggleButton::new();
             expander.add_css_class("flat");
@@ -169,7 +168,6 @@ impl Sidebar {
                     }
                 }
             });
-            *row_expander.borrow_mut() = Some(expander.clone());
             header.append(&expander);
         } else {
             let spacer = GtkBox::new(Orientation::Horizontal, 0);
@@ -199,12 +197,9 @@ impl Sidebar {
         button.set_child(Some(&button_content));
         let action = on_action.clone();
         let location = node.location.clone();
-        let expander_for_click = row_expander.clone();
         button.connect_clicked(move |_| match location.local_path() {
             Some(path) => action(SidebarAction::Open(path.to_path_buf())),
-            None => {
-                if let Some(expander) = expander_for_click.borrow().as_ref() { expander.set_active(true); }
-            }
+            None => action(SidebarAction::OpenUri(location.uri())),
         });
         Self::add_context_menu(&button, &node.location, model, on_action);
         header.append(&button);

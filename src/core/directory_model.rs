@@ -4,6 +4,8 @@ use std::cmp::Ordering;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
+use gio::prelude::*;
+
 use super::file_item::FileItem;
 use super::view_options::{GroupField, SortDirection, SortField, ViewOptions};
 
@@ -27,6 +29,21 @@ impl DirectoryModel {
 
     pub fn load_with_options(path: &Path, options: &ViewOptions) -> io::Result<Vec<FileItem>> {
         let mut items = Self::load_unsorted(path)?;
+        sort_items(&mut items, options);
+        Ok(items)
+    }
+
+    pub fn load_uri_with_options(uri: &str, options: &ViewOptions) -> io::Result<Vec<FileItem>> {
+        let file = gio::File::for_uri(uri);
+        let enumerator = file.enumerate_children(
+            "standard::name,standard::display-name,standard::type,standard::icon,standard::content-type,standard::size,time::modified",
+            gio::FileQueryInfoFlags::NONE,
+            gio::Cancellable::NONE,
+        ).map_err(|error| io::Error::new(io::ErrorKind::Other, error))?;
+        let mut items = Vec::new();
+        while let Some(info) = enumerator.next_file(gio::Cancellable::NONE).map_err(|error| io::Error::new(io::ErrorKind::Other, error))? {
+            if !info.name().to_string_lossy().starts_with('.') { items.push(FileItem::from_gio(&file, &info)); }
+        }
         sort_items(&mut items, options);
         Ok(items)
     }
