@@ -3,6 +3,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use gio::prelude::*;
+
 /// Metadata needed to render one row/tile in a directory view.
 #[derive(Clone, Debug)]
 pub struct FileItem {
@@ -12,6 +14,7 @@ pub struct FileItem {
     size: u64,
     modified: SystemTime,
     content_type: String,
+    uri: Option<String>,
 }
 
 impl FileItem {
@@ -36,6 +39,24 @@ impl FileItem {
             size: metadata.len(),
             modified: metadata.modified().unwrap_or(UNIX_EPOCH),
             content_type,
+            uri: None,
+        }
+    }
+
+    pub fn from_gio(parent: &gio::File, info: &gio::FileInfo) -> Self {
+        let name = info.display_name().to_string();
+        let child_uri = info.attribute_string("standard::target-uri")
+            .map(|uri| uri.to_string())
+            .unwrap_or_else(|| parent.resolve_relative_path(info.name()).uri().to_string());
+        let content_type = gio_content_type(info);
+        let modified = gio_modified(info);
+        Self {
+            path: PathBuf::new(), name,
+            is_dir: matches!(info.file_type(), gio::FileType::Directory | gio::FileType::Mountable | gio::FileType::Shortcut),
+            size: gio_size(info),
+            modified,
+            content_type,
+            uri: Some(child_uri),
         }
     }
 
@@ -63,6 +84,8 @@ impl FileItem {
         &self.content_type
     }
 
+    pub fn uri(&self) -> Option<&str> { self.uri.as_deref() }
+
     pub fn type_name(&self) -> String {
         if self.is_dir {
             "Folder".into()
@@ -79,6 +102,22 @@ impl FileItem {
     pub fn display_size(&self) -> String {
         format_size(self.size)
     }
+}
+
+fn gio_size(info: &gio::FileInfo) -> u64 {
+    info.has_attribute("standard::size").then(|| info.size() as u64).unwrap_or(0)
+}
+
+fn gio_modified(info: &gio::FileInfo) -> SystemTime {
+    let seconds = info.has_attribute("time::modified").then(|| info.attribute_uint64("time::modified")).unwrap_or(0);
+    SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(seconds)
+}
+
+fn gio_content_type(info: &gio::FileInfo) -> String {
+    info.has_attribute("standard::content-type")
+        .then(|| info.content_type().map(|value| value.to_string()))
+        .flatten()
+        .unwrap_or_else(|| "application/octet-stream".into())
 }
 
 fn content_type_for(path: &Path) -> String {
@@ -108,7 +147,7 @@ pub fn format_size(bytes: u64) -> String {
 mod tests {
     use std::fs;
 
-    use super::{format_size, FileItem};
+    use super::{format_size, gio_content_type, gio_size, FileItem};
 
     #[test]
     fn formats_human_readable_sizes() {
@@ -116,6 +155,29 @@ mod tests {
         assert_eq!(format_size(1024), "1.0 KB");
         assert_eq!(format_size(1024 * 1024), "1.0 MB");
         assert_eq!(format_size(1024 * 1024 * 20), "20 MB");
+    }
+
+    #[test]
+    fn missing_gio_metadata_uses_safe_defaults() {
+        let info = gio::FileInfo::new();
+
+        assert_eq!(gio_size(&info), 0);
+        assert_eq!(gio_content_type(&info), "application/octet-stream");
+    }
+
+    #[test]
+    fn gio_network_shortcuts_are_openable_remote_locations() {
+        let parent = gio::File::for_uri("network:///");
+        let info = gio::FileInfo::new();
+        info.set_name("dnssd-server-Octavia._smb._tcp");
+        info.set_display_name("Octavia");
+        info.set_file_type(gio::FileType::Shortcut);
+        info.set_attribute_string("standard::target-uri", "smb://octavia.local/");
+
+        let item = FileItem::from_gio(&parent, &info);
+
+        assert!(item.is_dir());
+        assert_eq!(item.uri(), Some("smb://octavia.local/"));
     }
 
     #[cfg(unix)]

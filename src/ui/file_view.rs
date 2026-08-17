@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 
+use gio::prelude::*;
 use gtk::prelude::*;
 use gtk::{Box as GtkBox, Button, ColumnView, ColumnViewColumn, CustomSorter, FlowBox, GestureClick, Image, Label, NoSelection, Orientation, Popover, ScrolledWindow, Separator, SignalListItemFactory, SortListModel};
 
@@ -20,7 +21,9 @@ enum ListRow {
 pub struct FileView {
     pub widget: ScrolledWindow,
     location: Rc<RefCell<PathBuf>>,
+    remote_uri: Rc<RefCell<Option<String>>>,
     on_navigate: Rc<RefCell<Option<Box<dyn Fn(PathBuf)>>>>,
+    on_uri_navigate: Rc<RefCell<Option<Box<dyn Fn(String)>>>>,
     on_context_command: Rc<RefCell<Option<Box<dyn Fn(ContextTarget, ContextCommand)>>>>,
     on_options_changed: Rc<RefCell<Option<Box<dyn Fn(ViewOptions)>>>>,
     options: Rc<RefCell<ViewOptions>>,
@@ -31,7 +34,7 @@ impl FileView {
         let scroll = ScrolledWindow::new();
         scroll.set_vexpand(true);
         let on_navigate = Rc::new(RefCell::new(None));
-        let view = Self { widget: scroll, location, on_navigate, on_context_command: Rc::new(RefCell::new(None)), on_options_changed: Rc::new(RefCell::new(None)), options: Rc::new(RefCell::new(ViewOptions::default())) };
+        let view = Self { widget: scroll, location, remote_uri: Rc::new(RefCell::new(None)), on_navigate, on_uri_navigate: Rc::new(RefCell::new(None)), on_context_command: Rc::new(RefCell::new(None)), on_options_changed: Rc::new(RefCell::new(None)), options: Rc::new(RefCell::new(ViewOptions::default())) };
         let background_view = view.clone();
         let background = GestureClick::new();
         background.set_button(3);
@@ -43,12 +46,49 @@ impl FileView {
     }
 
     pub fn set_location(&self, path: PathBuf) {
+        *self.remote_uri.borrow_mut() = None;
         *self.location.borrow_mut() = path;
         self.reload();
     }
 
+    pub fn set_uri(&self, uri: String) {
+        *self.remote_uri.borrow_mut() = Some(uri.clone());
+        self.widget.set_child(Some(&Label::new(Some("Connecting to remote location…"))));
+
+        let location = gio::File::for_uri(&uri);
+        let is_mountable = location
+            .query_info("standard::type", gio::FileQueryInfoFlags::NONE, gio::Cancellable::NONE)
+            .map(|info| is_mountable_file_type(info.file_type()))
+            .unwrap_or(false);
+        let parent = self.widget.root().and_downcast::<gtk::Window>();
+        let operation = gtk::MountOperation::new(parent.as_ref());
+        let keep_operation = operation.clone();
+        let view = self.clone();
+
+        if is_mountable {
+            location.mount_mountable(gio::MountMountFlags::NONE, Some(&operation), gio::Cancellable::NONE, move |result| {
+                let _keep_operation_alive = &keep_operation;
+                if let Ok(mounted_root) = result {
+                    *view.remote_uri.borrow_mut() = Some(mounted_root.uri().to_string());
+                }
+                view.reload();
+            });
+        } else {
+            location.mount_enclosing_volume(gio::MountMountFlags::NONE, Some(&operation), gio::Cancellable::NONE, move |_| {
+                let _keep_operation_alive = &keep_operation;
+                // This operation reports an error when the location is already mounted;
+                // in either case enumeration is the definitive result.
+                view.reload();
+            });
+        }
+    }
+
     pub fn set_navigation_handler<F: Fn(PathBuf) + 'static>(&self, callback: F) {
         *self.on_navigate.borrow_mut() = Some(Box::new(callback));
+    }
+
+    pub fn set_uri_navigation_handler<F: Fn(String) + 'static>(&self, callback: F) {
+        *self.on_uri_navigate.borrow_mut() = Some(Box::new(callback));
     }
 
     pub fn set_context_handler<F: Fn(ContextTarget, ContextCommand) + 'static>(&self, callback: F) {
@@ -68,9 +108,14 @@ impl FileView {
 
     pub fn location(&self) -> PathBuf { self.location.borrow().clone() }
 
+    pub fn uri(&self) -> Option<String> { self.remote_uri.borrow().clone() }
+
     fn reload(&self) {
         let options = self.options();
-        match DirectoryModel::load_with_options(&self.location.borrow(), &options) {
+        let result = self.remote_uri.borrow().as_deref()
+            .map(|uri| DirectoryModel::load_uri_with_options(uri, &options))
+            .unwrap_or_else(|| DirectoryModel::load_with_options(&self.location.borrow(), &options));
+        match result {
             Ok(items) if items.is_empty() => {
                 self.widget.set_child(Some(&Label::new(Some("This folder is empty"))));
             }
@@ -163,7 +208,7 @@ impl FileView {
             let Some(object) = selection.item(position).and_downcast::<glib::BoxedAnyObject>() else { return; };
             let row = object.borrow::<ListRow>();
             if let ListRow::File(item) = &*row {
-                activate_path(&file_view, item.path().to_path_buf());
+                activate_item(&file_view, item.clone());
             }
         });
         view
@@ -175,10 +220,10 @@ impl FileView {
 
     fn grid_view(&self, items: &[FileItem], options: &ViewOptions) -> FlowBox {
         let layout = options.grid_size.grid_layout();
-        let grid = FlowBox::new(); grid.set_selection_mode(gtk::SelectionMode::Single); grid.set_valign(gtk::Align::Start); grid.set_column_spacing(layout.gap.try_into().expect("grid gaps are positive")); grid.set_row_spacing(layout.gap.try_into().expect("grid gaps are positive")); grid.set_margin_top(12); grid.set_margin_start(12); grid.set_margin_end(12);
+        let grid = FlowBox::new(); grid.set_selection_mode(gtk::SelectionMode::Single); grid.set_activate_on_single_click(false); grid.set_valign(gtk::Align::Start); grid.set_column_spacing(layout.gap.try_into().expect("grid gaps are positive")); grid.set_row_spacing(layout.gap.try_into().expect("grid gaps are positive")); grid.set_margin_top(12); grid.set_margin_start(12); grid.set_margin_end(12);
         let activation_items = items.to_vec();
         let activation_view = self.clone();
-        grid.connect_child_activated(move |_, child| { if let Some(item) = activation_items.get(child.index() as usize) { activate_path(&activation_view, item.path().to_path_buf()); } });
+        grid.connect_child_activated(move |_, child| { if let Some(item) = activation_items.get(child.index() as usize) { activate_item(&activation_view, item.clone()); } });
         for item in items { let tile = GtkBox::new(Orientation::Vertical, layout.gap / 2); tile.add_css_class("icon-grid-tile"); tile.set_size_request(layout.tile_width, -1); tile.set_halign(gtk::Align::Center); tile.set_valign(gtk::Align::Start); tile.set_vexpand(false); tile.set_tooltip_text(Some(item.name())); tile.set_margin_top(layout.vertical_padding); tile.set_margin_bottom(layout.vertical_padding); let icon = item_image(item, options.thumbnails); icon.set_pixel_size(options.grid_size.icon_size()); tile.append(&icon); tile.append(&grid_tile_label(item.name(), layout.label_width_chars)); let target = if item.is_dir() { ContextTarget::Folder(item.path().to_path_buf()) } else { ContextTarget::File { path: item.path().to_path_buf(), content_type: item.content_type().to_string() } }; let view = self.clone(); let grid_context = grid.clone(); let menu_tile = tile.clone(); let gesture = GestureClick::new(); gesture.set_button(3); gesture.connect_pressed(move |gesture, _, x, y| { gesture.set_state(gtk::EventSequenceState::Claimed); if let Some(child) = menu_tile.parent().and_downcast::<gtk::FlowBoxChild>() { grid_context.select_child(&child); } show_item_context_menu(&menu_tile, x, y, target.clone(), &view) }); tile.add_controller(gesture); grid.append(&tile); }
         grid
     }
@@ -207,6 +252,10 @@ impl FileView {
 /// lists may be reordered by GTK's live column sorter.
 fn uses_native_row_sorting(group_field: GroupField) -> bool {
     group_field == GroupField::None
+}
+
+fn is_mountable_file_type(file_type: gio::FileType) -> bool {
+    file_type == gio::FileType::Mountable
 }
 
 fn grid_tile_label(name: &str, width_chars: i32) -> Label {
@@ -507,7 +556,7 @@ mod tests {
 
     use gtk::prelude::{ListModelExt, WidgetExt};
 
-    use super::{grid_tile_label, uses_native_row_sorting, FileView};
+    use super::{grid_tile_label, is_mountable_file_type, uses_native_row_sorting, FileView};
     use crate::core::{GroupField, ViewMode, ViewOptions};
 
     #[test]
@@ -516,6 +565,12 @@ mod tests {
         assert!(!uses_native_row_sorting(GroupField::DateModified));
         assert!(!uses_native_row_sorting(GroupField::Type));
         assert!(!uses_native_row_sorting(GroupField::Size));
+    }
+
+    #[test]
+    fn gvfs_mountable_locations_use_the_mountable_operation() {
+        assert!(is_mountable_file_type(gio::FileType::Mountable));
+        assert!(!is_mountable_file_type(gio::FileType::Directory));
     }
 
     #[test]
@@ -540,6 +595,16 @@ mod tests {
         view.set_options(ViewOptions { view_mode: ViewMode::IconGrid, ..ViewOptions::default() });
 
         assert_eq!(view.options().view_mode, ViewMode::IconGrid);
+    }
+
+    #[test]
+    #[ignore = "requires a GTK desktop session"]
+    fn icon_grid_requires_double_click_to_activate_an_item() {
+        gtk::init().expect("GTK should initialize for widget tests");
+        let view = FileView::new(Rc::new(RefCell::new(PathBuf::from("/tmp"))));
+        let grid = view.grid_view(&[], &ViewOptions::default());
+
+        assert!(!grid.activates_on_single_click());
     }
 
     #[test]
@@ -605,6 +670,18 @@ fn activate_path(view: &FileView, path: PathBuf) {
         }
     } else {
         open_with_default_application(&path);
+    }
+}
+
+fn activate_item(view: &FileView, item: FileItem) {
+    if let Some(uri) = item.uri() {
+        if item.is_dir() {
+            if let Some(callback) = view.on_uri_navigate.borrow().as_ref() { callback(uri.to_owned()); } else { view.set_uri(uri.to_owned()); }
+        } else {
+            let _ = gio::AppInfo::launch_default_for_uri(uri, None::<&gio::AppLaunchContext>);
+        }
+    } else {
+        activate_path(view, item.path().to_path_buf());
     }
 }
 
