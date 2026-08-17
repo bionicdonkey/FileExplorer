@@ -7,7 +7,7 @@ use gtk::{Box as GtkBox, Button, ColumnView, ColumnViewColumn, CustomSorter, Flo
 
 use crate::core::directory_model::DirectoryModel;
 use crate::core::file_item::FileItem;
-use crate::core::{ListColumn, ListColumnLayout, SortDirection, SortField, ViewMode, ViewOptions};
+use crate::core::{GroupField, ListColumn, ListColumnLayout, SortDirection, SortField, ViewMode, ViewOptions};
 
 #[derive(Clone)]
 enum ListRow {
@@ -88,8 +88,14 @@ impl FileView {
             store.append(&glib::BoxedAnyObject::new(ListRow::File(item.clone())));
         }
 
-        let sorted = SortListModel::new(Some(store), None::<gtk::Sorter>);
-        let selection = NoSelection::new(Some(sorted.clone()));
+        // Group headings are part of this model. Applying a second GTK sort would
+        // move the file rows independently and detach them from their headings.
+        let native_row_sorting = uses_native_row_sorting(options.group_field);
+        let sorted = native_row_sorting.then(|| SortListModel::new(Some(store.clone()), None::<gtk::Sorter>));
+        let selection = match &sorted {
+            Some(sorted) => NoSelection::new(Some(sorted.clone())),
+            None => NoSelection::new(Some(store)),
+        };
         let view = ColumnView::new(Some(selection.clone()));
         view.set_reorderable(true);
         view.set_show_row_separators(true);
@@ -107,7 +113,9 @@ impl FileView {
             column.connect_fixed_width_notify(move |_| publish_column_layout(&layout_view, &options_state, &changed));
             view.append_column(&column);
         }
-        sorted.set_sorter(view.sorter().as_ref());
+        if let Some(sorted) = &sorted {
+            sorted.set_sorter(view.sorter().as_ref());
+        }
 
         let options_state = self.options.clone();
         let changed = self.on_options_changed.clone();
@@ -116,6 +124,7 @@ impl FileView {
 
         let options_state = self.options.clone();
         let changed = self.on_options_changed.clone();
+        let file_view = self.clone();
         let column_sorter = view.sorter().and_downcast::<gtk::ColumnViewSorter>().expect("column view uses a column sorter");
         column_sorter.connect_primary_sort_column_notify(move |sorter| {
             let Some(column) = sorter.primary_sort_column() else { return; };
@@ -129,6 +138,10 @@ impl FileView {
             *options_state.borrow_mut() = options.clone();
             if let Some(callback) = changed.borrow().as_ref() {
                 callback(options);
+            }
+            if !uses_native_row_sorting(options_state.borrow().group_field) {
+                let file_view = file_view.clone();
+                glib::idle_add_local_once(move || file_view.reload());
             }
         });
 
@@ -170,6 +183,13 @@ impl FileView {
         }
         root
     }
+}
+
+/// Group headings and the entries underneath them must be treated as one ordered
+/// section.  DirectoryModel has already sorted those sections, so only ungrouped
+/// lists may be reordered by GTK's live column sorter.
+fn uses_native_row_sorting(group_field: GroupField) -> bool {
+    group_field == GroupField::None
 }
 
 fn column_title(column: ListColumn) -> &'static str {
@@ -325,8 +345,16 @@ mod tests {
 
     use gtk::prelude::ListModelExt;
 
-    use super::FileView;
-    use crate::core::{ViewMode, ViewOptions};
+    use super::{uses_native_row_sorting, FileView};
+    use crate::core::{GroupField, ViewMode, ViewOptions};
+
+    #[test]
+    fn grouped_lists_do_not_apply_a_second_native_row_sort() {
+        assert!(uses_native_row_sorting(GroupField::None));
+        assert!(!uses_native_row_sorting(GroupField::DateModified));
+        assert!(!uses_native_row_sorting(GroupField::Type));
+        assert!(!uses_native_row_sorting(GroupField::Size));
+    }
 
     #[test]
     #[ignore = "requires a GTK desktop session"]
