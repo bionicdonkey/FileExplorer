@@ -12,6 +12,7 @@ use crate::core::operations::FileOperations;
 use crate::core::{GridSize, GroupField, SortDirection, SortField, ViewMode, ViewOptions, ViewPreferencesStore};
 use crate::ui::context_menu::{ContextCommand, ContextTarget};
 use crate::ui::file_view::FileView;
+use crate::ui::properties_dialog::PropertiesDialog;
 use crate::ui::header::{HeaderControls, NavigationAction};
 use crate::ui::sidebar::Sidebar;
 use crate::ui::tab_layout::{calculate_tab_layout, TabLayoutInput};
@@ -339,7 +340,7 @@ fn wire_tab(page: TabPage, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, hea
                 }
             }
             ContextCommand::Properties => {
-                if let Some(path) = path { show_properties_dialog(&command_view, &path); }
+                if let Some(path) = path { let refresh = command_view.clone(); PropertiesDialog::present(command_view.widget.root().and_downcast_ref::<gtk::Window>(), path, move || refresh.set_location(refresh.location())); }
             }
             ContextCommand::Refresh => command_view.set_location(command_view.location()),
             _ => {}
@@ -375,7 +376,7 @@ where F: Fn(String) -> std::io::Result<()> + 'static, S: Fn() + 'static {
     dialog.present();
 }
 
-#[allow(deprecated)]
+#[allow(dead_code, deprecated)]
 fn show_properties_dialog(view: &FileView, path: &Path) {
     let dialog = gtk::Dialog::new();
     dialog.set_title(Some("Properties"));

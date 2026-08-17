@@ -1,6 +1,7 @@
 pub mod context_menu;
 pub mod file_view;
 pub mod header;
+pub mod properties_dialog;
 pub mod sidebar;
 pub mod tab_layout;
 pub mod tabs;
