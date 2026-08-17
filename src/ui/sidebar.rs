@@ -88,7 +88,7 @@ impl Sidebar {
                 let _ = model.preferences().save();
             });
             heading_row.append(&toggle);
-            let heading = Label::new(Some(section.title));
+            let heading = Label::new(Some(&section.title));
             heading.add_css_class("heading");
             heading.add_css_class("sidebar-section-heading");
             heading.set_xalign(0.0);

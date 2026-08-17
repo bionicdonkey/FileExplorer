@@ -65,7 +65,7 @@ impl SidebarNode {
 
 #[derive(Clone, Debug)]
 pub struct SidebarSection {
-    pub title: &'static str,
+    pub title: String,
     pub nodes: Vec<SidebarNode>,
 }
 
@@ -165,7 +165,7 @@ impl SidebarModel {
     }
 
     pub fn sections(&self) -> Vec<SidebarSection> {
-        vec![self.quick_access(), self.this_pc(), self.network_and_online()]
+        vec![self.quick_access(), self.user_folders(), self.this_pc(), self.devices(), self.network_and_online()]
     }
 
     pub fn preferences(&self) -> &SidebarPreferences { &self.preferences }
@@ -200,18 +200,25 @@ impl SidebarModel {
         let nodes = self.preferences.pins().iter().filter(|path| path.exists()).map(|path| {
             SidebarNode::local(path.clone(), display_name(path), standard_folder_icon(path), true)
         }).collect();
-        SidebarSection { title: "Quick access", nodes }
+        SidebarSection { title: "Quick access".into(), nodes }
     }
 
-    fn this_pc(&self) -> SidebarSection {
+    fn user_folders(&self) -> SidebarSection {
         let mut nodes = vec![SidebarNode::local(self.home.clone(), "Home", "user-home-symbolic", true)];
         for (name, icon) in [("Desktop", "user-desktop-symbolic"), ("Documents", "folder-documents-symbolic"), ("Downloads", "folder-download-symbolic"), ("Music", "folder-music-symbolic"), ("Pictures", "folder-pictures-symbolic"), ("Videos", "folder-videos-symbolic")] {
             let path = self.home.join(name);
             if path.exists() { nodes.push(SidebarNode::local(path, name, icon, true)); }
         }
-        nodes.push(SidebarNode::local(PathBuf::from("/"), "File System", "drive-harddisk-symbolic", true));
-        nodes.extend(self.local_mounts());
-        SidebarSection { title: "This PC", nodes }
+        SidebarSection { title: display_name(&self.home), nodes }
+    }
+
+    fn this_pc(&self) -> SidebarSection {
+        let nodes = vec![SidebarNode::local(PathBuf::from("/"), "File System", "drive-harddisk-symbolic", true)];
+        SidebarSection { title: "This PC".into(), nodes }
+    }
+
+    fn devices(&self) -> SidebarSection {
+        SidebarSection { title: "Devices".into(), nodes: self.local_mounts() }
     }
 
     fn network_and_online(&self) -> SidebarSection {
@@ -221,7 +228,7 @@ impl SidebarModel {
         ];
         nodes.extend(self.preferences.remote_pins().iter().map(|uri| SidebarNode::remote(uri.clone(), remote_label(uri), "folder-remote-symbolic", true)));
         nodes.extend(self.remote_mounts());
-        SidebarSection { title: "Network & online", nodes }
+        SidebarSection { title: "Network & online".into(), nodes }
     }
 
     fn local_mounts(&self) -> Vec<SidebarNode> {
@@ -308,6 +315,7 @@ fn canonical_child_uri(parent_uri: &str, name: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::path::{Path, PathBuf};
 
     use super::{SidebarLocation, SidebarModel, SidebarPreferences};
@@ -333,6 +341,17 @@ mod tests {
         let restored = SidebarPreferences::load_from(path).unwrap();
         assert!(!restored.section_expanded("This PC"));
         assert!(restored.section_expanded("Quick access"));
+    }
+
+    #[test]
+    fn sidebar_separates_personal_folders_from_devices() {
+        let temporary = tempfile::tempdir().unwrap();
+        let home = temporary.path().join("user");
+        fs::create_dir_all(&home).unwrap();
+        let model = SidebarModel::new(SidebarPreferences::in_memory(), home);
+
+        let titles = model.sections().into_iter().map(|section| section.title).collect::<Vec<_>>();
+        assert_eq!(titles, ["Quick access", "user", "This PC", "Devices", "Network & online"]);
     }
 
     #[test]
