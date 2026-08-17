@@ -19,6 +19,7 @@ pub enum SidebarAction {
     Unpin(PathBuf),
     AddNetworkLocation,
     UnpinRemote(String),
+    Unmount(String),
 }
 
 #[derive(Clone)]
@@ -71,13 +72,20 @@ impl Sidebar {
             let toggle = ToggleButton::new();
             toggle.add_css_class("flat");
             toggle.add_css_class("sidebar-section-toggle");
-            toggle.set_active(true);
-            toggle.set_child(Some(&Image::from_icon_name("pan-down-symbolic")));
+            let section_title = section.title.to_owned();
+            let expanded = self.model.borrow().preferences().section_expanded(&section_title);
+            toggle.set_active(expanded);
+            rows.set_visible(expanded);
+            toggle.set_child(Some(&Image::from_icon_name(if expanded { "pan-down-symbolic" } else { "pan-end-symbolic" })));
             let rows_for_toggle = rows.clone();
+            let preferences = self.model.clone();
             toggle.connect_toggled(move |toggle| {
                 let expanded = toggle.is_active();
                 rows_for_toggle.set_visible(expanded);
                 toggle.set_child(Some(&Image::from_icon_name(if expanded { "pan-down-symbolic" } else { "pan-end-symbolic" })));
+                let mut model = preferences.borrow_mut();
+                model.preferences_mut().set_section_expanded(section_title.clone(), expanded);
+                let _ = model.preferences().save();
             });
             heading_row.append(&toggle);
             let heading = Label::new(Some(section.title));
@@ -248,6 +256,14 @@ impl Sidebar {
                 let uri = location.uri();
                 open.connect_clicked(move |_| { popover_for_open.popdown(); open_action(SidebarAction::OpenUri(uri.clone())); });
                 menu.append(&open);
+                if model.borrow().mount_for_location(&location).is_some() {
+                    let unmount = Button::with_label("Unmount");
+                    let action = action.clone();
+                    let popover_for_unmount = popover.clone();
+                    let uri = location.uri();
+                    unmount.connect_clicked(move |_| { popover_for_unmount.popdown(); action(SidebarAction::Unmount(uri.clone())); });
+                    menu.append(&unmount);
+                }
                 if model.borrow().preferences().remote_pins().iter().any(|pinned| pinned == &location.uri()) {
                     let unpin = Button::with_label("Unpin from Network & online");
                     let action = action.clone();
@@ -277,6 +293,14 @@ impl Sidebar {
             separator.set_margin_top(4);
             separator.set_margin_bottom(4);
             menu.append(&separator);
+            if model.borrow().mount_for_location(&location).is_some() {
+                let unmount = Button::with_label("Unmount");
+                let action = action.clone();
+                let popover_for_unmount = popover.clone();
+                let uri = location.uri();
+                unmount.connect_clicked(move |_| { popover_for_unmount.popdown(); action(SidebarAction::Unmount(uri.clone())); });
+                menu.append(&unmount);
+            }
             let is_pinned = model.borrow().preferences().is_pinned(&path);
             let pin_item = Button::with_label(if is_pinned { "Unpin from Quick access" } else { "Pin to Quick access" });
             let action = action.clone();

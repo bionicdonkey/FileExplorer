@@ -45,16 +45,18 @@ impl FileItem {
 
     pub fn from_gio(parent: &gio::File, info: &gio::FileInfo) -> Self {
         let name = info.display_name().to_string();
-        let child = parent.resolve_relative_path(info.name());
+        let child_uri = info.attribute_string("standard::target-uri")
+            .map(|uri| uri.to_string())
+            .unwrap_or_else(|| parent.resolve_relative_path(info.name()).uri().to_string());
         let content_type = gio_content_type(info);
         let modified = gio_modified(info);
         Self {
             path: PathBuf::new(), name,
-            is_dir: matches!(info.file_type(), gio::FileType::Directory | gio::FileType::Mountable),
+            is_dir: matches!(info.file_type(), gio::FileType::Directory | gio::FileType::Mountable | gio::FileType::Shortcut),
             size: gio_size(info),
             modified,
             content_type,
-            uri: Some(child.uri().to_string()),
+            uri: Some(child_uri),
         }
     }
 
@@ -161,6 +163,21 @@ mod tests {
 
         assert_eq!(gio_size(&info), 0);
         assert_eq!(gio_content_type(&info), "application/octet-stream");
+    }
+
+    #[test]
+    fn gio_network_shortcuts_are_openable_remote_locations() {
+        let parent = gio::File::for_uri("network:///");
+        let info = gio::FileInfo::new();
+        info.set_name("dnssd-server-Octavia._smb._tcp");
+        info.set_display_name("Octavia");
+        info.set_file_type(gio::FileType::Shortcut);
+        info.set_attribute_string("standard::target-uri", "smb://octavia.local/");
+
+        let item = FileItem::from_gio(&parent, &info);
+
+        assert!(item.is_dir());
+        assert_eq!(item.uri(), Some("smb://octavia.local/"));
     }
 
     #[cfg(unix)]

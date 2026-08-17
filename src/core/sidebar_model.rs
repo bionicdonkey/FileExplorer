@@ -2,6 +2,7 @@ use std::env;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::collections::BTreeMap;
 
 use gio::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -74,17 +75,20 @@ struct StoredPreferences {
     pins: Vec<PathBuf>,
     #[serde(default)]
     remote_pins: Vec<String>,
+    #[serde(default)]
+    section_expanded: BTreeMap<String, bool>,
 }
 
 pub struct SidebarPreferences {
     path: Option<PathBuf>,
     pins: Vec<PathBuf>,
     remote_pins: Vec<String>,
+    section_expanded: BTreeMap<String, bool>,
     needs_defaults: bool,
 }
 
 impl SidebarPreferences {
-    pub fn in_memory() -> Self { Self { path: None, pins: Vec::new(), remote_pins: Vec::new(), needs_defaults: false } }
+    pub fn in_memory() -> Self { Self { path: None, pins: Vec::new(), remote_pins: Vec::new(), section_expanded: BTreeMap::new(), needs_defaults: false } }
 
     pub fn load_default() -> io::Result<Self> {
         let config_home = env::var_os("XDG_CONFIG_HOME")
@@ -95,10 +99,10 @@ impl SidebarPreferences {
     }
 
     pub fn load_from(path: PathBuf) -> io::Result<Self> {
-        if !path.exists() { return Ok(Self { path: Some(path), pins: Vec::new(), remote_pins: Vec::new(), needs_defaults: true }); }
+        if !path.exists() { return Ok(Self { path: Some(path), pins: Vec::new(), remote_pins: Vec::new(), section_expanded: BTreeMap::new(), needs_defaults: true }); }
         let stored = serde_json::from_slice::<StoredPreferences>(&fs::read(&path)?)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        let mut preferences = Self { path: Some(path), pins: Vec::new(), remote_pins: Vec::new(), needs_defaults: false };
+        let mut preferences = Self { path: Some(path), pins: Vec::new(), remote_pins: Vec::new(), section_expanded: stored.section_expanded, needs_defaults: false };
         for pin in stored.pins { preferences.pin(pin); }
         for uri in stored.remote_pins { let _ = preferences.pin_remote(uri); }
         Ok(preferences)
@@ -106,6 +110,8 @@ impl SidebarPreferences {
 
     pub fn pins(&self) -> &[PathBuf] { &self.pins }
     pub fn remote_pins(&self) -> &[String] { &self.remote_pins }
+    pub fn section_expanded(&self, section: &str) -> bool { self.section_expanded.get(section).copied().unwrap_or(true) }
+    pub fn set_section_expanded(&mut self, section: impl Into<String>, expanded: bool) { self.section_expanded.insert(section.into(), expanded); }
 
     pub fn pin(&mut self, path: PathBuf) {
         let path = normalized_path(path);
@@ -131,7 +137,7 @@ impl SidebarPreferences {
         let Some(path) = &self.path else { return Ok(()); };
         let parent = path.parent().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "sidebar preference path has no parent"))?;
         fs::create_dir_all(parent)?;
-        let bytes = serde_json::to_vec_pretty(&StoredPreferences { pins: self.pins.clone(), remote_pins: self.remote_pins.clone() })
+        let bytes = serde_json::to_vec_pretty(&StoredPreferences { pins: self.pins.clone(), remote_pins: self.remote_pins.clone(), section_expanded: self.section_expanded.clone() })
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         let temporary = path.with_extension("json.tmp");
         fs::write(&temporary, bytes)?;
@@ -164,6 +170,15 @@ impl SidebarModel {
 
     pub fn preferences(&self) -> &SidebarPreferences { &self.preferences }
     pub fn preferences_mut(&mut self) -> &mut SidebarPreferences { &mut self.preferences }
+
+    pub fn mount_for_location(&self, location: &SidebarLocation) -> Option<gio::Mount> {
+        let uri = location.uri();
+        gio::VolumeMonitor::get().mounts().into_iter().find(|mount| mount.root().uri() == uri)
+    }
+
+    pub fn mount_for_uri(&self, uri: &str) -> Option<gio::Mount> {
+        gio::VolumeMonitor::get().mounts().into_iter().find(|mount| mount.root().uri() == uri)
+    }
 
     pub fn children_for_location(&self, location: &SidebarLocation) -> Vec<SidebarNode> {
         match location.local_path() {
@@ -304,6 +319,20 @@ mod tests {
         preferences.pin(PathBuf::from("/tmp/one"));
 
         assert_eq!(preferences.pins(), &[PathBuf::from("/tmp/one")]);
+    }
+
+    #[test]
+    fn sidebar_section_state_round_trips_with_preferences() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("sidebar.json");
+        let mut preferences = SidebarPreferences::load_from(path.clone()).unwrap();
+
+        preferences.set_section_expanded("This PC", false);
+        preferences.save().unwrap();
+
+        let restored = SidebarPreferences::load_from(path).unwrap();
+        assert!(!restored.section_expanded("This PC"));
+        assert!(restored.section_expanded("Quick access"));
     }
 
     #[test]

@@ -140,6 +140,18 @@ impl ExplorerWindow {
                 drop(model);
                 if let Some(sidebar) = sidebar_holder_actions.borrow().as_ref() { sidebar.refresh(); }
             }
+            SidebarAction::Unmount(uri) => {
+                let mount = sidebar_model_actions.borrow().mount_for_uri(&uri);
+                if let Some(mount) = mount {
+                    let operation = gtk::MountOperation::new(Some(&sidebar_window));
+                    let keep_operation = operation.clone();
+                    let sidebar = sidebar_holder_actions.clone();
+                    mount.unmount_with_operation(gio::MountUnmountFlags::NONE, Some(&operation), gio::Cancellable::NONE, move |_| {
+                        let _keep_operation_alive = &keep_operation;
+                        if let Some(sidebar) = sidebar.borrow().as_ref() { sidebar.refresh(); }
+                    });
+                }
+            }
         });
         sidebar.set_active_path(&initial);
         *sidebar_holder.borrow_mut() = Some(sidebar.clone());
