@@ -28,7 +28,7 @@ fn directory_model_filters_hidden_entries_by_default() {
 }
 
 #[test]
-fn directory_model_sorts_directories_and_files_by_name() {
+fn directory_model_sorts_folders_first_then_by_name() {
     let directory = tempdir().unwrap();
     fs::create_dir(directory.path().join("zeta")).unwrap();
     fs::write(directory.path().join("Alpha.txt"), b"a").unwrap();
@@ -38,7 +38,7 @@ fn directory_model_sorts_directories_and_files_by_name() {
     let entries = DirectoryModel::load(directory.path()).unwrap();
     let names = entries.iter().map(|item| item.name()).collect::<Vec<_>>();
 
-    assert_eq!(names, vec!["aardvark.txt", "Alpha.txt", "beta", "zeta"]);
+    assert_eq!(names, vec!["beta", "zeta", "aardvark.txt", "Alpha.txt"]);
 }
 
 #[test]

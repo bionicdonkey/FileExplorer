@@ -4,10 +4,11 @@ use std::rc::Rc;
 
 use adw::prelude::*;
 use adw::{Application, ApplicationWindow, HeaderBar, TabPage, TabView, ToolbarView};
-use gtk::{Align, Box as GtkBox, Button, Label, Orientation, Paned, SearchEntry};
+use gtk::{Align, Box as GtkBox, Button, Label, MenuButton, Orientation, Paned, Popover, SearchEntry};
 
 use crate::core::location::Location;
 use crate::core::navigation::NavigationHistory;
+use crate::core::{GridSize, GroupField, SortDirection, SortField, ViewMode, ViewPreferencesStore};
 use crate::ui::file_view::FileView;
 use crate::ui::header::{HeaderControls, NavigationAction};
 use crate::ui::sidebar::Sidebar;
@@ -56,7 +57,9 @@ impl ExplorerWindow {
         let initial_location = Rc::new(RefCell::new(initial.clone()));
         let header_controls = HeaderControls::new(initial_location.clone());
         let tabs_data: Rc<RefCell<Vec<TabData>>> = Rc::new(RefCell::new(Vec::new()));
+        let preferences = Rc::new(RefCell::new(ViewPreferencesStore::load_default().unwrap_or_else(|_| ViewPreferencesStore::in_memory())));
         let first_view = FileView::new(initial_location.clone());
+        first_view.set_options(preferences.borrow().options_for(&initial, &[]));
         let first_page = tabs.view.append(&first_view.widget);
         first_page.set_title(&tab_title(&initial));
         tabs_data.borrow_mut().push(TabData {
@@ -76,9 +79,10 @@ impl ExplorerWindow {
         let sidebar_data = tabs_data.clone();
         let sidebar_tabs = tabs.view.clone();
         let sidebar_header = header_controls.clone();
+        let sidebar_preferences = preferences.clone();
         let sidebar = Sidebar::new(move |path| {
             if let Some(index) = selected_index(&sidebar_tabs, &sidebar_data) {
-                navigate_tab(index, path, &sidebar_data, &sidebar_tabs, &sidebar_header, true);
+                navigate_tab(index, path, &sidebar_data, &sidebar_tabs, &sidebar_header, &sidebar_preferences, true);
             }
         });
 
@@ -103,6 +107,7 @@ impl ExplorerWindow {
 
         let body = GtkBox::new(Orientation::Vertical, 0);
         body.append(&header_controls.widget);
+        body.append(&view_controls(&tabs_data, &tabs.view, &preferences));
         body.append(&search);
         body.append(&content);
         body.append(&status);
@@ -111,19 +116,21 @@ impl ExplorerWindow {
         toolbar.set_content(Some(&body));
         window.set_content(Some(&toolbar));
 
-        wire_tab(first_page.clone(), &tabs_data, &tabs.view, &header_controls);
+        wire_tab(first_page.clone(), &tabs_data, &tabs.view, &header_controls, &preferences);
 
         let new_data = tabs_data.clone();
         let new_tabs = tabs.view.clone();
         let new_header = header_controls.clone();
+        let new_preferences = preferences.clone();
         new_tab.connect_clicked(move |_| {
             let path = Location::home().path().to_path_buf();
             let location = Rc::new(RefCell::new(path.clone()));
             let view = FileView::new(location.clone());
+            view.set_options(new_preferences.borrow().options_for(&path, &[]));
             let page = new_tabs.append(&view.widget);
             page.set_title(&tab_title(&path));
             new_data.borrow_mut().push(TabData { view, location, history: history_with(path), page: page.clone() });
-            wire_tab(page.clone(), &new_data, &new_tabs, &new_header);
+            wire_tab(page.clone(), &new_data, &new_tabs, &new_header, &new_preferences);
             new_tabs.set_selected_page(&page);
         });
 
@@ -149,6 +156,7 @@ impl ExplorerWindow {
         let navigation_data = tabs_data.clone();
         let navigation_tabs = tabs.view.clone();
         let navigation_header = header_controls.clone();
+        let navigation_preferences = preferences.clone();
         header_controls.connect_navigation(move |action| {
             let Some(index) = selected_index(&navigation_tabs, &navigation_data) else { return; };
             let next = {
@@ -161,25 +169,27 @@ impl ExplorerWindow {
                 }
             };
             if let Some(path) = next {
-                navigate_tab(index, path, &navigation_data, &navigation_tabs, &navigation_header, !matches!(action, NavigationAction::Back | NavigationAction::Forward | NavigationAction::Refresh));
+                navigate_tab(index, path, &navigation_data, &navigation_tabs, &navigation_header, &navigation_preferences, !matches!(action, NavigationAction::Back | NavigationAction::Forward | NavigationAction::Refresh));
             }
         });
 
         let breadcrumb_data = tabs_data.clone();
         let breadcrumb_tabs = tabs.view.clone();
         let breadcrumb_header = header_controls.clone();
+        let breadcrumb_preferences = preferences.clone();
         header_controls.set_navigation_handler(move |path| {
             if let Some(index) = selected_index(&breadcrumb_tabs, &breadcrumb_data) {
-                navigate_tab(index, path, &breadcrumb_data, &breadcrumb_tabs, &breadcrumb_header, true);
+                navigate_tab(index, path, &breadcrumb_data, &breadcrumb_tabs, &breadcrumb_header, &breadcrumb_preferences, true);
             }
         });
 
         let entry_data = tabs_data.clone();
         let entry_tabs = tabs.view.clone();
         let entry_header = header_controls.clone();
+        let entry_preferences = preferences.clone();
         header_controls.connect_location_changed(move |path| {
             if let Some(index) = selected_index(&entry_tabs, &entry_data) {
-                navigate_tab(index, path, &entry_data, &entry_tabs, &entry_header, true);
+                navigate_tab(index, path, &entry_data, &entry_tabs, &entry_header, &entry_preferences, true);
             }
         });
 
@@ -197,27 +207,29 @@ fn history_with(path: PathBuf) -> Rc<RefCell<NavigationHistory>> {
     history
 }
 
-fn wire_tab(page: TabPage, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, header: &HeaderControls) {
+fn wire_tab(page: TabPage, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, header: &HeaderControls, preferences: &Rc<RefCell<ViewPreferencesStore>>) {
     let view = data.borrow().iter().find(|tab| tab.page == page).map(|tab| tab.view.clone())
         .expect("a tab page should have corresponding tab data");
     let data = data.clone();
     let tabs = tabs.clone();
     let header = header.clone();
+    let preferences = preferences.clone();
     view.set_navigation_handler(move |path| {
         let index = { data.borrow().iter().position(|tab| tab.page == page) };
         if let Some(index) = index {
-            navigate_tab(index, path, &data, &tabs, &header, true);
+            navigate_tab(index, path, &data, &tabs, &header, &preferences, true);
         }
     });
 }
 
-fn navigate_tab(index: usize, path: PathBuf, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, header: &HeaderControls, record_history: bool) {
+fn navigate_tab(index: usize, path: PathBuf, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, header: &HeaderControls, preferences: &Rc<RefCell<ViewPreferencesStore>>, record_history: bool) {
     if !path.is_dir() || index >= data.borrow().len() { return; }
     let mut data_ref = data.borrow_mut();
     let tab = &mut data_ref[index];
     if record_history { tab.history.borrow_mut().push(path.clone()); }
     *tab.location.borrow_mut() = path.clone();
     tab.view.set_location(path.clone());
+    tab.view.set_options(preferences.borrow().options_for(&path, &[]));
     tab.page.set_title(&tab_title(&path));
     if tabs.selected_page().as_ref().is_some_and(|page| *page == tab.page) {
         header.set_location(&path);
@@ -255,6 +267,52 @@ fn apply_tab_layout(window: &ApplicationWindow, tabs: &TabStrip) {
     ));
 
     tabs.set_layout(layout);
+}
+
+fn view_controls(data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, preferences: &Rc<RefCell<ViewPreferencesStore>>) -> GtkBox {
+    let controls = GtkBox::new(Orientation::Horizontal, 6);
+    controls.set_margin_start(8); controls.set_margin_end(8); controls.set_margin_bottom(6);
+    for (label, entries) in [
+        ("Sort", vec!["Name", "Date modified", "Type", "Size", "Ascending", "Descending", "Toggle folders first"]),
+        ("Group", vec!["None", "Type", "Size", "Date modified"]),
+        ("View", vec!["Detailed List", "Compact List", "Icon Grid", "Small icons", "Medium icons", "Large icons", "Extra Large icons", "Toggle thumbnails"]),
+    ] {
+        let button = MenuButton::builder().label(label).build();
+        let popover = Popover::new(); let menu = GtkBox::new(Orientation::Vertical, 2); menu.set_margin_top(6); menu.set_margin_bottom(6);
+        for entry in entries { let action = Button::with_label(entry); action.add_css_class("flat"); let data = data.clone(); let tabs = tabs.clone(); let preferences = preferences.clone(); let entry = format!("{label}:{entry}");
+            action.connect_clicked(move |_| update_active_options(&data, &tabs, &preferences, &entry)); menu.append(&action); }
+        popover.set_child(Some(&menu)); button.set_popover(Some(&popover)); controls.append(&button);
+    }
+    controls
+}
+
+fn update_active_options(data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, preferences: &Rc<RefCell<ViewPreferencesStore>>, entry: &str) {
+    let Some(index) = selected_index(tabs, data) else { return; };
+    let mut data = data.borrow_mut(); let tab = &mut data[index]; let mut options = tab.view.options();
+    match entry {
+        "Sort:Name" => options.sort_field = SortField::Name,
+        "Sort:Date modified" => options.sort_field = SortField::DateModified,
+        "Sort:Type" => options.sort_field = SortField::Type,
+        "Sort:Size" => options.sort_field = SortField::Size,
+        "Sort:Ascending" => options.sort_direction = SortDirection::Ascending,
+        "Sort:Descending" => options.sort_direction = SortDirection::Descending,
+        "Sort:Toggle folders first" => options.folders_first = !options.folders_first,
+        "Group:None" => options.group_field = GroupField::None,
+        "Group:Type" => options.group_field = GroupField::Type,
+        "Group:Size" => options.group_field = GroupField::Size,
+        "Group:Date modified" => options.group_field = GroupField::DateModified,
+        "View:Detailed List" => options.view_mode = ViewMode::DetailedList,
+        "View:Compact List" => options.view_mode = ViewMode::CompactList,
+        "View:Icon Grid" => options.view_mode = ViewMode::IconGrid,
+        "View:Small icons" => { options.view_mode = ViewMode::IconGrid; options.grid_size = GridSize::Small; }
+        "View:Medium icons" => { options.view_mode = ViewMode::IconGrid; options.grid_size = GridSize::Medium; }
+        "View:Large icons" => { options.view_mode = ViewMode::IconGrid; options.grid_size = GridSize::Large; }
+        "View:Extra Large icons" => { options.view_mode = ViewMode::IconGrid; options.grid_size = GridSize::ExtraLarge; }
+        "View:Toggle thumbnails" => options.thumbnails = !options.thumbnails,
+        _ => return,
+    }
+    let path = tab.location.borrow().clone(); tab.view.set_options(options.clone());
+    preferences.borrow_mut().set(&path, options); let _ = preferences.borrow().save();
 }
 
 #[cfg(test)]
