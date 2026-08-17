@@ -357,13 +357,13 @@ mod tests {
 fn file_icon(item: &FileItem) -> Image {
     if item.is_dir() {
         let icon_name = match item.name() {
-            "Desktop" => "user-desktop-symbolic",
-            "Documents" => "folder-documents-symbolic",
-            "Downloads" => "folder-download-symbolic",
-            "Music" => "folder-music-symbolic",
-            "Pictures" => "folder-pictures-symbolic",
-            "Videos" => "folder-videos-symbolic",
-            _ => "folder-symbolic",
+            "Desktop" => "user-desktop",
+            "Documents" => "folder-documents",
+            "Downloads" => "folder-download",
+            "Music" => "folder-music",
+            "Pictures" => "folder-pictures",
+            "Videos" => "folder-videos",
+            _ => "folder",
         };
         return Image::from_icon_name(icon_name);
     }

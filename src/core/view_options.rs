@@ -201,7 +201,7 @@ pub struct ViewOptions {
 impl Default for ViewOptions {
     fn default() -> Self {
         Self {
-            view_mode: ViewMode::DetailedList,
+            view_mode: ViewMode::Hybrid,
             grid_size: GridSize::Medium,
             sort_field: SortField::Name,
             sort_direction: SortDirection::Ascending,
