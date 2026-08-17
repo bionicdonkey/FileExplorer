@@ -66,6 +66,7 @@ mod tests {
     use gtk::prelude::*;
 
     #[test]
+    #[ignore = "requires a GTK desktop session"]
     fn tab_strip_updates_overflow_navigation_controls_from_layout() {
         gtk::init().expect("GTK should initialize for widget tests");
         let tabs = TabStrip::new();
