@@ -277,7 +277,7 @@ fn apply_tab_layout(window: &ApplicationWindow, tabs: &TabStrip) {
 fn view_controls(data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, preferences: &Rc<RefCell<ViewPreferencesStore>>) -> GtkBox {
     let controls = GtkBox::new(Orientation::Horizontal, 6);
     for label in ["Sort", "Group", "View"] {
-        let button = MenuButton::builder().label(label).build();
+        let button = menu_button(label);
         let data = data.clone();
         let tabs = tabs.clone();
         let preferences = preferences.clone();
@@ -291,6 +291,12 @@ fn view_controls(data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, preferences: 
         controls.append(&button);
     }
     controls
+}
+
+fn menu_button(label: &str) -> MenuButton {
+    let button = MenuButton::builder().label(label).build();
+    button.set_popover(Some(&Popover::new()));
+    button
 }
 
 fn view_menu_body(label: &str, options: &ViewOptions, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, preferences: &Rc<RefCell<ViewPreferencesStore>>) -> GtkBox {
@@ -416,7 +422,7 @@ mod tests {
     use gtk::prelude::{OrientableExt, WidgetExt};
     use gtk::{Box as GtkBox, Orientation, SearchEntry};
 
-    use super::{file_toolbar, matching_index, persist_options, remove_matching};
+    use super::{file_toolbar, menu_button, matching_index, persist_options, remove_matching};
     use crate::core::{SortField, ViewOptions, ViewPreferencesStore};
 
     #[test]
@@ -455,5 +461,16 @@ mod tests {
         assert_eq!(row.orientation(), Orientation::Horizontal);
         assert!(row.first_child().is_some());
         assert!(row.last_child().is_some());
+    }
+
+    #[test]
+    #[ignore = "requires a GTK desktop session"]
+    fn stateful_menu_button_has_an_initial_popover_and_is_sensitive() {
+        gtk::init().expect("GTK should initialize for widget tests");
+
+        let button = menu_button("Sort");
+
+        assert!(button.popover().is_some());
+        assert!(button.is_sensitive());
     }
 }
