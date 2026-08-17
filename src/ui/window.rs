@@ -133,9 +133,7 @@ impl ExplorerWindow {
             if close_data.borrow().len() <= 1 {
                 return false;
             }
-            if let Some(index) = close_data.borrow().iter().position(|tab| tab.page == *page) {
-                close_data.borrow_mut().remove(index);
-            }
+            remove_matching(&close_data, |tab| tab.page == *page);
             view.close_page_finish(page, true);
             true
         });
@@ -226,6 +224,16 @@ fn selected_index(tabs: &TabView, data: &Rc<RefCell<Vec<TabData>>>) -> Option<us
     data.borrow().iter().position(|tab| tab.page == page)
 }
 
+fn remove_matching<T>(items: &RefCell<Vec<T>>, matches: impl Fn(&T) -> bool) -> bool {
+    let index = { items.borrow().iter().position(matches) };
+    if let Some(index) = index {
+        items.borrow_mut().remove(index);
+        true
+    } else {
+        false
+    }
+}
+
 fn tab_title(path: &std::path::Path) -> String {
     path.file_name().and_then(|name| name.to_str()).map(ToOwned::to_owned).unwrap_or_else(|| "/".into())
 }
@@ -238,4 +246,19 @@ fn apply_tab_layout(window: &ApplicationWindow, tabs: &TabStrip) {
     ));
 
     tabs.set_layout(layout);
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+
+    use super::remove_matching;
+
+    #[test]
+    fn remove_matching_releases_the_read_borrow_before_removing_the_middle_item() {
+        let items = RefCell::new(vec!["first", "middle", "last"]);
+
+        assert!(remove_matching(&items, |item| *item == "middle"));
+        assert_eq!(items.into_inner(), vec!["first", "last"]);
+    }
 }
