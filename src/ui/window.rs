@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use adw::prelude::*;
-use adw::{Application, ApplicationWindow, CenteringPolicy, HeaderBar, TabPage, TabView, ToolbarView};
+use adw::{Application, ApplicationWindow, HeaderBar, TabPage, TabView, ToolbarView};
+use gtk::gdk;
 use gtk::{Align, Box as GtkBox, Button, Label, Orientation, Paned, SearchEntry};
 
 use crate::core::location::Location;
@@ -11,6 +12,7 @@ use crate::core::navigation::NavigationHistory;
 use crate::ui::file_view::FileView;
 use crate::ui::header::{HeaderControls, NavigationAction};
 use crate::ui::sidebar::Sidebar;
+use crate::ui::tab_layout::{calculate_tab_layout, TabLayoutInput, BASE_WINDOW_WIDTH, MONITOR_MARGIN};
 use crate::ui::tabs::TabStrip;
 
 struct TabData {
@@ -35,10 +37,7 @@ impl ExplorerWindow {
             .build();
 
         let header = HeaderBar::new();
-        header.set_centering_policy(CenteringPolicy::Strict);
-        let app_title = Label::new(Some("Zorin Explorer"));
-        app_title.add_css_class("title");
-        header.set_title_widget(Some(&app_title));
+        header.set_show_title(false);
         let sidebar_button = Button::from_icon_name("sidebar-show-symbolic");
         sidebar_button.add_css_class("flat");
         sidebar_button.set_tooltip_text(Some("Show or hide sidebar"));
@@ -66,6 +65,13 @@ impl ExplorerWindow {
             location: initial_location,
             history: history_with(initial),
             page: first_page,
+        });
+
+        apply_tab_layout(&window, &tabs);
+        let layout_window = window.clone();
+        let layout_tabs = tabs.clone();
+        tabs.view.connect_n_pages_notify(move |_| {
+            apply_tab_layout(&layout_window, &layout_tabs);
         });
 
         let sidebar_data = tabs_data.clone();
@@ -223,4 +229,36 @@ fn selected_index(tabs: &TabView, data: &Rc<RefCell<Vec<TabData>>>) -> Option<us
 
 fn tab_title(path: &std::path::Path) -> String {
     path.file_name().and_then(|name| name.to_str()).map(ToOwned::to_owned).unwrap_or_else(|| "/".into())
+}
+
+fn apply_tab_layout(window: &ApplicationWindow, tabs: &TabStrip) {
+    let maximized = window.is_maximized();
+    let fullscreen = window.is_fullscreen();
+    let layout = calculate_tab_layout(TabLayoutInput {
+        page_count: tabs.view.n_pages(),
+        current_window_width: window.width().max(BASE_WINDOW_WIDTH),
+        monitor_width: monitor_width(window),
+        maximized,
+        fullscreen,
+    });
+
+    tabs.set_layout(layout);
+    if !maximized && !fullscreen {
+        window.set_default_size(layout.window_width, window.height().max(800));
+    }
+}
+
+fn monitor_width(window: &ApplicationWindow) -> i32 {
+    let fallback = window.width().max(BASE_WINDOW_WIDTH) + MONITOR_MARGIN;
+    let Some(surface) = window.surface() else {
+        return fallback;
+    };
+    let Some(display) = gdk::Display::default() else {
+        return fallback;
+    };
+
+    display
+        .monitor_at_surface(&surface)
+        .map(|monitor| monitor.geometry().width())
+        .unwrap_or(fallback)
 }
