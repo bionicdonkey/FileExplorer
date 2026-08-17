@@ -14,6 +14,7 @@ impl PropertiesDialog {
         let dialog = gtk::Dialog::new();
         dialog.set_title(Some(&format!("Properties — {}", details.name)));
         dialog.set_modal(true);
+        dialog.set_decorated(false);
         dialog.set_resizable(false);
         dialog.set_default_size(520, 480);
         dialog.set_transient_for(parent);
