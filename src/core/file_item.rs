@@ -16,7 +16,10 @@ pub struct FileItem {
 
 impl FileItem {
     pub fn from_dir_entry(entry: &DirEntry) -> io::Result<Self> {
-        let metadata = entry.metadata()?;
+        // DirEntry::metadata() describes the link itself. fs::metadata follows
+        // it, which lets a symbolic link to a folder behave like a folder.
+        // Keep the link metadata as a fallback so broken links are still shown.
+        let metadata = std::fs::metadata(entry.path()).or_else(|_| entry.metadata())?;
         Ok(Self::from_metadata(
             entry.path(),
             entry.file_name().to_string_lossy().into_owned(),
@@ -103,7 +106,9 @@ fn format_size(bytes: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::format_size;
+    use std::fs;
+
+    use super::{format_size, FileItem};
 
     #[test]
     fn formats_human_readable_sizes() {
@@ -111,5 +116,24 @@ mod tests {
         assert_eq!(format_size(1024), "1.0 KB");
         assert_eq!(format_size(1024 * 1024), "1.0 MB");
         assert_eq!(format_size(1024 * 1024 * 20), "20 MB");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_to_a_directory_is_classified_as_a_folder() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("target");
+        let link = directory.path().join("linked-folder");
+        fs::create_dir(&target).unwrap();
+        symlink(&target, &link).unwrap();
+
+        let entry = fs::read_dir(directory.path()).unwrap()
+            .filter_map(Result::ok)
+            .find(|entry| entry.file_name() == "linked-folder")
+            .expect("symbolic link should be visible in its parent directory");
+
+        assert!(FileItem::from_dir_entry(&entry).unwrap().is_dir());
     }
 }
