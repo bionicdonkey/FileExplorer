@@ -66,7 +66,19 @@ impl Sidebar {
             let section_is_empty = section.nodes.is_empty();
             let rows = GtkBox::new(Orientation::Vertical, 0);
             rows.add_css_class("sidebar-tree");
-            for node in section.nodes { self.append_node(&rows, node, 0); }
+            for (index, node) in section.nodes.into_iter().enumerate() {
+                if should_show_devices_heading(&section.title, index) {
+                    let devices = Label::new(Some("Devices"));
+                    devices.add_css_class("sidebar-subheading");
+                    devices.add_css_class("dim-label");
+                    devices.set_xalign(0.0);
+                    devices.set_margin_start(32);
+                    devices.set_margin_top(8);
+                    devices.set_margin_bottom(2);
+                    rows.append(&devices);
+                }
+                self.append_node(&rows, node, 0);
+            }
 
             let heading_row = GtkBox::new(Orientation::Horizontal, 0);
             let toggle = ToggleButton::new();
@@ -315,8 +327,21 @@ impl Sidebar {
     }
 }
 
+fn should_show_devices_heading(section_title: &str, node_index: usize) -> bool {
+    section_title == "This PC" && node_index == 1
+}
+
 #[cfg(test)]
 mod tests {
+    use super::should_show_devices_heading;
+
+    #[test]
+    fn devices_heading_is_nested_after_file_system_in_this_pc() {
+        assert!(should_show_devices_heading("This PC", 1));
+        assert!(!should_show_devices_heading("This PC", 0));
+        assert!(!should_show_devices_heading("user", 1));
+    }
+
     #[test]
     #[ignore = "requires a GTK desktop session"]
     fn sidebar_renders_quick_access_this_pc_and_network_sections() {
