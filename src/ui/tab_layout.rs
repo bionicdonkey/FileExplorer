@@ -1,7 +1,10 @@
 pub const PREFERRED_TAB_WIDTH: i32 = 176;
 pub const MIN_TAB_WIDTH: i32 = 110;
 
-const FIXED_TITLEBAR_WIDTH: i32 = 176;
+// Includes the sidebar toggle, two overflow-arrow slots, the new-tab button,
+// padding, and native window controls. Reserving it keeps the tab request
+// below the existing title-bar allocation at the overflow threshold.
+const FIXED_TITLEBAR_WIDTH: i32 = 272;
 const TAB_BAR_EDGE_ALLOWANCE: i32 = 24;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,5 +90,23 @@ mod tests {
 
         assert_eq!(layout.window_width, 960);
         assert!(layout.overflowing);
+    }
+
+    #[test]
+    fn overflow_reserves_space_for_all_titlebar_controls() {
+        let layout = calculate_tab_layout(TabLayoutInput::new(11, 1280));
+
+        assert!(layout.overflowing);
+        assert_eq!(layout.tab_bar_width, 1008);
+    }
+
+    #[test]
+    fn every_tab_count_preserves_the_supplied_window_width() {
+        for page_count in [1, 8, 11, 20] {
+            assert_eq!(
+                calculate_tab_layout(TabLayoutInput::new(page_count, 1280)).window_width,
+                1280,
+            );
+        }
     }
 }
