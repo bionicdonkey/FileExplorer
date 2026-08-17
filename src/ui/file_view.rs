@@ -220,7 +220,7 @@ impl FileView {
 
     fn grid_view(&self, items: &[FileItem], options: &ViewOptions) -> FlowBox {
         let layout = options.grid_size.grid_layout();
-        let grid = FlowBox::new(); grid.set_selection_mode(gtk::SelectionMode::Single); grid.set_valign(gtk::Align::Start); grid.set_column_spacing(layout.gap.try_into().expect("grid gaps are positive")); grid.set_row_spacing(layout.gap.try_into().expect("grid gaps are positive")); grid.set_margin_top(12); grid.set_margin_start(12); grid.set_margin_end(12);
+        let grid = FlowBox::new(); grid.set_selection_mode(gtk::SelectionMode::Single); grid.set_activate_on_single_click(false); grid.set_valign(gtk::Align::Start); grid.set_column_spacing(layout.gap.try_into().expect("grid gaps are positive")); grid.set_row_spacing(layout.gap.try_into().expect("grid gaps are positive")); grid.set_margin_top(12); grid.set_margin_start(12); grid.set_margin_end(12);
         let activation_items = items.to_vec();
         let activation_view = self.clone();
         grid.connect_child_activated(move |_, child| { if let Some(item) = activation_items.get(child.index() as usize) { activate_item(&activation_view, item.clone()); } });
@@ -595,6 +595,16 @@ mod tests {
         view.set_options(ViewOptions { view_mode: ViewMode::IconGrid, ..ViewOptions::default() });
 
         assert_eq!(view.options().view_mode, ViewMode::IconGrid);
+    }
+
+    #[test]
+    #[ignore = "requires a GTK desktop session"]
+    fn icon_grid_requires_double_click_to_activate_an_item() {
+        gtk::init().expect("GTK should initialize for widget tests");
+        let view = FileView::new(Rc::new(RefCell::new(PathBuf::from("/tmp"))));
+        let grid = view.grid_view(&[], &ViewOptions::default());
+
+        assert!(!grid.activates_on_single_click());
     }
 
     #[test]
