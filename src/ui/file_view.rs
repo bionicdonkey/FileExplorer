@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use gtk::prelude::*;
-use gtk::{Box as GtkBox, Button, ColumnView, ColumnViewColumn, CustomSorter, FlowBox, GestureClick, Image, Label, MenuButton, NoSelection, Orientation, Popover, ScrolledWindow, SignalListItemFactory, SortListModel};
+use gtk::{Box as GtkBox, Button, ColumnView, ColumnViewColumn, CustomSorter, FlowBox, GestureClick, Image, Label, NoSelection, Orientation, Popover, ScrolledWindow, SignalListItemFactory, SortListModel};
 
 use crate::core::directory_model::DirectoryModel;
 use crate::core::file_item::FileItem;
@@ -219,8 +219,11 @@ fn show_item_context_menu(parent: &impl IsA<gtk::Widget>, x: f64, y: f64, target
     menu.set_margin_top(6); menu.set_margin_bottom(6);
     for command in item_commands(&target) {
         if command == ContextCommand::OpenWith {
-            let button = MenuButton::builder().label("Open With").build();
-            let apps = GtkBox::new(Orientation::Vertical, 2);
+            let button = Button::with_label("Open With");
+            let popover = popover.clone();
+            let target = target.clone();
+            button.connect_clicked(move |_| {
+            let apps = GtkBox::new(Orientation::Vertical, 2); apps.set_margin_top(6); apps.set_margin_bottom(6);
             let content_type = match &target { ContextTarget::File { content_type, .. } => content_type, _ => unreachable!() };
             for app in open_with_apps(content_type) {
                 let app_button = Button::with_label(&app.display_name());
@@ -228,7 +231,7 @@ fn show_item_context_menu(parent: &impl IsA<gtk::Widget>, x: f64, y: f64, target
                 app_button.connect_clicked(move |_| { let _ = app.launch(&[gio::File::for_path(&path)], None::<&gio::AppLaunchContext>); });
                 apps.append(&app_button);
             }
-            let apps_popover = Popover::new(); apps_popover.set_child(Some(&apps)); button.set_popover(Some(&apps_popover)); menu.append(&button);
+            popover.set_child(Some(&apps)); }); menu.append(&button);
             continue;
         }
         let button = Button::with_label(context_command_label(command));
