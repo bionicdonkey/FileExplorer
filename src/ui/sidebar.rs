@@ -28,10 +28,11 @@ pub struct Sidebar {
     model: Rc<RefCell<SidebarModel>>,
     on_action: Rc<dyn Fn(SidebarAction)>,
     active_path: Rc<RefCell<Option<PathBuf>>>,
+    mount_parent: gtk::Window,
 }
 
 impl Sidebar {
-    pub fn new<F: Fn(SidebarAction) + 'static>(model: Rc<RefCell<SidebarModel>>, on_action: F) -> Self {
+    pub fn new<F: Fn(SidebarAction) + 'static>(model: Rc<RefCell<SidebarModel>>, mount_parent: &impl IsA<gtk::Window>, on_action: F) -> Self {
         let content = GtkBox::new(Orientation::Vertical, 12);
         content.add_css_class("explorer-sidebar");
         content.set_margin_top(8);
@@ -47,6 +48,7 @@ impl Sidebar {
             model,
             on_action: Rc::new(on_action),
             active_path: Rc::new(RefCell::new(None)),
+            mount_parent: mount_parent.clone().upcast(),
         };
         sidebar.refresh();
 
@@ -100,10 +102,10 @@ impl Sidebar {
     }
 
     fn append_node(&self, parent: &GtkBox, node: SidebarNode, depth: i32) {
-        Self::append_node_inner(parent, node, depth, self.model.clone(), self.on_action.clone(), self.active_path.clone());
+        Self::append_node_inner(parent, node, depth, self.model.clone(), self.on_action.clone(), self.active_path.clone(), self.mount_parent.clone());
     }
 
-    fn append_node_inner(parent: &GtkBox, node: SidebarNode, depth: i32, model: Rc<RefCell<SidebarModel>>, on_action: Rc<dyn Fn(SidebarAction)>, active_path: Rc<RefCell<Option<PathBuf>>>) {
+    fn append_node_inner(parent: &GtkBox, node: SidebarNode, depth: i32, model: Rc<RefCell<SidebarModel>>, on_action: Rc<dyn Fn(SidebarAction)>, active_path: Rc<RefCell<Option<PathBuf>>>, mount_parent: gtk::Window) {
         let row = GtkBox::new(Orientation::Vertical, 0);
         let header = GtkBox::new(Orientation::Horizontal, 0);
         header.set_margin_start(depth * 16);
@@ -123,21 +125,31 @@ impl Sidebar {
             let children_for_toggle = children.clone();
             let children_action = on_action.clone();
             let children_active_path = active_path.clone();
+            let children_mount_parent = mount_parent.clone();
             expander.connect_toggled(move |button| {
                 let expanded = button.is_active();
                 children_for_toggle.set_visible(expanded);
                 let icon = if expanded { "pan-down-symbolic" } else { "pan-end-symbolic" };
                 button.set_child(Some(&Image::from_icon_name(icon)));
                 if expanded && children_for_toggle.first_child().is_none() {
-                    for child in children_model.borrow().children_for_location(&child_location) {
-                        Self::append_node_inner(
-                            &children_for_toggle,
-                            child,
-                            depth + 1,
-                            children_model.clone(),
-                            children_action.clone(),
-                            children_active_path.clone(),
-                        );
+                    let initial_children = children_model.borrow().children_for_location(&child_location);
+                    if !initial_children.is_empty() || child_location.local_path().is_some() {
+                        Self::append_children(&children_for_toggle, initial_children, depth, children_model.clone(), children_action.clone(), children_active_path.clone(), children_mount_parent.clone());
+                    } else {
+                        let location_file = gio::File::for_uri(&child_location.uri());
+                        let operation = gtk::MountOperation::new(Some(&children_mount_parent));
+                        let keep_operation = operation.clone();
+                        let children_after_mount = children_for_toggle.clone();
+                        let model_after_mount = children_model.clone();
+                        let action_after_mount = children_action.clone();
+                        let active_after_mount = children_active_path.clone();
+                        let parent_after_mount = children_mount_parent.clone();
+                        let location_after_mount = child_location.clone();
+                        location_file.mount_enclosing_volume(gio::MountMountFlags::NONE, Some(&operation), gio::Cancellable::NONE, move |_| {
+                            let _keep_operation_alive = &keep_operation;
+                            let loaded = model_after_mount.borrow().children_for_location(&location_after_mount);
+                            Self::append_children(&children_after_mount, loaded, depth, model_after_mount.clone(), action_after_mount.clone(), active_after_mount.clone(), parent_after_mount.clone());
+                        });
                     }
                 }
             });
@@ -179,6 +191,12 @@ impl Sidebar {
         row.append(&header);
         row.append(&children);
         parent.append(&row);
+    }
+
+    fn append_children(parent: &GtkBox, children: Vec<SidebarNode>, depth: i32, model: Rc<RefCell<SidebarModel>>, on_action: Rc<dyn Fn(SidebarAction)>, active_path: Rc<RefCell<Option<PathBuf>>>, mount_parent: gtk::Window) {
+        for child in children {
+            Self::append_node_inner(parent, child, depth + 1, model.clone(), on_action.clone(), active_path.clone(), mount_parent.clone());
+        }
     }
 
     fn add_context_menu(button: &Button, location: &SidebarLocation, model: Rc<RefCell<SidebarModel>>, action: Rc<dyn Fn(SidebarAction)>) {

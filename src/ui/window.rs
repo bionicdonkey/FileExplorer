@@ -104,7 +104,7 @@ impl ExplorerWindow {
         let sidebar_window = window.clone();
         let sidebar_model_actions = sidebar_model.clone();
         let sidebar_holder_actions = sidebar_holder.clone();
-        let sidebar = Sidebar::new(sidebar_model, move |action| match action {
+        let sidebar = Sidebar::new(sidebar_model, &window, move |action| match action {
             SidebarAction::Open(path) => {
                 if let Some(index) = selected_index(&sidebar_context_tabs, &sidebar_context_data) {
                     navigate_tab(index, path, &sidebar_context_data, &sidebar_context_tabs, &sidebar_context_header, &sidebar_context_preferences, true);

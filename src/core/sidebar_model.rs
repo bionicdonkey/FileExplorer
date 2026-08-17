@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use gio::prelude::*;
 use serde::{Deserialize, Serialize};
 
-const REMOTE_CHILD_ATTRIBUTES: &str = "standard::name,standard::display-name,standard::type,standard::icon";
+const REMOTE_CHILD_ATTRIBUTES: &str = "standard::name,standard::display-name,standard::type,standard::icon,standard::target-uri";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SidebarLocationKind {
@@ -230,9 +230,11 @@ impl SidebarModel {
         let Ok(enumerator) = file.enumerate_children(REMOTE_CHILD_ATTRIBUTES, gio::FileQueryInfoFlags::NONE, gio::Cancellable::NONE) else { return Vec::new(); };
         let mut children = Vec::new();
         while let Ok(Some(info)) = enumerator.next_file(gio::Cancellable::NONE) {
+            if uri == "computer:///" && !info.name().to_string_lossy().ends_with(".volume") { continue; }
             let child = enumerator.child(&info);
             let icon = info.icon().and_then(themed_icon_name).unwrap_or_else(|| "folder-remote-symbolic".into());
-            children.push(SidebarNode::remote(child.uri().to_string(), info.display_name(), icon, true));
+            let child_uri = info.attribute_string("standard::target-uri").map(|uri| uri.to_string()).unwrap_or_else(|| child.uri().to_string());
+            children.push(SidebarNode::remote(child_uri, info.display_name(), icon, true));
         }
         children.sort_by(|left, right| left.location.label.cmp(&right.location.label));
         children
@@ -335,6 +337,11 @@ mod tests {
     #[test]
     fn remote_enumeration_requests_the_name_required_for_child_uris() {
         assert!(super::REMOTE_CHILD_ATTRIBUTES.contains("standard::name"));
+    }
+
+    #[test]
+    fn remote_enumeration_requests_shortcut_target_uris() {
+        assert!(super::REMOTE_CHILD_ATTRIBUTES.contains("standard::target-uri"));
     }
 
     #[test]
