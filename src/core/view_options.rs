@@ -67,6 +67,7 @@ pub enum ViewMode {
     DetailedList,
     CompactList,
     IconGrid,
+    Hybrid,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,6 +88,14 @@ impl GridSize {
             Self::Large => 128,
             Self::ExtraLarge => 192,
         }
+    }
+
+    pub fn list_icon_size(self) -> i32 {
+        match self { Self::Small => 16, Self::Medium => 20, Self::Large => 28, Self::ExtraLarge => 36 }
+    }
+
+    pub fn row_spacing(self) -> i32 {
+        match self { Self::Small => 2, Self::Medium => 6, Self::Large => 10, Self::ExtraLarge => 14 }
     }
 }
 

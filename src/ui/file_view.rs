@@ -65,6 +65,7 @@ impl FileView {
                 match options.view_mode {
                     ViewMode::DetailedList | ViewMode::CompactList => self.widget.set_child(Some(&self.column_view_for(&items, &options))),
                     ViewMode::IconGrid => self.widget.set_child(Some(&self.grid_view(&items, &options))),
+                    ViewMode::Hybrid => self.widget.set_child(Some(&self.hybrid_view(&items, &options))),
                 };
             }
             Err(error) => {
@@ -150,6 +151,24 @@ impl FileView {
         let grid = FlowBox::new(); grid.set_selection_mode(gtk::SelectionMode::None); grid.set_column_spacing(12); grid.set_row_spacing(12); grid.set_margin_top(12); grid.set_margin_start(12); grid.set_margin_end(12);
         for item in items { let tile = Button::new(); tile.add_css_class("flat"); let body = GtkBox::new(Orientation::Vertical, 6); let icon = item_image(item, options.thumbnails); icon.set_pixel_size(options.grid_size.icon_size()); body.append(&icon); let label = Label::new(Some(item.name())); label.set_wrap(true); label.set_max_width_chars(18); body.append(&label); tile.set_child(Some(&body)); let view = self.clone(); let path = item.path().to_path_buf(); tile.connect_clicked(move |_| activate_path(&view, path.clone())); grid.append(&tile); }
         grid
+    }
+
+    fn hybrid_view(&self, items: &[FileItem], options: &ViewOptions) -> GtkBox {
+        let root = GtkBox::new(Orientation::Vertical, 8);
+        root.set_margin_start(12);
+        root.set_margin_top(12);
+        let folders: Vec<_> = items.iter().filter(|item| item.is_dir()).cloned().collect();
+        let files: Vec<_> = items.iter().filter(|item| !item.is_dir()).cloned().collect();
+        if !folders.is_empty() {
+            let heading = Label::new(Some("Folders")); heading.add_css_class("heading"); heading.set_xalign(0.0); root.append(&heading);
+            root.append(&self.grid_view(&folders, options));
+        }
+        if !files.is_empty() {
+            let heading = Label::new(Some("Files")); heading.add_css_class("heading"); heading.set_xalign(0.0); heading.set_margin_top(12); root.append(&heading);
+            let file_options = ViewOptions { view_mode: ViewMode::DetailedList, folders_first: false, ..options.clone() };
+            root.append(&self.column_view_for(&files, &file_options));
+        }
+        root
     }
 }
 

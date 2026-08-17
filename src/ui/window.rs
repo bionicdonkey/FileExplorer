@@ -315,7 +315,7 @@ fn view_menu_body(label: &str, options: &ViewOptions, data: &Rc<RefCell<Vec<TabD
             append_heading(&menu, "Direction");
             append_radio_group(&menu, [("Ascending", options.sort_direction == SortDirection::Ascending), ("Descending", options.sort_direction == SortDirection::Descending)], "Sort", data, tabs, preferences);
             append_separator(&menu);
-            append_check(&menu, "Folders first", options.folders_first, "Sort:Toggle folders first", data, tabs, preferences);
+            append_check(&menu, "Folders first", options.folders_first, options.view_mode != ViewMode::Hybrid, "Sort:Toggle folders first", data, tabs, preferences);
         }
         "Group" => {
             append_heading(&menu, "Group by");
@@ -323,12 +323,12 @@ fn view_menu_body(label: &str, options: &ViewOptions, data: &Rc<RefCell<Vec<TabD
         }
         "View" => {
             append_heading(&menu, "Layout");
-            append_radio_group(&menu, [("Detailed List", options.view_mode == ViewMode::DetailedList), ("Compact List", options.view_mode == ViewMode::CompactList), ("Icon Grid", options.view_mode == ViewMode::IconGrid)], "View", data, tabs, preferences);
+            append_radio_group(&menu, [("Detailed List", options.view_mode == ViewMode::DetailedList), ("Compact List", options.view_mode == ViewMode::CompactList), ("Icon Grid", options.view_mode == ViewMode::IconGrid), ("Hybrid", options.view_mode == ViewMode::Hybrid)], "View", data, tabs, preferences);
             append_separator(&menu);
             append_heading(&menu, "Icon size");
             append_radio_group(&menu, [("Small icons", options.grid_size == GridSize::Small), ("Medium icons", options.grid_size == GridSize::Medium), ("Large icons", options.grid_size == GridSize::Large), ("Extra Large icons", options.grid_size == GridSize::ExtraLarge)], "View", data, tabs, preferences);
             append_separator(&menu);
-            append_check(&menu, "Show thumbnails", options.thumbnails, "View:Toggle thumbnails", data, tabs, preferences);
+            append_check(&menu, "Show thumbnails", options.thumbnails, true, "View:Toggle thumbnails", data, tabs, preferences);
         }
         _ => {}
     }
@@ -364,10 +364,11 @@ fn append_radio_group<const N: usize>(menu: &GtkBox, entries: [(&str, bool); N],
     }
 }
 
-fn append_check(menu: &GtkBox, label: &str, active: bool, action: &str, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, preferences: &Rc<RefCell<ViewPreferencesStore>>) {
+fn append_check(menu: &GtkBox, label: &str, active: bool, sensitive: bool, action: &str, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, preferences: &Rc<RefCell<ViewPreferencesStore>>) {
     let control = CheckButton::with_label(label);
     control.set_margin_start(8);
     control.set_active(active);
+    control.set_sensitive(sensitive);
     let data = data.clone(); let tabs = tabs.clone(); let preferences = preferences.clone(); let action = action.to_string();
     control.connect_toggled(move |_| update_active_options(&data, &tabs, &preferences, &action));
     menu.append(&control);
@@ -402,10 +403,11 @@ fn update_active_options(data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, prefe
         "View:Detailed List" => options.view_mode = ViewMode::DetailedList,
         "View:Compact List" => options.view_mode = ViewMode::CompactList,
         "View:Icon Grid" => options.view_mode = ViewMode::IconGrid,
-        "View:Small icons" => { options.view_mode = ViewMode::IconGrid; options.grid_size = GridSize::Small; }
-        "View:Medium icons" => { options.view_mode = ViewMode::IconGrid; options.grid_size = GridSize::Medium; }
-        "View:Large icons" => { options.view_mode = ViewMode::IconGrid; options.grid_size = GridSize::Large; }
-        "View:Extra Large icons" => { options.view_mode = ViewMode::IconGrid; options.grid_size = GridSize::ExtraLarge; }
+        "View:Hybrid" => options.view_mode = ViewMode::Hybrid,
+        "View:Small icons" => options.grid_size = GridSize::Small,
+        "View:Medium icons" => options.grid_size = GridSize::Medium,
+        "View:Large icons" => options.grid_size = GridSize::Large,
+        "View:Extra Large icons" => options.grid_size = GridSize::ExtraLarge,
         "View:Toggle thumbnails" => options.thumbnails = !options.thumbnails,
         _ => return,
     }
