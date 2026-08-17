@@ -46,12 +46,12 @@ impl FileItem {
     pub fn from_gio(parent: &gio::File, info: &gio::FileInfo) -> Self {
         let name = info.display_name().to_string();
         let child = parent.resolve_relative_path(info.name());
-        let content_type = info.content_type().map(|value| value.to_string()).unwrap_or_else(|| "application/octet-stream".into());
-        let modified = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(info.attribute_uint64("time::modified"));
+        let content_type = gio_content_type(info);
+        let modified = gio_modified(info);
         Self {
             path: PathBuf::new(), name,
             is_dir: matches!(info.file_type(), gio::FileType::Directory | gio::FileType::Mountable),
-            size: info.size() as u64,
+            size: gio_size(info),
             modified,
             content_type,
             uri: Some(child.uri().to_string()),
@@ -102,6 +102,22 @@ impl FileItem {
     }
 }
 
+fn gio_size(info: &gio::FileInfo) -> u64 {
+    info.has_attribute("standard::size").then(|| info.size() as u64).unwrap_or(0)
+}
+
+fn gio_modified(info: &gio::FileInfo) -> SystemTime {
+    let seconds = info.has_attribute("time::modified").then(|| info.attribute_uint64("time::modified")).unwrap_or(0);
+    SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(seconds)
+}
+
+fn gio_content_type(info: &gio::FileInfo) -> String {
+    info.has_attribute("standard::content-type")
+        .then(|| info.content_type().map(|value| value.to_string()))
+        .flatten()
+        .unwrap_or_else(|| "application/octet-stream".into())
+}
+
 fn content_type_for(path: &Path) -> String {
     let (content_type, _) = gio::content_type_guess(Some(path), &[]);
     content_type.to_string()
@@ -129,7 +145,7 @@ pub fn format_size(bytes: u64) -> String {
 mod tests {
     use std::fs;
 
-    use super::{format_size, FileItem};
+    use super::{format_size, gio_content_type, gio_size, FileItem};
 
     #[test]
     fn formats_human_readable_sizes() {
@@ -137,6 +153,14 @@ mod tests {
         assert_eq!(format_size(1024), "1.0 KB");
         assert_eq!(format_size(1024 * 1024), "1.0 MB");
         assert_eq!(format_size(1024 * 1024 * 20), "20 MB");
+    }
+
+    #[test]
+    fn missing_gio_metadata_uses_safe_defaults() {
+        let info = gio::FileInfo::new();
+
+        assert_eq!(gio_size(&info), 0);
+        assert_eq!(gio_content_type(&info), "application/octet-stream");
     }
 
     #[cfg(unix)]

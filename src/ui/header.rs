@@ -130,6 +130,12 @@ impl HeaderControls {
         self.stack.set_visible_child_name("breadcrumbs");
     }
 
+    pub fn set_uri(&self, uri: &str) {
+        self.entry.set_text(uri);
+        self.render_uri_breadcrumbs(uri);
+        self.stack.set_visible_child_name("breadcrumbs");
+    }
+
     fn render_breadcrumbs_from_entry(&self) {
         let path = PathBuf::from(self.entry.text().as_str());
         self.render_breadcrumbs(&path);
@@ -183,6 +189,37 @@ impl HeaderControls {
                 button.add_css_class("breadcrumb-current");
             }
             self.connect_breadcrumb(&button, accumulated.clone(), is_current);
+            self.breadcrumbs.append(&button);
+        }
+        let trailing = Label::new(None);
+        trailing.set_hexpand(true);
+        self.breadcrumbs.append(&trailing);
+    }
+
+    fn render_uri_breadcrumbs(&self, uri: &str) {
+        while let Some(child) = self.breadcrumbs.first_child() {
+            self.breadcrumbs.remove(&child);
+        }
+
+        let (base, remaining) = match uri.split_once("://") {
+            Some((scheme, rest)) => (format!("{scheme}://"), rest),
+            None => (String::new(), uri),
+        };
+        let segments = remaining.split('/').filter(|segment| !segment.is_empty()).collect::<Vec<_>>();
+        let root = Button::with_label(if base.is_empty() { "/" } else { &base });
+        root.add_css_class("flat");
+        root.add_css_class("breadcrumb-segment");
+        if segments.is_empty() { root.add_css_class("breadcrumb-current"); }
+        self.breadcrumbs.append(&root);
+
+        for (index, segment) in segments.iter().enumerate() {
+            let separator = Label::new(Some("/"));
+            separator.add_css_class("breadcrumb-separator");
+            self.breadcrumbs.append(&separator);
+            let button = Button::with_label(segment);
+            button.add_css_class("flat");
+            button.add_css_class("breadcrumb-segment");
+            if index + 1 == segments.len() { button.add_css_class("breadcrumb-current"); }
             self.breadcrumbs.append(&button);
         }
         let trailing = Label::new(None);

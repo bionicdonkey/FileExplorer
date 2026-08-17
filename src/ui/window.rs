@@ -115,7 +115,7 @@ impl ExplorerWindow {
             SidebarAction::OpenInTerminal(path) => open_terminal(&path),
             SidebarAction::OpenUri(uri) => {
                 if let Some(index) = selected_index(&sidebar_context_tabs, &sidebar_context_data) {
-                    sidebar_context_data.borrow()[index].view.set_uri(uri);
+                    navigate_uri_tab(index, uri, &sidebar_context_data, &sidebar_context_tabs, &sidebar_context_header);
                 }
             }
             SidebarAction::Pin(path) => {
@@ -223,8 +223,9 @@ impl ExplorerWindow {
         let select_header = header_controls.clone();
         tabs.view.connect_selected_page_notify(move |view| {
             if let Some(index) = selected_index(view, &select_data) {
-                let path = select_data.borrow()[index].location.borrow().clone();
-                select_header.set_location(&path);
+                let tab = &select_data.borrow()[index];
+                if let Some(uri) = tab.view.uri() { select_header.set_uri(&uri); }
+                else { select_header.set_location(&tab.location.borrow()); }
             }
         });
 
@@ -303,6 +304,17 @@ fn wire_tab(page: TabPage, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, hea
         let index = { navigation_data.borrow().iter().position(|tab| tab.page == navigation_page) };
         if let Some(index) = index {
             navigate_tab(index, path, &navigation_data, &navigation_tabs, &navigation_header, &navigation_preferences, true);
+        }
+    });
+
+    let uri_navigation_data = data.clone();
+    let uri_navigation_tabs = tabs.clone();
+    let uri_navigation_header = header.clone();
+    let uri_navigation_page = page.clone();
+    view.set_uri_navigation_handler(move |uri| {
+        let index = { uri_navigation_data.borrow().iter().position(|tab| tab.page == uri_navigation_page) };
+        if let Some(index) = index {
+            navigate_uri_tab(index, uri, &uri_navigation_data, &uri_navigation_tabs, &uri_navigation_header);
         }
     });
 
@@ -529,6 +541,16 @@ fn navigate_tab(index: usize, path: PathBuf, data: &Rc<RefCell<Vec<TabData>>>, t
     }
 }
 
+fn navigate_uri_tab(index: usize, uri: String, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, header: &HeaderControls) {
+    let mut data_ref = data.borrow_mut();
+    let Some(tab) = data_ref.get_mut(index) else { return; };
+    tab.view.set_uri(uri.clone());
+    tab.page.set_title(&uri_title(&uri));
+    if tabs.selected_page().as_ref().is_some_and(|page| *page == tab.page) {
+        header.set_uri(&uri);
+    }
+}
+
 fn selected_index(tabs: &TabView, data: &Rc<RefCell<Vec<TabData>>>) -> Option<usize> {
     let page = tabs.selected_page()?;
     matching_index(&data.borrow(), |tab| tab.page == page)
@@ -550,6 +572,10 @@ fn remove_matching<T>(items: &RefCell<Vec<T>>, matches: impl Fn(&T) -> bool) -> 
 
 fn tab_title(path: &std::path::Path) -> String {
     path.file_name().and_then(|name| name.to_str()).map(ToOwned::to_owned).unwrap_or_else(|| "/".into())
+}
+
+fn uri_title(uri: &str) -> String {
+    uri.trim_end_matches('/').rsplit('/').next().filter(|segment| !segment.is_empty()).unwrap_or(uri).to_owned()
 }
 
 fn content_right_inset() -> i32 {

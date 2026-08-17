@@ -108,6 +108,8 @@ impl FileView {
 
     pub fn location(&self) -> PathBuf { self.location.borrow().clone() }
 
+    pub fn uri(&self) -> Option<String> { self.remote_uri.borrow().clone() }
+
     fn reload(&self) {
         let options = self.options();
         let result = self.remote_uri.borrow().as_deref()
