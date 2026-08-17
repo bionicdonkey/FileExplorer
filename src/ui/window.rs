@@ -63,7 +63,7 @@ impl ExplorerWindow {
             view: first_view,
             location: initial_location,
             history: history_with(initial),
-            page: first_page,
+            page: first_page.clone(),
         });
 
         apply_tab_layout(&window, &tabs);
@@ -111,7 +111,7 @@ impl ExplorerWindow {
         toolbar.set_content(Some(&body));
         window.set_content(Some(&toolbar));
 
-        wire_tab(0, &tabs_data, &tabs.view, &header_controls);
+        wire_tab(first_page.clone(), &tabs_data, &tabs.view, &header_controls);
 
         let new_data = tabs_data.clone();
         let new_tabs = tabs.view.clone();
@@ -122,9 +122,8 @@ impl ExplorerWindow {
             let view = FileView::new(location.clone());
             let page = new_tabs.append(&view.widget);
             page.set_title(&tab_title(&path));
-            let index = new_data.borrow().len();
             new_data.borrow_mut().push(TabData { view, location, history: history_with(path), page: page.clone() });
-            wire_tab(index, &new_data, &new_tabs, &new_header);
+            wire_tab(page.clone(), &new_data, &new_tabs, &new_header);
             new_tabs.set_selected_page(&page);
         });
 
@@ -198,12 +197,18 @@ fn history_with(path: PathBuf) -> Rc<RefCell<NavigationHistory>> {
     history
 }
 
-fn wire_tab(index: usize, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, header: &HeaderControls) {
-    let view = data.borrow()[index].view.clone();
+fn wire_tab(page: TabPage, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, header: &HeaderControls) {
+    let view = data.borrow().iter().find(|tab| tab.page == page).map(|tab| tab.view.clone())
+        .expect("a tab page should have corresponding tab data");
     let data = data.clone();
     let tabs = tabs.clone();
     let header = header.clone();
-    view.set_navigation_handler(move |path| navigate_tab(index, path, &data, &tabs, &header, true));
+    view.set_navigation_handler(move |path| {
+        let index = { data.borrow().iter().position(|tab| tab.page == page) };
+        if let Some(index) = index {
+            navigate_tab(index, path, &data, &tabs, &header, true);
+        }
+    });
 }
 
 fn navigate_tab(index: usize, path: PathBuf, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, header: &HeaderControls, record_history: bool) {
@@ -221,7 +226,11 @@ fn navigate_tab(index: usize, path: PathBuf, data: &Rc<RefCell<Vec<TabData>>>, t
 
 fn selected_index(tabs: &TabView, data: &Rc<RefCell<Vec<TabData>>>) -> Option<usize> {
     let page = tabs.selected_page()?;
-    data.borrow().iter().position(|tab| tab.page == page)
+    matching_index(&data.borrow(), |tab| tab.page == page)
+}
+
+fn matching_index<T>(items: &[T], matches: impl Fn(&T) -> bool) -> Option<usize> {
+    items.iter().position(matches)
 }
 
 fn remove_matching<T>(items: &RefCell<Vec<T>>, matches: impl Fn(&T) -> bool) -> bool {
@@ -252,7 +261,7 @@ fn apply_tab_layout(window: &ApplicationWindow, tabs: &TabStrip) {
 mod tests {
     use std::cell::RefCell;
 
-    use super::remove_matching;
+    use super::{matching_index, remove_matching};
 
     #[test]
     fn remove_matching_releases_the_read_borrow_before_removing_the_middle_item() {
@@ -260,5 +269,13 @@ mod tests {
 
         assert!(remove_matching(&items, |item| *item == "middle"));
         assert_eq!(items.into_inner(), vec!["first", "last"]);
+    }
+
+    #[test]
+    fn matching_index_tracks_a_tab_after_a_preceding_tab_is_removed() {
+        let mut pages = vec!["first", "middle", "last"];
+        pages.remove(0);
+
+        assert_eq!(matching_index(&pages, |page| *page == "last"), Some(1));
     }
 }
