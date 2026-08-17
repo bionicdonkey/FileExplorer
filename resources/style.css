@@ -12,6 +12,20 @@
   padding-bottom: 0;
 }
 
+.explorer-titlebar .tab-strip .box,
+.explorer-titlebar .tab-strip tabbox,
+.explorer-titlebar .tab-strip .start-action,
+.explorer-titlebar .tab-strip .end-action {
+  margin-top: 0;
+  margin-bottom: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+.explorer-titlebar .tab-strip tabbox {
+  min-height: 0;
+}
+
 .tab-strip tab {
   min-width: 110px;
   min-height: 36px;

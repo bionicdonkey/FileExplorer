@@ -28,7 +28,6 @@ impl FileView {
     pub fn new(location: Rc<RefCell<PathBuf>>) -> Self {
         let scroll = ScrolledWindow::new();
         scroll.set_vexpand(true);
-        scroll.set_margin_end(12);
         let on_navigate = Rc::new(RefCell::new(None));
         let view = Self { widget: scroll, location, on_navigate, on_options_changed: Rc::new(RefCell::new(None)), options: Rc::new(RefCell::new(ViewOptions::default())) };
         view.reload();
@@ -357,7 +356,7 @@ mod tests {
     use std::path::PathBuf;
     use std::rc::Rc;
 
-    use gtk::prelude::ListModelExt;
+    use gtk::prelude::{ListModelExt, WidgetExt};
 
     use super::{grid_tile_label, uses_native_row_sorting, FileView};
     use crate::core::{GroupField, ViewMode, ViewOptions};
@@ -406,6 +405,15 @@ mod tests {
             assert_eq!(column_view.columns().n_items(), 4);
             assert!(column_view.is_reorderable());
         }
+    }
+
+    #[test]
+    #[ignore = "requires a GTK desktop session"]
+    fn file_scroller_relies_on_the_window_for_its_right_inset() {
+        gtk::init().expect("GTK should initialize for widget tests");
+        let view = FileView::new(Rc::new(RefCell::new(PathBuf::from("/tmp"))));
+
+        assert_eq!(view.widget.margin_end(), 0);
     }
 }
 
