@@ -58,11 +58,11 @@ mod tests {
     }
 
     #[test]
-    fn small_icon_tiles_use_a_compact_explicit_height() {
+    fn small_icon_tiles_use_compact_padding_without_forcing_height() {
         let small = GridSize::Small.grid_layout();
 
-        assert!(small.tile_height < GridSize::Medium.grid_layout().tile_height);
-        assert!(small.tile_height < 100);
+        assert!(small.vertical_padding < GridSize::Medium.grid_layout().vertical_padding);
+        assert!(small.vertical_padding <= 8);
     }
 }
 use std::collections::BTreeMap;
@@ -98,7 +98,7 @@ pub enum GridSize {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GridLayout {
     pub tile_width: i32,
-    pub tile_height: i32,
+    pub vertical_padding: i32,
     pub label_width_chars: i32,
     pub gap: i32,
 }
@@ -123,10 +123,10 @@ impl GridSize {
 
     pub fn grid_layout(self) -> GridLayout {
         match self {
-            Self::Small => GridLayout { tile_width: 128, tile_height: 92, label_width_chars: 14, gap: 8 },
-            Self::Medium => GridLayout { tile_width: 172, tile_height: 136, label_width_chars: 18, gap: 12 },
-            Self::Large => GridLayout { tile_width: 232, tile_height: 194, label_width_chars: 24, gap: 16 },
-            Self::ExtraLarge => GridLayout { tile_width: 300, tile_height: 272, label_width_chars: 30, gap: 20 },
+            Self::Small => GridLayout { tile_width: 128, vertical_padding: 4, label_width_chars: 14, gap: 8 },
+            Self::Medium => GridLayout { tile_width: 172, vertical_padding: 6, label_width_chars: 18, gap: 12 },
+            Self::Large => GridLayout { tile_width: 232, vertical_padding: 8, label_width_chars: 24, gap: 16 },
+            Self::ExtraLarge => GridLayout { tile_width: 300, vertical_padding: 10, label_width_chars: 30, gap: 20 },
         }
     }
 }
