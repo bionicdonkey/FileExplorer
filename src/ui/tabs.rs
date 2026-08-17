@@ -36,19 +36,13 @@ impl TabStrip {
             next_view.select_next_page();
         });
 
-        let overflow_previous = previous_button.clone();
-        let overflow_next = next_button.clone();
-        bar.connect_is_overflowing_notify(move |bar| {
-            let overflowing = bar.is_overflowing();
-            overflow_previous.set_visible(overflowing);
-            overflow_next.set_visible(overflowing);
-        });
-
         Self { bar, view, previous_button, next_button }
     }
 
     pub fn set_layout(&self, layout: TabLayout) {
         self.bar.set_width_request(layout.tab_bar_width);
+        self.previous_button.set_visible(layout.overflowing);
+        self.next_button.set_visible(layout.overflowing);
         self.bar.set_tooltip_text(if layout.overflowing {
             Some("Scroll to view more tabs")
         } else {
@@ -68,10 +62,11 @@ fn overflow_button(icon_name: &str, tooltip: &str) -> Button {
 #[cfg(test)]
 mod tests {
     use super::TabStrip;
+    use crate::ui::tab_layout::{calculate_tab_layout, TabLayoutInput};
     use gtk::prelude::*;
 
     #[test]
-    fn tab_strip_provides_hidden_overflow_navigation_controls() {
+    fn tab_strip_updates_overflow_navigation_controls_from_layout() {
         gtk::init().expect("GTK should initialize for widget tests");
         let tabs = TabStrip::new();
 
@@ -79,5 +74,15 @@ mod tests {
         assert!(!tabs.next_button.is_visible());
         assert_eq!(tabs.previous_button.tooltip_text().as_deref(), Some("Previous tab"));
         assert_eq!(tabs.next_button.tooltip_text().as_deref(), Some("Next tab"));
+        let overflow = calculate_tab_layout(TabLayoutInput::new(11, 1280));
+        let fitting = calculate_tab_layout(TabLayoutInput::new(1, 1280));
+
+        tabs.set_layout(overflow);
+        assert!(tabs.previous_button.is_visible());
+        assert!(tabs.next_button.is_visible());
+
+        tabs.set_layout(fitting);
+        assert!(!tabs.previous_button.is_visible());
+        assert!(!tabs.next_button.is_visible());
     }
 }
