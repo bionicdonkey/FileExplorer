@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use adw::prelude::*;
-use adw::{Application, ApplicationWindow, CenteringPolicy, HeaderBar, TabPage, TabView, ToolbarView};
+use adw::{Application, ApplicationWindow, HeaderBar, TabPage, TabView, ToolbarView};
 use gtk::{Align, Box as GtkBox, Button, Label, Orientation, Paned, SearchEntry};
 
 use crate::core::location::Location;
@@ -11,6 +11,7 @@ use crate::core::navigation::NavigationHistory;
 use crate::ui::file_view::FileView;
 use crate::ui::header::{HeaderControls, NavigationAction};
 use crate::ui::sidebar::Sidebar;
+use crate::ui::tab_layout::{calculate_tab_layout, TabLayoutInput};
 use crate::ui::tabs::TabStrip;
 
 struct TabData {
@@ -35,10 +36,7 @@ impl ExplorerWindow {
             .build();
 
         let header = HeaderBar::new();
-        header.set_centering_policy(CenteringPolicy::Strict);
-        let app_title = Label::new(Some("Zorin Explorer"));
-        app_title.add_css_class("title");
-        header.set_title_widget(Some(&app_title));
+        header.set_show_title(false);
         let sidebar_button = Button::from_icon_name("sidebar-show-symbolic");
         sidebar_button.add_css_class("flat");
         sidebar_button.set_tooltip_text(Some("Show or hide sidebar"));
@@ -65,7 +63,14 @@ impl ExplorerWindow {
             view: first_view,
             location: initial_location,
             history: history_with(initial),
-            page: first_page,
+            page: first_page.clone(),
+        });
+
+        apply_tab_layout(&window, &tabs);
+        let layout_window = window.clone();
+        let layout_tabs = tabs.clone();
+        tabs.view.connect_n_pages_notify(move |_| {
+            apply_tab_layout(&layout_window, &layout_tabs);
         });
 
         let sidebar_data = tabs_data.clone();
@@ -106,7 +111,7 @@ impl ExplorerWindow {
         toolbar.set_content(Some(&body));
         window.set_content(Some(&toolbar));
 
-        wire_tab(0, &tabs_data, &tabs.view, &header_controls);
+        wire_tab(first_page.clone(), &tabs_data, &tabs.view, &header_controls);
 
         let new_data = tabs_data.clone();
         let new_tabs = tabs.view.clone();
@@ -117,9 +122,8 @@ impl ExplorerWindow {
             let view = FileView::new(location.clone());
             let page = new_tabs.append(&view.widget);
             page.set_title(&tab_title(&path));
-            let index = new_data.borrow().len();
             new_data.borrow_mut().push(TabData { view, location, history: history_with(path), page: page.clone() });
-            wire_tab(index, &new_data, &new_tabs, &new_header);
+            wire_tab(page.clone(), &new_data, &new_tabs, &new_header);
             new_tabs.set_selected_page(&page);
         });
 
@@ -128,9 +132,7 @@ impl ExplorerWindow {
             if close_data.borrow().len() <= 1 {
                 return false;
             }
-            if let Some(index) = close_data.borrow().iter().position(|tab| tab.page == *page) {
-                close_data.borrow_mut().remove(index);
-            }
+            remove_matching(&close_data, |tab| tab.page == *page);
             view.close_page_finish(page, true);
             true
         });
@@ -195,12 +197,18 @@ fn history_with(path: PathBuf) -> Rc<RefCell<NavigationHistory>> {
     history
 }
 
-fn wire_tab(index: usize, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, header: &HeaderControls) {
-    let view = data.borrow()[index].view.clone();
+fn wire_tab(page: TabPage, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, header: &HeaderControls) {
+    let view = data.borrow().iter().find(|tab| tab.page == page).map(|tab| tab.view.clone())
+        .expect("a tab page should have corresponding tab data");
     let data = data.clone();
     let tabs = tabs.clone();
     let header = header.clone();
-    view.set_navigation_handler(move |path| navigate_tab(index, path, &data, &tabs, &header, true));
+    view.set_navigation_handler(move |path| {
+        let index = { data.borrow().iter().position(|tab| tab.page == page) };
+        if let Some(index) = index {
+            navigate_tab(index, path, &data, &tabs, &header, true);
+        }
+    });
 }
 
 fn navigate_tab(index: usize, path: PathBuf, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, header: &HeaderControls, record_history: bool) {
@@ -218,9 +226,56 @@ fn navigate_tab(index: usize, path: PathBuf, data: &Rc<RefCell<Vec<TabData>>>, t
 
 fn selected_index(tabs: &TabView, data: &Rc<RefCell<Vec<TabData>>>) -> Option<usize> {
     let page = tabs.selected_page()?;
-    data.borrow().iter().position(|tab| tab.page == page)
+    matching_index(&data.borrow(), |tab| tab.page == page)
+}
+
+fn matching_index<T>(items: &[T], matches: impl Fn(&T) -> bool) -> Option<usize> {
+    items.iter().position(matches)
+}
+
+fn remove_matching<T>(items: &RefCell<Vec<T>>, matches: impl Fn(&T) -> bool) -> bool {
+    let index = { items.borrow().iter().position(matches) };
+    if let Some(index) = index {
+        items.borrow_mut().remove(index);
+        true
+    } else {
+        false
+    }
 }
 
 fn tab_title(path: &std::path::Path) -> String {
     path.file_name().and_then(|name| name.to_str()).map(ToOwned::to_owned).unwrap_or_else(|| "/".into())
+}
+
+fn apply_tab_layout(window: &ApplicationWindow, tabs: &TabStrip) {
+    let window_width = window.width();
+    let layout = calculate_tab_layout(TabLayoutInput::new(
+        tabs.view.n_pages(),
+        if window_width > 0 { window_width } else { 1280 },
+    ));
+
+    tabs.set_layout(layout);
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+
+    use super::{matching_index, remove_matching};
+
+    #[test]
+    fn remove_matching_releases_the_read_borrow_before_removing_the_middle_item() {
+        let items = RefCell::new(vec!["first", "middle", "last"]);
+
+        assert!(remove_matching(&items, |item| *item == "middle"));
+        assert_eq!(items.into_inner(), vec!["first", "last"]);
+    }
+
+    #[test]
+    fn matching_index_tracks_a_tab_after_a_preceding_tab_is_removed() {
+        let mut pages = vec!["first", "middle", "last"];
+        pages.remove(0);
+
+        assert_eq!(matching_index(&pages, |page| *page == "last"), Some(1));
+    }
 }
