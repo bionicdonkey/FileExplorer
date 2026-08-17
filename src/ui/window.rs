@@ -4,7 +4,7 @@ use std::rc::Rc;
 
 use adw::prelude::*;
 use adw::{Application, ApplicationWindow, HeaderBar, TabPage, TabView, ToolbarView};
-use gtk::{Align, Box as GtkBox, Button, Label, MenuButton, Orientation, Paned, Popover, SearchEntry};
+use gtk::{Align, Box as GtkBox, Button, CheckButton, Label, MenuButton, Orientation, Paned, Popover, SearchEntry, Separator};
 
 use crate::core::location::Location;
 use crate::core::navigation::NavigationHistory;
@@ -276,18 +276,91 @@ fn apply_tab_layout(window: &ApplicationWindow, tabs: &TabStrip) {
 
 fn view_controls(data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, preferences: &Rc<RefCell<ViewPreferencesStore>>) -> GtkBox {
     let controls = GtkBox::new(Orientation::Horizontal, 6);
-    for (label, entries) in [
-        ("Sort", vec!["Name", "Date modified", "Type", "Size", "Ascending", "Descending", "Toggle folders first"]),
-        ("Group", vec!["None", "Type", "Size", "Date modified"]),
-        ("View", vec!["Detailed List", "Compact List", "Icon Grid", "Small icons", "Medium icons", "Large icons", "Extra Large icons", "Toggle thumbnails"]),
-    ] {
+    for label in ["Sort", "Group", "View"] {
         let button = MenuButton::builder().label(label).build();
-        let popover = Popover::new(); let menu = GtkBox::new(Orientation::Vertical, 2); menu.set_margin_top(6); menu.set_margin_bottom(6);
-        for entry in entries { let action = Button::with_label(entry); action.add_css_class("flat"); let data = data.clone(); let tabs = tabs.clone(); let preferences = preferences.clone(); let entry = format!("{label}:{entry}");
-            action.connect_clicked(move |_| update_active_options(&data, &tabs, &preferences, &entry)); menu.append(&action); }
-        popover.set_child(Some(&menu)); button.set_popover(Some(&popover)); controls.append(&button);
+        let data = data.clone();
+        let tabs = tabs.clone();
+        let preferences = preferences.clone();
+        let label = label.to_string();
+        button.connect_activate(move |button| {
+            let options = selected_index(&tabs, &data).map(|index| data.borrow()[index].view.options()).unwrap_or_default();
+            let popover = Popover::new();
+            popover.set_child(Some(&view_menu_body(&label, &options, &data, &tabs, &preferences)));
+            button.set_popover(Some(&popover));
+        });
+        controls.append(&button);
     }
     controls
+}
+
+fn view_menu_body(label: &str, options: &ViewOptions, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, preferences: &Rc<RefCell<ViewPreferencesStore>>) -> GtkBox {
+    let menu = GtkBox::new(Orientation::Vertical, 2);
+    menu.set_margin_top(6);
+    menu.set_margin_bottom(6);
+    match label {
+        "Sort" => {
+            append_heading(&menu, "Sort by");
+            append_radio_group(&menu, [("Name", options.sort_field == SortField::Name), ("Date modified", options.sort_field == SortField::DateModified), ("Type", options.sort_field == SortField::Type), ("Size", options.sort_field == SortField::Size)], "Sort", data, tabs, preferences);
+            append_separator(&menu);
+            append_heading(&menu, "Direction");
+            append_radio_group(&menu, [("Ascending", options.sort_direction == SortDirection::Ascending), ("Descending", options.sort_direction == SortDirection::Descending)], "Sort", data, tabs, preferences);
+            append_separator(&menu);
+            append_check(&menu, "Folders first", options.folders_first, "Sort:Toggle folders first", data, tabs, preferences);
+        }
+        "Group" => {
+            append_heading(&menu, "Group by");
+            append_radio_group(&menu, [("None", options.group_field == GroupField::None), ("Type", options.group_field == GroupField::Type), ("Size", options.group_field == GroupField::Size), ("Date modified", options.group_field == GroupField::DateModified)], "Group", data, tabs, preferences);
+        }
+        "View" => {
+            append_heading(&menu, "Layout");
+            append_radio_group(&menu, [("Detailed List", options.view_mode == ViewMode::DetailedList), ("Compact List", options.view_mode == ViewMode::CompactList), ("Icon Grid", options.view_mode == ViewMode::IconGrid)], "View", data, tabs, preferences);
+            append_separator(&menu);
+            append_heading(&menu, "Icon size");
+            append_radio_group(&menu, [("Small icons", options.grid_size == GridSize::Small), ("Medium icons", options.grid_size == GridSize::Medium), ("Large icons", options.grid_size == GridSize::Large), ("Extra Large icons", options.grid_size == GridSize::ExtraLarge)], "View", data, tabs, preferences);
+            append_separator(&menu);
+            append_check(&menu, "Show thumbnails", options.thumbnails, "View:Toggle thumbnails", data, tabs, preferences);
+        }
+        _ => {}
+    }
+    menu
+}
+
+fn append_heading(menu: &GtkBox, text: &str) {
+    let heading = Label::new(Some(text));
+    heading.add_css_class("dim-label");
+    heading.set_xalign(0.0);
+    heading.set_margin_start(12);
+    heading.set_margin_top(4);
+    menu.append(&heading);
+}
+
+fn append_separator(menu: &GtkBox) {
+    let separator = Separator::new(Orientation::Horizontal);
+    separator.set_margin_top(4);
+    separator.set_margin_bottom(4);
+    menu.append(&separator);
+}
+
+fn append_radio_group<const N: usize>(menu: &GtkBox, entries: [(&str, bool); N], prefix: &str, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, preferences: &Rc<RefCell<ViewPreferencesStore>>) {
+    let mut first: Option<CheckButton> = None;
+    for (entry, active) in entries {
+        let control = CheckButton::with_label(entry);
+        control.set_margin_start(8);
+        control.set_active(active);
+        if let Some(first) = &first { control.set_group(Some(first)); } else { first = Some(control.clone()); }
+        let data = data.clone(); let tabs = tabs.clone(); let preferences = preferences.clone(); let action = format!("{prefix}:{entry}");
+        control.connect_toggled(move |control| { if control.is_active() { update_active_options(&data, &tabs, &preferences, &action); } });
+        menu.append(&control);
+    }
+}
+
+fn append_check(menu: &GtkBox, label: &str, active: bool, action: &str, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, preferences: &Rc<RefCell<ViewPreferencesStore>>) {
+    let control = CheckButton::with_label(label);
+    control.set_margin_start(8);
+    control.set_active(active);
+    let data = data.clone(); let tabs = tabs.clone(); let preferences = preferences.clone(); let action = action.to_string();
+    control.connect_toggled(move |_| update_active_options(&data, &tabs, &preferences, &action));
+    menu.append(&control);
 }
 
 fn file_toolbar(search: SearchEntry, controls: GtkBox) -> GtkBox {
