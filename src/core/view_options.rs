@@ -175,9 +175,10 @@ fn folder_key(path: &Path) -> String {
     fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()).to_string_lossy().into_owned()
 }
 
-fn automatic_options(path: &Path, _items: &[FileItem]) -> ViewOptions {
+fn automatic_options(path: &Path, items: &[FileItem]) -> ViewOptions {
     let visual_folder = path.file_name().is_some_and(|name| matches!(name.to_string_lossy().to_ascii_lowercase().as_str(), "pictures" | "videos"));
-    if visual_folder {
+    let visual_majority = !items.is_empty() && items.iter().filter(|item| item.is_visual_media()).count() * 2 > items.len();
+    if visual_folder || visual_majority {
         ViewOptions { view_mode: ViewMode::IconGrid, ..ViewOptions::default() }
     } else {
         ViewOptions::default()
