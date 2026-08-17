@@ -231,9 +231,10 @@ impl SidebarModel {
         let mut children = Vec::new();
         while let Ok(Some(info)) = enumerator.next_file(gio::Cancellable::NONE) {
             if uri == "computer:///" && !info.name().to_string_lossy().ends_with(".volume") { continue; }
-            let child = enumerator.child(&info);
             let icon = info.icon().and_then(themed_icon_name).unwrap_or_else(|| "folder-remote-symbolic".into());
-            let child_uri = info.attribute_string("standard::target-uri").map(|uri| uri.to_string()).unwrap_or_else(|| child.uri().to_string());
+            let child_uri = info.attribute_string("standard::target-uri")
+                .map(|uri| uri.to_string())
+                .unwrap_or_else(|| canonical_child_uri(uri, &info.name()));
             children.push(SidebarNode::remote(child_uri, info.display_name(), icon, true));
         }
         children.sort_by(|left, right| left.location.label.cmp(&right.location.label));
@@ -284,6 +285,10 @@ fn normalized_remote_uri(uri: &str) -> Result<String, String> {
 
 fn remote_label(uri: &str) -> String {
     uri.trim_end_matches('/').rsplit('/').next().filter(|name| !name.is_empty()).unwrap_or(uri).to_owned()
+}
+
+fn canonical_child_uri(parent_uri: &str, name: &Path) -> String {
+    gio::File::for_uri(parent_uri).resolve_relative_path(name).uri().to_string()
 }
 
 #[cfg(test)]
@@ -361,5 +366,10 @@ mod tests {
         let model = SidebarModel::new(SidebarPreferences::in_memory(), PathBuf::from("/tmp"));
         let providers = SidebarLocation::from_uri("computer:///", "Online accounts", "folder-remote-symbolic");
         let _children = model.children_for_location(&providers);
+    }
+
+    #[test]
+    fn child_uri_keeps_the_gio_canonical_entry_name() {
+        assert_eq!(super::canonical_child_uri("computer:///", Path::new("alex@example.com.volume")), "computer:///alex@example.com.volume");
     }
 }
