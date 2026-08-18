@@ -37,7 +37,17 @@ impl FileOperations {
     }
 
     pub fn copy_to_target(source: &Path, target: &Path) -> io::Result<()> {
-        if source.is_dir() { copy_dir(source, target) } else { fs::copy(source, target).map(|_| ()) }
+        if target.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "destination already exists",
+            ));
+        }
+        if source.is_dir() {
+            copy_dir(source, target)
+        } else {
+            fs::copy(source, target).map(|_| ())
+        }
     }
 
     pub fn move_to(sources: &[PathBuf], destination: &Path) -> io::Result<()> {
@@ -73,13 +83,29 @@ impl FileOperations {
         let parent = target.parent().unwrap_or_else(|| Path::new("."));
         let stem = target.file_stem().and_then(|value| value.to_str()).unwrap_or("item");
         let extension = target.extension().and_then(|value| value.to_str());
-        for index in 2.. {
-            let name = match extension { Some(extension) => format!("{stem} ({index}).{extension}"), None => format!("{stem} ({index})") };
+        let (base, start) = split_copy_suffix(stem);
+        for index in start.. {
+            let name = match extension {
+                Some(extension) => format!("{base} ({index}).{extension}"),
+                None => format!("{base} ({index})"),
+            };
             let candidate = parent.join(name);
             if !candidate.exists() { return candidate; }
         }
         unreachable!()
     }
+}
+
+fn split_copy_suffix(stem: &str) -> (&str, u32) {
+    let Some(open) = stem.rfind(" (") else { return (stem, 2); };
+    if !stem.ends_with(')') {
+        return (stem, 2);
+    }
+    let Some(number) = stem.get(open + 2..stem.len() - 1) else { return (stem, 2); };
+    if let Ok(number) = number.parse::<u32>() {
+        return (&stem[..open], number.saturating_add(1).max(2));
+    }
+    (stem, 2)
 }
 
 #[cfg(test)]
@@ -113,6 +139,27 @@ mod tests {
         fs::write(directory.path().join("report.txt"), "old").unwrap();
         fs::write(directory.path().join("report (2).txt"), "old").unwrap();
         assert_eq!(FileOperations::keep_both_destination(&directory.path().join("report.txt")), directory.path().join("report (3).txt"));
+    }
+
+    #[test]
+    fn keep_both_name_continues_an_existing_numeric_suffix_without_nesting() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("New Folder (2)"), "old").unwrap();
+        fs::write(directory.path().join("New Folder (3)"), "old").unwrap();
+        assert_eq!(FileOperations::keep_both_destination(&directory.path().join("New Folder (2)")), directory.path().join("New Folder (4)"));
+    }
+
+    #[test]
+    fn copy_to_target_rejects_an_existing_destination() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source");
+        let target = directory.path().join("target");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(&target).unwrap();
+
+        let error = FileOperations::copy_to_target(&source, &target).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
     }
 }
 
