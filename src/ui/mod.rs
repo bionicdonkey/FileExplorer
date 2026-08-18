@@ -3,6 +3,7 @@ pub mod file_view;
 pub mod header;
 pub mod properties_dialog;
 pub mod operations_page;
+pub mod preferences_page;
 pub mod sidebar;
 pub mod tab_layout;
 pub mod tabs;

@@ -17,6 +17,7 @@ use crate::ui::properties_dialog::PropertiesDialog;
 use crate::ui::header::{FileAction, HeaderControls, NavigationAction};
 use crate::ui::sidebar::{Sidebar, SidebarAction};
 use crate::ui::operations_page;
+use crate::ui::preferences_page;
 use crate::ui::tab_layout::{calculate_tab_layout, TabLayoutInput};
 use crate::ui::tabs::TabStrip;
 
@@ -68,6 +69,10 @@ impl ExplorerWindow {
         new_tab.set_tooltip_text(Some("New tab (Ctrl+T)"));
         tab_host.append(&new_tab);
         header.pack_start(&tab_host);
+        let preferences_button = Button::from_icon_name("emblem-system-symbolic");
+        preferences_button.add_css_class("flat");
+        preferences_button.set_tooltip_text(Some("Preferences"));
+        header.pack_end(&preferences_button);
 
         let initial_location = Rc::new(RefCell::new(initial.clone()));
         let header_controls = HeaderControls::new(initial_location.clone());
@@ -190,6 +195,8 @@ impl ExplorerWindow {
         let operations_tabs = tabs.view.clone();
         let operations_manager = operations.clone();
         operations_button.connect_clicked(move |_| open_operations_tab(&operations_tabs, operations_manager.clone()));
+        let preferences_tabs = tabs.view.clone();
+        preferences_button.connect_clicked(move |_| open_preferences_tab(&preferences_tabs));
 
         let body = GtkBox::new(Orientation::Vertical, 0);
         body.append(&header_controls.widget);
@@ -588,6 +595,13 @@ fn open_operations_tab(tabs: &TabView, manager: OperationManager) {
     if let Some(page) = tabs.pages().iter::<TabPage>().filter_map(Result::ok).find(|page| page.title().as_str() == "Operations") { tabs.set_selected_page(&page); return; }
     let page = tabs.append(&operations_page::build(manager));
     page.set_title("Operations");
+    tabs.set_selected_page(&page);
+}
+
+fn open_preferences_tab(tabs: &TabView) {
+    if let Some(page) = tabs.pages().iter::<TabPage>().filter_map(Result::ok).find(|page| page.title().as_str() == "Preferences") { tabs.set_selected_page(&page); return; }
+    let page = tabs.append(&preferences_page::build());
+    page.set_title("Preferences");
     tabs.set_selected_page(&page);
 }
 
