@@ -91,6 +91,20 @@ mod tests {
 
         assert_eq!(store.options_for(path, &[]).view_mode, ViewMode::DetailedList);
     }
+
+    #[test]
+    fn clearing_all_folder_options_preserves_global_defaults() {
+        let first = Path::new("/tmp/first");
+        let second = Path::new("/tmp/second");
+        let mut store = ViewPreferencesStore::in_memory();
+        store.set_defaults(ViewOptions { view_mode: ViewMode::IconGrid, ..ViewOptions::default() });
+        store.set(first, ViewOptions { view_mode: ViewMode::DetailedList, ..ViewOptions::default() });
+        store.set(second, ViewOptions { view_mode: ViewMode::CompactList, ..ViewOptions::default() });
+
+        assert_eq!(store.clear_all_folders(), 2);
+        assert_eq!(store.options_for(first, &[]).view_mode, ViewMode::IconGrid);
+        assert_eq!(store.options_for(second, &[]).view_mode, ViewMode::IconGrid);
+    }
 }
 use std::collections::BTreeMap;
 use std::env;
@@ -329,6 +343,12 @@ impl ViewPreferencesStore {
 
     pub fn clear(&mut self, path: &Path) -> bool {
         self.folders.remove(&folder_key(path)).is_some()
+    }
+
+    pub fn clear_all_folders(&mut self) -> usize {
+        let count = self.folders.len();
+        self.folders.clear();
+        count
     }
 
     pub fn set(&mut self, path: &Path, options: ViewOptions) {

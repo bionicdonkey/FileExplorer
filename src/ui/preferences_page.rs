@@ -1,4 +1,4 @@
-use gtk::prelude::*;
+use adw::prelude::*;
 use std::cell::RefCell;
 use std::rc::Rc;
 use gtk::{Adjustment, Box as GtkBox, Button, CheckButton, Label, Orientation, ScrolledWindow, SpinButton, Stack, StackSwitcher};
@@ -62,7 +62,14 @@ fn views_page(views: Rc<RefCell<ViewPreferencesStore>>) -> GtkBox {
     let content_heading = Label::new(Some(groups[5])); content_heading.add_css_class("heading"); content_heading.set_xalign(0.0); content_heading.set_margin_top(8); page.append(&content_heading);
     append_view_toggle(&page, "Folders first", options.folders_first, views.clone(), |options, active| options.folders_first = active);
     append_view_toggle(&page, "Show thumbnails", options.thumbnails, views.clone(), |options, active| options.thumbnails = active);
-    append_view_toggle(&page, "Show hidden files", options.show_hidden, views, |options, active| options.show_hidden = active);
+    append_view_toggle(&page, "Show hidden files", options.show_hidden, views.clone(), |options, active| options.show_hidden = active);
+    let reset = Button::with_label("Reset all folder views");
+    reset.add_css_class("destructive-action");
+    reset.set_halign(gtk::Align::Start);
+    reset.set_margin_top(16);
+    let views = views.clone();
+    reset.connect_clicked(move |button| confirm_clear_all_folder_views(button, views.clone()));
+    page.append(&reset);
     page
 }
 
@@ -86,6 +93,23 @@ fn append_view_toggle(page: &GtkBox, label: &str, active: bool, views: Rc<RefCel
 
 fn update_view_defaults(views: &Rc<RefCell<ViewPreferencesStore>>, update: impl FnOnce(&mut ViewOptions)) {
     let mut views = views.borrow_mut(); let mut options = views.defaults(); update(&mut options); views.set_defaults(options); let _ = views.save();
+}
+
+fn confirm_clear_all_folder_views(button: &Button, views: Rc<RefCell<ViewPreferencesStore>>) {
+    let parent = button.root().and_downcast::<gtk::Window>();
+    let dialog = adw::MessageDialog::new(parent.as_ref(), Some("Reset all folder views?"), Some("This removes every folder-specific view setting. Your global view defaults will be kept."));
+    dialog.add_responses(&[("reset", "Reset All"), ("cancel", "Cancel")]);
+    dialog.set_default_response(Some("cancel"));
+    dialog.set_close_response("cancel");
+    dialog.set_response_appearance("reset", adw::ResponseAppearance::Destructive);
+    dialog.connect_response(None, move |_, response| {
+        if response == "reset" {
+            let mut views = views.borrow_mut();
+            views.clear_all_folders();
+            let _ = views.save();
+        }
+    });
+    dialog.present();
 }
 
 #[cfg(test)]
