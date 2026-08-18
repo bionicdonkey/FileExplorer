@@ -3,6 +3,7 @@ use std::time::Duration;
 use gtk::prelude::*;
 use gtk::{Box as GtkBox, Button, Label, Orientation, ProgressBar, ScrolledWindow};
 
+use crate::core::elevated_operations::is_eligible_for_retry;
 use crate::core::{OperationManager, OperationRecord, OperationState};
 
 pub fn active_summary(records: &[OperationRecord]) -> Option<String> {
@@ -33,6 +34,12 @@ fn refresh_rows(rows: &GtkBox, manager: &OperationManager) {
         let state = match &record.state { OperationState::Queued => "Queued".into(), OperationState::Running => format!("{} of {} item(s)", record.completed, record.total), OperationState::Completed => "Completed".into(), OperationState::Cancelled => "Cancelled".into(), OperationState::Failed(error) => format!("Failed: {error}") };
         let line = Label::new(Some(&format!("{action} {item} — {state}"))); line.set_xalign(0.0); line.set_wrap(true); row.append(&line);
         if matches!(record.state, OperationState::Queued | OperationState::Running) { let progress = ProgressBar::new(); progress.set_fraction(if record.total == 0 { 0.0 } else { record.completed as f64 / record.total as f64 }); row.append(&progress); let cancel = Button::with_label("Cancel"); cancel.set_halign(gtk::Align::End); let cancel_manager = manager.clone(); let id = record.id; cancel.connect_clicked(move |_| cancel_manager.cancel(id)); row.append(&cancel); }
+        if is_eligible_for_retry(&record) {
+            let retry = Button::with_label("Authenticate & Retry"); retry.set_halign(gtk::Align::End); retry.set_tooltip_text(Some("Retries this single item with administrator privileges"));
+            let retry_manager = manager.clone(); let id = record.id;
+            retry.connect_clicked(move |_| { let _ = retry_manager.retry_elevated(id); });
+            row.append(&retry);
+        }
         rows.append(&row);
     }
 }

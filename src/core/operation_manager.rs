@@ -4,6 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use crate::core::elevated_operations;
 use crate::core::operations::FileOperations;
 use serde::{Deserialize, Serialize};
 
@@ -82,6 +83,27 @@ impl OperationManager {
         id
     }
 
+    /// Re-attempts a single failed, local, permission-denied record through
+    /// the polkit-backed helper. Ineligible records (batches, remote/GVfs
+    /// paths, non-permission failures) are rejected before anything runs.
+    pub fn retry_elevated(&self, id: u64) -> Result<(), String> {
+        let record = self.records.lock().unwrap().iter().find(|record| record.id == id).cloned().ok_or_else(|| "operation record not found".to_string())?;
+        let mut command = elevated_operations::retry_command(&record).ok_or_else(|| "this operation cannot be retried with elevated privileges".to_string())?;
+        update(&self.records, id, |record| record.state = OperationState::Running);
+        let records = self.records.clone();
+        let manager = self.clone();
+        std::thread::spawn(move || {
+            let outcome = command.status();
+            match outcome {
+                Ok(status) if status.success() => update(&records, id, |record| { record.state = OperationState::Completed; record.finished_at = Some(now()); }),
+                Ok(status) => update(&records, id, |record| { record.state = OperationState::Failed(format!("Elevated retry exited with {status}")); record.finished_at = Some(now()); }),
+                Err(error) => update(&records, id, |record| { record.state = OperationState::Failed(error.to_string()); record.finished_at = Some(now()); }),
+            }
+            manager.persist_history();
+        });
+        Ok(())
+    }
+
     pub fn records(&self) -> Vec<OperationRecord> { self.records.lock().unwrap().clone() }
     pub fn active_count(&self) -> usize { self.records().iter().filter(|record| matches!(record.state, OperationState::Queued | OperationState::Running)).count() }
     pub fn cancel(&self, id: u64) { if let Some((_, flag)) = self.cancelled.lock().unwrap().iter().find(|(known, _)| *known == id) { flag.store(true, Ordering::Relaxed); } }
@@ -103,5 +125,21 @@ mod tests {
     fn active_count_only_includes_running_operations() {
         let manager = OperationManager::default();
         assert_eq!(manager.active_count(), 0);
+    }
+
+    #[test]
+    fn retrying_an_unknown_record_is_rejected() {
+        let manager = OperationManager::default();
+        assert!(manager.retry_elevated(404).is_err());
+    }
+
+    #[test]
+    fn retrying_a_non_permission_failure_is_rejected() {
+        let manager = OperationManager::default();
+        manager.records.lock().unwrap().push(OperationRecord {
+            id: 1, kind: OperationKind::Delete, sources: vec![PathBuf::from("/tmp/report.txt")],
+            destination: None, completed: 0, total: 1, state: OperationState::Failed("No such file or directory".into()), finished_at: None,
+        });
+        assert!(manager.retry_elevated(1).is_err());
     }
 }

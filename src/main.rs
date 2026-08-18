@@ -2,6 +2,14 @@ use adw::prelude::*;
 use adw::Application;
 
 fn main() {
+    // Re-entry point for the polkit-backed elevated retry: `pkexec` launches
+    // this same binary with `--elevated-op`, which performs exactly one
+    // validated local operation and exits without opening a window.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(code) = zorin_explorer::core::elevated_operations::run_from_args(&args) {
+        std::process::exit(code);
+    }
+
     let app = Application::builder()
         .application_id("com.zorin.Explorer")
         .build();
