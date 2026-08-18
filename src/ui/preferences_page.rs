@@ -1,7 +1,7 @@
 use gtk::prelude::*;
 use std::cell::RefCell;
 use std::rc::Rc;
-use gtk::{Adjustment, Box as GtkBox, Button, Label, Orientation, ScrolledWindow, SpinButton, Stack, StackSwitcher};
+use gtk::{Adjustment, Box as GtkBox, Button, CheckButton, Label, Orientation, ScrolledWindow, SpinButton, Stack, StackSwitcher};
 use crate::core::{ApplicationPreferences, OperationManager};
 
 pub fn category_names() -> [&'static str; 3] { ["General", "Views", "File operations"] }
@@ -13,10 +13,12 @@ pub fn build(preferences: Rc<RefCell<ApplicationPreferences>>, operations: Opera
     let subtitle = Label::new(Some("Settings are grouped here as their behaviour becomes available.")); subtitle.add_css_class("dim-label"); subtitle.set_xalign(0.0); subtitle.set_wrap(true); content.append(&subtitle);
     let stack = Stack::new(); stack.set_vexpand(true); stack.set_hexpand(true);
     let switcher = StackSwitcher::new(); switcher.set_stack(Some(&stack)); switcher.set_halign(gtk::Align::Start); content.append(&switcher);
-    for category in category_names() { let page = if category == "File operations" { operations_page(preferences.clone(), operations.clone()) } else { category_page(category) }; stack.add_titled(&page, Some(&category.to_lowercase().replace(' ', "-")), category); }
+    for category in category_names() { let page = if category == "File operations" { operations_page(preferences.clone(), operations.clone()) } else if category == "General" { general_page(preferences.clone()) } else { category_page(category) }; stack.add_titled(&page, Some(&category.to_lowercase().replace(' ', "-")), category); }
     content.append(&stack);
     let scroll = ScrolledWindow::new(); scroll.set_child(Some(&content)); scroll
 }
+
+fn general_page(preferences: Rc<RefCell<ApplicationPreferences>>) -> GtkBox { let page = GtkBox::new(Orientation::Vertical, 10); page.set_margin_top(18); let heading = Label::new(Some("General")); heading.add_css_class("title-3"); heading.set_xalign(0.0); page.append(&heading); let close = CheckButton::with_label("Close Zorin Explorer when the last tab is closed"); close.set_active(preferences.borrow().close_on_last_tab); close.connect_toggled(move |button| { preferences.borrow_mut().close_on_last_tab = button.is_active(); let _ = preferences.borrow().save(); }); page.append(&close); page }
 
 fn operations_page(preferences: Rc<RefCell<ApplicationPreferences>>, operations: OperationManager) -> GtkBox {
     let page = GtkBox::new(Orientation::Vertical, 10); page.set_margin_top(18);

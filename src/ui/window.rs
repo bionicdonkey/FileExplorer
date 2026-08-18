@@ -277,9 +277,12 @@ impl ExplorerWindow {
         });
 
         let close_data = tabs_data.clone();
+        let close_window = window.clone();
+        let close_preferences = application_preferences.clone();
         tabs.view.connect_close_page(move |view, page| {
             if close_data.borrow().len() <= 1 {
-                return false;
+                if close_preferences.borrow().close_on_last_tab { close_window.close(); } else { show_last_tab_dialog(&close_window); }
+                return true;
             }
             remove_matching(&close_data, |tab| tab.page == *page);
             view.close_page_finish(page, true);
@@ -369,6 +372,9 @@ impl ExplorerWindow {
         self.window.present();
     }
 }
+
+#[allow(deprecated)]
+fn show_last_tab_dialog(parent: &ApplicationWindow) { let dialog = gtk::Dialog::new(); dialog.set_title(Some("Close Zorin Explorer?")); dialog.set_modal(true); dialog.set_transient_for(Some(parent)); dialog.add_css_class("explorer-dialog"); dialog.add_button("Close Application", gtk::ResponseType::Accept); dialog.add_button("Cancel", gtk::ResponseType::Cancel); let text = Label::new(Some("This is the last tab. Closing it will close Zorin Explorer.")); text.set_wrap(true); text.set_xalign(0.0); text.set_margin_top(12); text.set_margin_bottom(12); text.set_margin_start(12); text.set_margin_end(12); dialog.content_area().append(&text); let window = parent.clone(); dialog.connect_response(move |dialog, response| { if response == gtk::ResponseType::Accept { window.close(); } dialog.close(); }); dialog.present(); }
 
 fn history_with(path: PathBuf) -> Rc<RefCell<NavigationHistory>> {
     let history = Rc::new(RefCell::new(NavigationHistory::new()));

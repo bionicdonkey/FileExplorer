@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ApplicationPreferences { pub operation_history_days: u32, #[serde(skip)] path: Option<PathBuf> }
-impl Default for ApplicationPreferences { fn default() -> Self { Self { operation_history_days: 7, path: None } } }
+pub struct ApplicationPreferences { pub operation_history_days: u32, #[serde(default)] pub close_on_last_tab: bool, #[serde(skip)] path: Option<PathBuf> }
+impl Default for ApplicationPreferences { fn default() -> Self { Self { operation_history_days: 7, close_on_last_tab: false, path: None } } }
 impl ApplicationPreferences {
     pub fn load_default() -> io::Result<Self> {
         let base = env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config"))).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "home unavailable"))?;
