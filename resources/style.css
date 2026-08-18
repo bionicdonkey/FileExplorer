@@ -104,6 +104,10 @@ button.sidebar-section-toggle {
   border-radius: 8px;
 }
 
+button.sidebar-subsection-toggle {
+  min-width: 24px;
+}
+
 .sidebar-tree-row,
 .sidebar-tree-child {
   min-height: 30px;

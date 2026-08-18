@@ -74,6 +74,7 @@ impl Sidebar {
                     let devices_toggle = ToggleButton::new();
                     devices_toggle.add_css_class("flat");
                     devices_toggle.add_css_class("sidebar-section-toggle");
+                    devices_toggle.add_css_class("sidebar-subsection-toggle");
                     let devices_expanded = self.model.borrow().preferences().devices_expanded();
                     devices_toggle.set_active(devices_expanded);
                     devices_toggle.set_child(Some(&Image::from_icon_name(if devices_expanded { "pan-down-symbolic" } else { "pan-end-symbolic" })));
