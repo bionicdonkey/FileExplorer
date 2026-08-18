@@ -34,6 +34,7 @@ pub struct Sidebar {
     active_path: Rc<RefCell<Option<PathBuf>>>,
     mount_parent: gtk::Window,
     operation_manager: Rc<RefCell<Option<OperationManager>>>,
+    operation_summary: Rc<RefCell<Option<String>>>,
 }
 
 impl Sidebar {
@@ -55,6 +56,7 @@ impl Sidebar {
             active_path: Rc::new(RefCell::new(None)),
             mount_parent: mount_parent.clone().upcast(),
             operation_manager: Rc::new(RefCell::new(None)),
+            operation_summary: Rc::new(RefCell::new(None)),
         };
         sidebar.refresh();
 
@@ -175,7 +177,14 @@ impl Sidebar {
     pub fn set_operation_manager(&self, manager: OperationManager) {
         *self.operation_manager.borrow_mut() = Some(manager.clone());
         let sidebar = self.clone();
-        glib::timeout_add_local(std::time::Duration::from_millis(250), move || { sidebar.refresh(); glib::ControlFlow::Continue });
+        glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
+            let next = sidebar.operation_manager.borrow().as_ref().and_then(|manager| active_summary(&manager.records()));
+            if operation_summary_changed(&sidebar.operation_summary.borrow(), &next) {
+                *sidebar.operation_summary.borrow_mut() = next;
+                sidebar.refresh();
+            }
+            glib::ControlFlow::Continue
+        });
     }
 
     pub fn set_active_path(&self, path: &Path) {
@@ -380,6 +389,8 @@ impl Sidebar {
     }
 }
 
+fn operation_summary_changed(previous: &Option<String>, next: &Option<String>) -> bool { previous != next }
+
 fn should_show_devices_heading(section_title: &str, node_index: usize) -> bool {
     section_title == "This PC" && node_index == 1
 }
@@ -400,5 +411,11 @@ mod tests {
     fn sidebar_renders_quick_access_this_pc_and_network_sections() {
         gtk::init().unwrap();
         assert!(gtk::is_initialized());
+    }
+
+    #[test]
+    fn operation_summary_only_requires_a_render_when_it_changes() {
+        assert!(!super::operation_summary_changed(&None, &None));
+        assert!(super::operation_summary_changed(&None, &Some("1 file operation in progress".into())));
     }
 }

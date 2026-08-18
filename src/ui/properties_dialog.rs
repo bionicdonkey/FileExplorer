@@ -18,6 +18,7 @@ impl PropertiesDialog {
         dialog.set_decorated(true);
         dialog.set_resizable(false);
         dialog.set_default_size(520, 480);
+        dialog.add_css_class("explorer-dialog");
         dialog.set_transient_for(parent);
         let titlebar = HeaderBar::new();
         titlebar.set_show_title_buttons(false);

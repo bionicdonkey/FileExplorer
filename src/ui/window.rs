@@ -184,15 +184,27 @@ impl ExplorerWindow {
         status.set_margin_end(8);
         status.set_margin_bottom(6);
 
+        let operations_button = Button::from_icon_name("view-list-symbolic");
+        operations_button.add_css_class("flat");
+        operations_button.set_tooltip_text(Some("File operations"));
+        let operations_tabs = tabs.view.clone();
+        let operations_manager = operations.clone();
+        operations_button.connect_clicked(move |_| open_operations_tab(&operations_tabs, operations_manager.clone()));
+
         let body = GtkBox::new(Orientation::Vertical, 0);
         body.append(&header_controls.widget);
-        body.append(&file_toolbar(search, view_controls(&tabs_data, &tabs.view, &preferences)));
+        body.append(&file_toolbar(search, view_controls(&tabs_data, &tabs.view, &preferences), operations_button));
         body.append(&content);
         body.append(&status);
         let toolbar = ToolbarView::new();
         toolbar.add_top_bar(&header);
         toolbar.set_content(Some(&body));
         window.set_content(Some(&toolbar));
+
+        let collapsible_sidebar = sidebar.widget.clone();
+        sidebar_button.connect_clicked(move |_| {
+            collapsible_sidebar.set_visible(!collapsible_sidebar.is_visible());
+        });
 
         wire_tab(first_page.clone(), &tabs_data, &tabs.view, &header_controls, &preferences, app, &clipboard, &sidebar, &operations);
 
@@ -428,9 +440,9 @@ fn wire_tab(page: TabPage, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, hea
                 let destination = command_data.borrow().iter().find(|tab| tab.page == command_page).map(|tab| tab.location.borrow().clone());
                 if let (Some(clipboard), Some(destination)) = (command_clipboard.borrow().clone(), destination) {
                     let kind = match clipboard.operation { ClipboardOperation::Copy => OperationKind::Copy, ClipboardOperation::Move => OperationKind::Move };
-                    command_operations.submit(kind, vec![clipboard.path], Some(destination.clone()));
+                    let operation_id = command_operations.submit(kind, vec![clipboard.path], Some(destination.clone()));
                     if matches!(clipboard.operation, ClipboardOperation::Move) { clipboard.source_view.set_pending_cut(None); }
-                    schedule_refresh(command_view.clone(), command_operations.clone());
+                    schedule_refresh(command_view.clone(), command_operations.clone(), operation_id);
                 }
             }
             ContextCommand::NewFolder => {
@@ -448,8 +460,8 @@ fn wire_tab(page: TabPage, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, hea
             }
             ContextCommand::MoveToTrash => {
                 if let Some(path) = path {
-                    command_operations.submit(OperationKind::Trash, vec![path], None);
-                    schedule_refresh(command_view.clone(), command_operations.clone());
+                    let operation_id = command_operations.submit(OperationKind::Trash, vec![path], None);
+                    schedule_refresh(command_view.clone(), command_operations.clone(), operation_id);
                 }
             }
             ContextCommand::DeletePermanently => {
@@ -472,6 +484,12 @@ where F: Fn(String) -> std::io::Result<()> + 'static, S: Fn() + 'static {
     dialog.set_modal(true);
     dialog.set_resizable(true);
     dialog.add_css_class("explorer-dialog");
+    let titlebar = HeaderBar::new();
+    titlebar.set_show_start_title_buttons(false);
+    titlebar.set_show_end_title_buttons(false);
+    titlebar.set_title_widget(Some(&Label::new(Some(title))));
+    dialog.set_titlebar(Some(&titlebar));
+    dialog.set_default_size(420, 180);
     if let Some(window) = view.widget.root().and_downcast::<gtk::Window>() { dialog.set_transient_for(Some(&window)); }
     dialog.add_button(accept_label, gtk::ResponseType::Accept);
     dialog.add_button("Cancel", gtk::ResponseType::Cancel);
@@ -589,9 +607,10 @@ fn show_network_location_dialog(parent: &ApplicationWindow, model: Rc<RefCell<Si
     let dialog = gtk::Dialog::new();
     dialog.set_title(Some("Add Network Location"));
     dialog.set_modal(true);
+    dialog.add_css_class("explorer-dialog");
     dialog.set_transient_for(Some(parent));
-    dialog.add_button("Cancel", gtk::ResponseType::Cancel);
     dialog.add_button("Add", gtk::ResponseType::Accept);
+    dialog.add_button("Cancel", gtk::ResponseType::Cancel);
     dialog.set_default_response(gtk::ResponseType::Accept);
     let content = dialog.content_area();
     content.set_spacing(8);
@@ -629,8 +648,8 @@ fn choose_destination(view: &FileView, source: PathBuf, move_source: bool, opera
     chooser.connect_response(move |chooser, response| {
         if response == gtk::ResponseType::Accept {
             if let Some(destination) = chooser.file().and_then(|file| file.path()) {
-                operations.submit(if move_source { OperationKind::Move } else { OperationKind::Copy }, vec![source.clone()], Some(destination));
-                schedule_refresh(reload.clone(), operations.clone());
+                let operation_id = operations.submit(if move_source { OperationKind::Move } else { OperationKind::Copy }, vec![source.clone()], Some(destination));
+                schedule_refresh(reload.clone(), operations.clone(), operation_id);
             }
         }
         chooser.destroy();
@@ -638,11 +657,27 @@ fn choose_destination(view: &FileView, source: PathBuf, move_source: bool, opera
     chooser.show();
 }
 
-fn schedule_refresh(view: FileView, operations: OperationManager) {
+fn schedule_refresh(view: FileView, operations: OperationManager, operation_id: u64) {
     glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
-        if operations.active_count() == 0 { view.set_location(view.location()); glib::ControlFlow::Break }
+        if operations.active_count() == 0 {
+            view.set_location(view.location());
+            if let Some(record) = operations.records().into_iter().find(|record| record.id == operation_id && matches!(record.state, crate::core::OperationState::Failed(_))) {
+                if let crate::core::OperationState::Failed(error) = record.state { show_operation_error(&view, &error); }
+            }
+            glib::ControlFlow::Break
+        }
         else { glib::ControlFlow::Continue }
     });
+}
+
+#[allow(deprecated)]
+fn show_operation_error(view: &FileView, error: &str) {
+    let dialog = gtk::Dialog::new();
+    dialog.set_title(Some("File operation could not be completed")); dialog.set_modal(true); dialog.add_css_class("explorer-dialog");
+    if let Some(parent) = view.widget.root().and_downcast::<gtk::Window>() { dialog.set_transient_for(Some(&parent)); }
+    dialog.add_button("OK", gtk::ResponseType::Ok);
+    let message = Label::new(Some(error)); message.set_wrap(true); message.set_xalign(0.0); message.set_margin_top(12); message.set_margin_bottom(12); message.set_margin_start(12); message.set_margin_end(12);
+    dialog.content_area().append(&message); dialog.connect_response(|dialog, _| dialog.close()); dialog.present();
 }
 
 #[allow(deprecated)]
@@ -659,7 +694,7 @@ fn confirm_permanent_delete(view: &FileView, path: PathBuf, operations: Operatio
     text.set_wrap(true); text.set_xalign(0.0); text.set_margin_top(12); text.set_margin_bottom(12); text.set_margin_start(12); text.set_margin_end(12);
     dialog.content_area().append(&text);
     let reload = view.clone();
-    dialog.connect_response(move |dialog, response| { if response == gtk::ResponseType::Accept { operations.submit(OperationKind::Delete, vec![path.clone()], None); schedule_refresh(reload.clone(), operations.clone()); } dialog.close(); });
+    dialog.connect_response(move |dialog, response| { if response == gtk::ResponseType::Accept { let operation_id = operations.submit(OperationKind::Delete, vec![path.clone()], None); schedule_refresh(reload.clone(), operations.clone(), operation_id); } dialog.close(); });
     dialog.present();
 }
 
@@ -857,7 +892,7 @@ fn append_check(menu: &GtkBox, label: &str, active: bool, sensitive: bool, actio
     menu.append(&control);
 }
 
-fn file_toolbar(search: SearchEntry, controls: GtkBox) -> GtkBox {
+fn file_toolbar(search: SearchEntry, controls: GtkBox, operations: Button) -> GtkBox {
     search.set_hexpand(true);
     let row = GtkBox::new(Orientation::Horizontal, 6);
     row.set_margin_start(8);
@@ -865,6 +900,7 @@ fn file_toolbar(search: SearchEntry, controls: GtkBox) -> GtkBox {
     row.set_margin_bottom(6);
     row.append(&search);
     row.append(&controls);
+    row.append(&operations);
     row
 }
 
@@ -975,7 +1011,7 @@ mod tests {
     fn file_toolbar_places_search_and_view_controls_in_one_row() {
         gtk::init().expect("GTK should initialize for widget tests");
 
-        let row = file_toolbar(SearchEntry::new(), GtkBox::new(Orientation::Horizontal, 6));
+        let row = file_toolbar(SearchEntry::new(), GtkBox::new(Orientation::Horizontal, 6), gtk::Button::new());
 
         assert_eq!(row.orientation(), Orientation::Horizontal);
         assert!(row.first_child().is_some());
