@@ -9,7 +9,7 @@ use gtk::{Align, Box as GtkBox, Button, CheckButton, Entry, Label, MenuButton, O
 use crate::core::location::Location;
 use crate::core::navigation::NavigationHistory;
 use crate::core::operations::FileOperations;
-use crate::core::{OperationKind, OperationManager};
+use crate::core::{ApplicationPreferences, OperationKind, OperationManager};
 use crate::core::{GridSize, GroupField, SidebarModel, SidebarPreferences, SortDirection, SortField, ViewMode, ViewOptions, ViewPreferencesStore};
 use crate::ui::context_menu::{ContextCommand, ContextTarget};
 use crate::ui::file_view::FileView;
@@ -50,7 +50,8 @@ impl ExplorerWindow {
             .default_width(1280)
             .default_height(800)
             .build();
-        let operations = OperationManager::default();
+        let application_preferences = Rc::new(RefCell::new(ApplicationPreferences::load_default().unwrap_or_default()));
+        let operations = OperationManager::load_history(application_preferences.borrow().history_path(), application_preferences.borrow().operation_history_days);
 
         let header = HeaderBar::new();
         header.set_show_title(false);
@@ -197,7 +198,9 @@ impl ExplorerWindow {
         status.set_margin_bottom(6);
 
         let preferences_tabs = tabs.view.clone();
-        preferences_button.connect_clicked(move |_| open_preferences_tab(&preferences_tabs));
+        let preferences_values = application_preferences.clone();
+        let preferences_operations = operations.clone();
+        preferences_button.connect_clicked(move |_| open_preferences_tab(&preferences_tabs, preferences_values.clone(), preferences_operations.clone()));
 
         let body = GtkBox::new(Orientation::Vertical, 0);
         body.append(&header_controls.widget);
@@ -604,9 +607,9 @@ fn open_operations_tab(tabs: &TabView, manager: OperationManager) {
     tabs.set_selected_page(&page);
 }
 
-fn open_preferences_tab(tabs: &TabView) {
+fn open_preferences_tab(tabs: &TabView, preferences: Rc<RefCell<ApplicationPreferences>>, operations: OperationManager) {
     if let Some(page) = tabs.pages().iter::<TabPage>().filter_map(Result::ok).find(|page| page.title().as_str() == "Preferences") { tabs.set_selected_page(&page); return; }
-    let page = tabs.append(&preferences_page::build());
+    let page = tabs.append(&preferences_page::build(preferences, operations));
     page.set_title("Preferences");
     tabs.set_selected_page(&page);
 }

@@ -1,18 +1,29 @@
 use gtk::prelude::*;
-use gtk::{Box as GtkBox, Label, Orientation, ScrolledWindow, Stack, StackSwitcher};
+use std::cell::RefCell;
+use std::rc::Rc;
+use gtk::{Adjustment, Box as GtkBox, Button, Label, Orientation, ScrolledWindow, SpinButton, Stack, StackSwitcher};
+use crate::core::{ApplicationPreferences, OperationManager};
 
 pub fn category_names() -> [&'static str; 3] { ["General", "Views", "File operations"] }
 
-pub fn build() -> ScrolledWindow {
+pub fn build(preferences: Rc<RefCell<ApplicationPreferences>>, operations: OperationManager) -> ScrolledWindow {
     let content = GtkBox::new(Orientation::Vertical, 14);
     content.set_margin_top(24); content.set_margin_bottom(24); content.set_margin_start(32); content.set_margin_end(32);
     let title = Label::new(Some("Preferences")); title.add_css_class("title-1"); title.set_xalign(0.0); content.append(&title);
     let subtitle = Label::new(Some("Settings are grouped here as their behaviour becomes available.")); subtitle.add_css_class("dim-label"); subtitle.set_xalign(0.0); subtitle.set_wrap(true); content.append(&subtitle);
     let stack = Stack::new(); stack.set_vexpand(true); stack.set_hexpand(true);
     let switcher = StackSwitcher::new(); switcher.set_stack(Some(&stack)); switcher.set_halign(gtk::Align::Start); content.append(&switcher);
-    for category in category_names() { stack.add_titled(&category_page(category), Some(&category.to_lowercase().replace(' ', "-")), category); }
+    for category in category_names() { let page = if category == "File operations" { operations_page(preferences.clone(), operations.clone()) } else { category_page(category) }; stack.add_titled(&page, Some(&category.to_lowercase().replace(' ', "-")), category); }
     content.append(&stack);
     let scroll = ScrolledWindow::new(); scroll.set_child(Some(&content)); scroll
+}
+
+fn operations_page(preferences: Rc<RefCell<ApplicationPreferences>>, operations: OperationManager) -> GtkBox {
+    let page = GtkBox::new(Orientation::Vertical, 10); page.set_margin_top(18);
+    let heading = Label::new(Some("File operations")); heading.add_css_class("title-3"); heading.set_xalign(0.0); page.append(&heading);
+    let row = GtkBox::new(Orientation::Horizontal, 8); let label = Label::new(Some("Keep completed history for (days)")); label.set_hexpand(true); label.set_xalign(0.0); row.append(&label);
+    let spin = SpinButton::new(Some(&Adjustment::new(preferences.borrow().operation_history_days as f64, 1.0, 365.0, 1.0, 7.0, 0.0)), 1.0, 0); let stored = preferences.clone(); let retention_manager = operations.clone(); spin.connect_value_changed(move |spin| { let days = spin.value() as u32; stored.borrow_mut().operation_history_days = days; let _ = stored.borrow().save(); retention_manager.set_retention_days(days); }); row.append(&spin); page.append(&row);
+    let clear = Button::with_label("Clear completed history"); clear.set_halign(gtk::Align::Start); clear.connect_clicked(move |_| operations.clear_completed()); page.append(&clear); page
 }
 
 fn category_page(category: &str) -> GtkBox {
