@@ -13,9 +13,12 @@ impl SearchQuery {
     pub fn term(&self) -> &str { &self.term }
 }
 
+/// Matches any filename containing `term`, case-insensitively — an exact
+/// `nfo:fileName "term"` triple pattern only matches a filename equal to
+/// the whole search term, which almost never matches what a user types.
 pub fn tracker_filename_query(term: &str) -> String {
     let escaped = escape_sparql_literal(term);
-    format!("SELECT DISTINCT nie:url(?u) WHERE {{ ?u a nfo:FileDataObject ; nfo:fileName ~name . }}",).replace("~name", &format!("\"{escaped}\""))
+    format!("SELECT DISTINCT nie:url(?u) WHERE {{ ?u a nfo:FileDataObject ; nfo:fileName ?name . FILTER(CONTAINS(LCASE(?name), LCASE(\"{escaped}\"))) }}")
 }
 
 /// Reuses Tracker's existing full-text index rather than scanning file
@@ -46,7 +49,11 @@ impl SearchService {
 
     pub fn search(query: &SearchQuery, folder: &Path) -> io::Result<(SearchBackend, Vec<PathBuf>)> {
         if Self::backend() == SearchBackend::Tracker {
-            if let Ok(results) = tracker_search(query) { return Ok((SearchBackend::Tracker, results)); }
+            // An empty result can mean "no matches" or "this folder isn't in
+            // Tracker's index" (e.g. a mounted volume outside $HOME); either
+            // way a live scan of the folder the user is actually looking at
+            // is strictly more useful than reporting nothing.
+            if let Ok(results) = tracker_search(query) { if !results.is_empty() { return Ok((SearchBackend::Tracker, results)); } }
         }
         Ok((SearchBackend::FolderFallback, folder_search(query, folder)?))
     }
@@ -154,6 +161,29 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(directory.path().join("report.txt"), "content").unwrap();
         assert_eq!(folder_search(&SearchQuery::new("report", false), directory.path()).unwrap(), vec![directory.path().join("report.txt")]);
+    }
+
+    #[test]
+    fn a_partial_term_matches_a_longer_filename() {
+        let query = tracker_filename_query("repo");
+        // The filter must test containment, not equality: an exact
+        // `nfo:fileName "repo"` triple pattern would never match "report.txt".
+        assert!(query.contains("CONTAINS(LCASE(?name), LCASE(\"repo\"))"));
+    }
+
+    /// A temp directory is never in Tracker's index (e.g. it commonly
+    /// excludes mounted volumes entirely), so a Tracker "success" with zero
+    /// rows must still fall back to scanning this folder directly, whether
+    /// or not `tracker3` happens to be installed on the machine running
+    /// this test.
+    #[test]
+    fn a_folder_outside_the_tracker_index_still_finds_its_own_files() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("report.txt"), "content").unwrap();
+
+        let (_backend, results) = SearchService::search(&SearchQuery::new("report", false), directory.path()).unwrap();
+
+        assert_eq!(results, vec![directory.path().join("report.txt")]);
     }
 
     #[test]
