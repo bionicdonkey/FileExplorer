@@ -306,7 +306,12 @@ impl ExplorerWindow {
         let close_window = window.clone();
         let close_preferences = application_preferences.clone();
         tabs.view.connect_close_page(move |view, page| {
-            if close_data.borrow().len() <= 1 {
+            let closing_file_tab = close_data.borrow().iter().any(|tab| tab.page == *page);
+            if !closing_file_tab {
+                view.close_page_finish(page, true);
+                return true;
+            }
+            if should_protect_last_file_tab(true, close_data.borrow().len()) {
                 if close_preferences.borrow().close_on_last_tab { close_window.close(); } else { show_last_tab_dialog(&close_window); }
                 return true;
             }
@@ -815,6 +820,10 @@ fn selected_index(tabs: &TabView, data: &Rc<RefCell<Vec<TabData>>>) -> Option<us
     matching_index(&data.borrow(), |tab| tab.page == page)
 }
 
+fn should_protect_last_file_tab(closing_file_tab: bool, file_tab_count: usize) -> bool {
+    closing_file_tab && file_tab_count <= 1
+}
+
 fn matching_index<T>(items: &[T], matches: impl Fn(&T) -> bool) -> Option<usize> {
     items.iter().position(matches)
 }
@@ -1031,7 +1040,7 @@ mod tests {
     use gtk::prelude::{OrientableExt, PopoverExt, WidgetExt};
     use gtk::{Box as GtkBox, Label, Orientation, SearchEntry};
 
-    use super::{content_right_inset, file_toolbar, menu_button, matching_index, persist_options, remove_matching, shortcut_command, sidebar_path_for_tab};
+    use super::{content_right_inset, file_toolbar, menu_button, matching_index, persist_options, remove_matching, shortcut_command, sidebar_path_for_tab, should_protect_last_file_tab};
     use crate::core::{SortField, ViewOptions, ViewPreferencesStore};
     use crate::ui::context_menu::ContextCommand;
 
@@ -1112,5 +1121,12 @@ mod tests {
         assert!(button.popover().is_some());
         assert!(button.popover().and_then(|popover| popover.child()).is_some());
         assert!(button.is_sensitive());
+    }
+
+    #[test]
+    fn utility_tabs_never_trigger_the_last_file_tab_close_rule() {
+        assert!(!should_protect_last_file_tab(false, 1));
+        assert!(should_protect_last_file_tab(true, 1));
+        assert!(!should_protect_last_file_tab(true, 2));
     }
 }
