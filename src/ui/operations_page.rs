@@ -4,7 +4,8 @@ use gtk::prelude::*;
 use gtk::{Box as GtkBox, Button, Label, Orientation, ProgressBar, ScrolledWindow};
 
 use crate::core::elevated_operations::is_eligible_for_retry;
-use crate::core::{OperationManager, OperationRecord, OperationState};
+use crate::core::file_item::format_size;
+use crate::core::{OperationKind, OperationManager, OperationRecord, OperationState};
 
 pub fn active_summary(records: &[OperationRecord]) -> Option<String> {
     let active = records.iter().filter(|record| matches!(record.state, OperationState::Queued | OperationState::Running)).count();
@@ -30,8 +31,17 @@ fn refresh_rows(rows: &GtkBox, manager: &OperationManager) {
     for record in records.into_iter().rev() {
         let row = GtkBox::new(Orientation::Vertical, 4); row.add_css_class("operation-row");
         let item = record.sources.first().and_then(|path| path.file_name()).and_then(|name| name.to_str()).unwrap_or("item");
-        let action = match record.kind { crate::core::OperationKind::Copy => "Copying", crate::core::OperationKind::Move => "Moving", crate::core::OperationKind::Trash => "Moving to Trash", crate::core::OperationKind::Delete => "Deleting" };
-        let state = match &record.state { OperationState::Queued => "Queued".into(), OperationState::Running => format!("{} of {} item(s)", record.completed, record.total), OperationState::Completed => "Completed".into(), OperationState::Cancelled => "Cancelled".into(), OperationState::Failed(error) => format!("Failed: {error}") };
+        let action = match record.kind { OperationKind::Copy => "Copying", OperationKind::Move => "Moving", OperationKind::Trash => "Moving to Trash", OperationKind::Delete => "Deleting" };
+        let state = match &record.state {
+            OperationState::Queued => "Queued".into(),
+            // Copy tracks bytes (so a single large file still shows motion);
+            // other kinds are quick per-item operations, shown as a count.
+            OperationState::Running if record.kind == OperationKind::Copy => format!("{} of {}", format_size(record.completed as u64), format_size(record.total as u64)),
+            OperationState::Running => format!("{} of {} item(s)", record.completed, record.total),
+            OperationState::Completed => "Completed".into(),
+            OperationState::Cancelled => "Cancelled".into(),
+            OperationState::Failed(error) => format!("Failed: {error}"),
+        };
         let line = Label::new(Some(&format!("{action} {item} — {state}"))); line.set_xalign(0.0); line.set_wrap(true); row.append(&line);
         if matches!(record.state, OperationState::Queued | OperationState::Running) {
             let fraction = if record.total == 0 { 0.0 } else { record.completed as f64 / record.total as f64 };

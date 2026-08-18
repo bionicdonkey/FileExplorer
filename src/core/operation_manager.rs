@@ -56,7 +56,7 @@ impl OperationManager {
     fn submit_inner(&self, kind: OperationKind, sources: Vec<PathBuf>, destination: Option<PathBuf>, explicit_target: Option<PathBuf>) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         let cancel = Arc::new(AtomicBool::new(false));
-        // A placeholder; count_units() walks the whole tree and must not run
+        // A placeholder; count_bytes() walks the whole tree and must not run
         // on the caller's thread (the GTK main loop), or submitting a large
         // folder copy freezes the app before the record even appears queued.
         let total = sources.len().max(1);
@@ -67,14 +67,17 @@ impl OperationManager {
         std::thread::spawn(move || {
             update(&records, id, |record| record.state = OperationState::Running);
             if kind == OperationKind::Copy {
-                let counted_total = FileOperations::count_units(&sources);
+                // Progress is tracked in bytes, not file count: a single huge
+                // file is one "file" but the transfer still needs to show
+                // motion throughout, not just jump from 0% to 100%.
+                let counted_total = (FileOperations::count_bytes(&sources) as usize).max(1);
                 update(&records, id, |record| record.total = counted_total);
                 let progress_records = records.clone();
                 let mut completed = 0usize;
-                let mut on_unit = move || { completed += 1; update(&progress_records, id, |record| record.completed = completed); };
+                let mut on_progress = move |bytes: u64| { completed += bytes as usize; update(&progress_records, id, |record| record.completed = completed); };
                 let result = match &explicit_target {
-                    Some(target) => sources.first().map_or(Ok(()), |source| FileOperations::copy_to_target_with_progress(source, target, &cancel, &mut on_unit)),
-                    None => FileOperations::copy_with_progress(&sources, destination.as_deref().expect("copy requires destination"), &cancel, &mut on_unit),
+                    Some(target) => sources.first().map_or(Ok(()), |source| FileOperations::copy_to_target_with_progress(source, target, &cancel, &mut on_progress)),
+                    None => FileOperations::copy_with_progress(&sources, destination.as_deref().expect("copy requires destination"), &cancel, &mut on_progress),
                 };
                 finish(&records, &manager, id, result);
                 return;
@@ -216,26 +219,53 @@ mod tests {
     }
 
     #[test]
-    fn copying_a_folder_reports_progress_per_file_not_per_top_level_source() {
+    fn copying_a_folder_reports_byte_progress_not_per_top_level_source() {
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("source");
         let destination = directory.path().join("destination");
         fs::create_dir_all(&source).unwrap();
         fs::create_dir(&destination).unwrap();
-        fs::write(source.join("a.txt"), "1").unwrap();
-        fs::write(source.join("b.txt"), "2").unwrap();
+        fs::write(source.join("a.txt"), "12").unwrap();
+        fs::write(source.join("b.txt"), "345").unwrap();
         let manager = OperationManager::default();
 
         let id = manager.submit(OperationKind::Copy, vec![source], Some(destination));
         let record = wait_for_finished(&manager, id);
 
-        assert_eq!(record.total, 2);
+        assert_eq!(record.total, 5, "total should be bytes copied (2 + 3), not the single top-level source or file count");
+        assert_eq!(record.completed, 5);
         assert_eq!(record.state, OperationState::Completed);
     }
 
     #[test]
+    fn copying_a_single_large_file_reports_byte_progress_not_a_single_frozen_unit() {
+        // Regression guard for the reported bug: a single big file used to
+        // be "1 of 1" the whole transfer (no visible progress until done).
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("big.bin");
+        let destination = directory.path().join("destination");
+        fs::create_dir(&destination).unwrap();
+        fs::write(&source, vec![0u8; 5 * (1 << 20)]).unwrap();
+        let manager = OperationManager::default();
+
+        let id = manager.submit(OperationKind::Copy, vec![source], Some(destination));
+
+        let placeholder_units_total = 1; // sources.len().max(1), the pre-count placeholder
+        let mut saw_mid_transfer_progress = false;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            if let Some(record) = manager.records().into_iter().find(|record| record.id == id) {
+                if record.total > placeholder_units_total && record.completed > 0 && record.completed < record.total { saw_mid_transfer_progress = true; }
+                if record.finished_at.is_some() { break; }
+            }
+        }
+
+        assert!(saw_mid_transfer_progress, "never observed byte-level progress mid-transfer for a single large file");
+    }
+
+    #[test]
     fn submitting_a_copy_does_not_block_on_counting_the_source_tree() {
-        // count_units() must run on the background thread, not the caller's:
+        // count_bytes() must run on the background thread, not the caller's:
         // otherwise submitting a large folder copy blocks the GTK main loop
         // (reported as the app "freezing" / a transfer that never starts).
         // A few hundred files take long enough to count that a regression
