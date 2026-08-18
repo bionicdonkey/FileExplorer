@@ -112,6 +112,8 @@ impl SidebarPreferences {
     pub fn remote_pins(&self) -> &[String] { &self.remote_pins }
     pub fn section_expanded(&self, section: &str) -> bool { self.section_expanded.get(section).copied().unwrap_or(true) }
     pub fn set_section_expanded(&mut self, section: impl Into<String>, expanded: bool) { self.section_expanded.insert(section.into(), expanded); }
+    pub fn devices_expanded(&self) -> bool { self.section_expanded.get("This PC/Devices").copied().unwrap_or(false) }
+    pub fn set_devices_expanded(&mut self, expanded: bool) { self.section_expanded.insert("This PC/Devices".into(), expanded); }
 
     pub fn pin(&mut self, path: PathBuf) {
         let path = normalized_path(path);
@@ -364,6 +366,14 @@ mod tests {
     fn device_sorting_places_removable_media_before_fixed_drives() {
         assert!(device_kind_rank("drive-removable-media-symbolic") < device_kind_rank("drive-harddisk-symbolic"));
         assert!(device_kind_rank("drive-harddisk-symbolic") < device_kind_rank("folder-remote-symbolic"));
+    }
+
+    #[test]
+    fn devices_group_defaults_to_collapsed_and_persists() {
+        let mut preferences = SidebarPreferences::in_memory();
+        assert!(!preferences.devices_expanded());
+        preferences.set_devices_expanded(true);
+        assert!(preferences.devices_expanded());
     }
 
     #[test]

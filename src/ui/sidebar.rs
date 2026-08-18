@@ -66,18 +66,41 @@ impl Sidebar {
             let section_is_empty = section.nodes.is_empty();
             let rows = GtkBox::new(Orientation::Vertical, 0);
             rows.add_css_class("sidebar-tree");
+            let device_rows = GtkBox::new(Orientation::Vertical, 0);
+            let has_devices = section.title == "This PC" && section.nodes.len() > 1;
             for (index, node) in section.nodes.into_iter().enumerate() {
                 if should_show_devices_heading(&section.title, index) {
+                    let device_heading = GtkBox::new(Orientation::Horizontal, 0);
+                    let devices_toggle = ToggleButton::new();
+                    devices_toggle.add_css_class("flat");
+                    devices_toggle.add_css_class("sidebar-section-toggle");
+                    let devices_expanded = self.model.borrow().preferences().devices_expanded();
+                    devices_toggle.set_active(devices_expanded);
+                    devices_toggle.set_child(Some(&Image::from_icon_name(if devices_expanded { "pan-down-symbolic" } else { "pan-end-symbolic" })));
+                    device_rows.set_visible(devices_expanded);
+                    let device_rows_for_toggle = device_rows.clone();
+                    let preferences = self.model.clone();
+                    devices_toggle.connect_toggled(move |toggle| {
+                        let expanded = toggle.is_active();
+                        device_rows_for_toggle.set_visible(expanded);
+                        toggle.set_child(Some(&Image::from_icon_name(if expanded { "pan-down-symbolic" } else { "pan-end-symbolic" })));
+                        let mut model = preferences.borrow_mut();
+                        model.preferences_mut().set_devices_expanded(expanded);
+                        let _ = model.preferences().save();
+                    });
+                    device_heading.append(&devices_toggle);
                     let devices = Label::new(Some("Devices"));
                     devices.add_css_class("sidebar-subheading");
                     devices.add_css_class("dim-label");
                     devices.set_xalign(0.0);
-                    devices.set_margin_start(32);
                     devices.set_margin_top(8);
                     devices.set_margin_bottom(2);
-                    rows.append(&devices);
+                    device_heading.append(&devices);
+                    rows.append(&device_heading);
+                    rows.append(&device_rows);
                 }
-                self.append_node(&rows, node, 0);
+                if has_devices && index > 0 { self.append_node(&device_rows, node, 0); }
+                else { self.append_node(&rows, node, 0); }
             }
 
             let heading_row = GtkBox::new(Orientation::Horizontal, 0);
