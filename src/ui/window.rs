@@ -703,15 +703,10 @@ fn start_transfer(view: &FileView, source: PathBuf, destination: PathBuf, kind: 
         schedule_refresh(refresh_view.clone(), operations.clone(), operation_id);
     };
     if !target.exists() { submit(None); return; }
-    let dialog = gtk::Dialog::new();
-    dialog.set_title(Some("An item with this name already exists")); dialog.set_modal(true); dialog.add_css_class("explorer-dialog");
-    if let Some(parent) = view.widget.root().and_downcast::<gtk::Window>() { dialog.set_transient_for(Some(&parent)); }
-    dialog.add_button("Replace", gtk::ResponseType::Accept);
-    dialog.add_button("Keep Both", gtk::ResponseType::Apply);
-    dialog.add_button("Skip", gtk::ResponseType::Reject);
-    dialog.add_button("Cancel", gtk::ResponseType::Cancel);
-    let text = Label::new(Some(&format!("“{}” already exists in this folder. Choose how to continue.", name.to_string_lossy()))); text.set_wrap(true); text.set_xalign(0.0); text.set_margin_top(12); text.set_margin_bottom(12); text.set_margin_start(12); text.set_margin_end(12); dialog.content_area().append(&text);
-    dialog.connect_response(move |dialog, response| { match response { gtk::ResponseType::Accept => submit(None), gtk::ResponseType::Apply => submit(Some(FileOperations::keep_both_destination(&target))), _ => {} } dialog.close(); });
+    let parent = view.widget.root().and_downcast::<gtk::Window>();
+    let dialog = adw::MessageDialog::new(parent.as_ref(), Some("An item with this name already exists"), Some(&format!("“{}” already exists in this folder. Choose how to continue.", name.to_string_lossy())));
+    dialog.add_responses(&[("replace", "Replace"), ("keep", "Keep Both"), ("skip", "Skip"), ("cancel", "Cancel")]); dialog.set_default_response(Some("cancel")); dialog.set_close_response("cancel");
+    dialog.connect_response(None, move |_, response| { match response { "replace" => submit(None), "keep" => submit(Some(FileOperations::keep_both_destination(&target))), _ => {} } });
     dialog.present();
 }
 
@@ -728,45 +723,20 @@ fn schedule_refresh(view: FileView, operations: OperationManager, operation_id: 
     });
 }
 
-#[allow(deprecated)]
 fn show_operation_error(view: &FileView, error: &str) {
-    let dialog = gtk::Dialog::new();
-    dialog.set_title(Some("File operation could not be completed")); dialog.set_modal(true); dialog.add_css_class("explorer-dialog");
-    if let Some(parent) = view.widget.root().and_downcast::<gtk::Window>() { dialog.set_transient_for(Some(&parent)); }
-    dialog.add_button("OK", gtk::ResponseType::Ok);
-    let message = Label::new(Some(error)); message.set_wrap(true); message.set_xalign(0.0); message.set_margin_top(12); message.set_margin_bottom(12); message.set_margin_start(12); message.set_margin_end(12);
-    dialog.content_area().append(&message); dialog.connect_response(|dialog, _| dialog.close()); dialog.present();
+    let parent = view.widget.root().and_downcast::<gtk::Window>(); let dialog = adw::MessageDialog::new(parent.as_ref(), Some("File operation could not be completed"), Some(error)); dialog.add_response("ok", "OK"); dialog.set_default_response(Some("ok")); dialog.set_close_response("ok"); dialog.present();
 }
 
 #[allow(deprecated)]
 fn confirm_permanent_delete(view: &FileView, path: PathBuf, operations: OperationManager) {
-    let dialog = gtk::Dialog::new();
-    dialog.set_title(Some("Delete permanently?"));
-    dialog.set_modal(true);
-    dialog.set_resizable(false);
-    if let Some(parent) = view.widget.root().and_downcast::<gtk::Window>() { dialog.set_transient_for(Some(&parent)); }
-    dialog.add_css_class("explorer-dialog");
-    dialog.add_button("Delete Permanently", gtk::ResponseType::Accept);
-    dialog.add_button("Cancel", gtk::ResponseType::Cancel);
-    let text = Label::new(Some(&format!("“{}” will be permanently deleted. This cannot be undone.", path.file_name().and_then(|name| name.to_str()).unwrap_or("This item"))));
-    text.set_wrap(true); text.set_xalign(0.0); text.set_margin_top(12); text.set_margin_bottom(12); text.set_margin_start(12); text.set_margin_end(12);
-    dialog.content_area().append(&text);
+    let parent = view.widget.root().and_downcast::<gtk::Window>(); let dialog = adw::MessageDialog::new(parent.as_ref(), Some("Delete permanently?"), Some(&format!("“{}” will be permanently deleted. This cannot be undone.", path.file_name().and_then(|name| name.to_str()).unwrap_or("This item")))); dialog.add_responses(&[("delete", "Delete Permanently"), ("cancel", "Cancel")]); dialog.set_default_response(Some("cancel")); dialog.set_close_response("cancel"); dialog.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
     let reload = view.clone();
-    dialog.connect_response(move |dialog, response| { if response == gtk::ResponseType::Accept { let operation_id = operations.submit(OperationKind::Delete, vec![path.clone()], None); schedule_refresh(reload.clone(), operations.clone(), operation_id); } dialog.close(); });
+    dialog.connect_response(None, move |_, response| { if response == "delete" { let operation_id = operations.submit(OperationKind::Delete, vec![path.clone()], None); schedule_refresh(reload.clone(), operations.clone(), operation_id); } });
     dialog.present();
 }
 
-#[allow(deprecated)]
 fn show_close_operations_dialog(parent: &ApplicationWindow, operations: OperationManager) {
-    let dialog = gtk::Dialog::new();
-    dialog.set_title(Some("File operations are still running")); dialog.set_modal(true); dialog.set_transient_for(Some(parent)); dialog.add_css_class("explorer-dialog");
-    dialog.add_button("Continue Transfers", gtk::ResponseType::Accept);
-    dialog.add_button("Cancel", gtk::ResponseType::Cancel);
-    let message = Label::new(Some(&format!("{} operation(s) will continue while Zorin Explorer stays open.", operations.active_count())));
-    message.set_wrap(true); message.set_xalign(0.0); message.set_margin_top(12); message.set_margin_bottom(12); message.set_margin_start(12); message.set_margin_end(12);
-    dialog.content_area().append(&message);
-    dialog.connect_response(|dialog, _| dialog.close());
-    dialog.present();
+    let dialog = adw::MessageDialog::new(Some(parent), Some("File operations are still running"), Some(&format!("{} operation(s) will continue while Zorin Explorer stays open.", operations.active_count()))); dialog.add_responses(&[("continue", "Continue Transfers"), ("cancel", "Cancel")]); dialog.set_default_response(Some("cancel")); dialog.set_close_response("cancel"); dialog.present();
 }
 
 fn navigate_tab(index: usize, path: PathBuf, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, header: &HeaderControls, preferences: &Rc<RefCell<ViewPreferencesStore>>, sidebar: &Sidebar, record_history: bool) {
