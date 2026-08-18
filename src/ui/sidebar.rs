@@ -71,6 +71,7 @@ impl Sidebar {
             for (index, node) in section.nodes.into_iter().enumerate() {
                 if should_show_devices_heading(&section.title, index) {
                     let device_heading = GtkBox::new(Orientation::Horizontal, 0);
+                    device_heading.set_margin_start(16);
                     let devices_toggle = ToggleButton::new();
                     devices_toggle.add_css_class("flat");
                     devices_toggle.add_css_class("sidebar-section-toggle");

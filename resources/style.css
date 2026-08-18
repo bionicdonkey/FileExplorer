@@ -98,6 +98,13 @@
   padding-left: 4px;
 }
 
+button.sidebar-section-toggle {
+  min-width: 32px;
+  min-height: 30px;
+  padding: 0;
+  border-radius: 8px;
+}
+
 .sidebar-tree-row,
 .sidebar-tree-child {
   min-height: 30px;
