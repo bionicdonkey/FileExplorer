@@ -71,7 +71,6 @@ impl Sidebar {
             for (index, node) in section.nodes.into_iter().enumerate() {
                 if should_show_devices_heading(&section.title, index) {
                     let device_heading = GtkBox::new(Orientation::Horizontal, 0);
-                    device_heading.set_margin_start(16);
                     let devices_toggle = ToggleButton::new();
                     devices_toggle.add_css_class("flat");
                     devices_toggle.add_css_class("sidebar-section-toggle");
@@ -90,6 +89,11 @@ impl Sidebar {
                         let _ = model.preferences().save();
                     });
                     device_heading.append(&devices_toggle);
+                    let devices_icon = Image::from_icon_name("drive-harddisk-symbolic");
+                    devices_icon.set_pixel_size(18);
+                    devices_icon.set_margin_start(6);
+                    devices_icon.set_margin_end(8);
+                    device_heading.append(&devices_icon);
                     let devices = Label::new(Some("Devices"));
                     devices.add_css_class("sidebar-subheading");
                     devices.add_css_class("dim-label");
