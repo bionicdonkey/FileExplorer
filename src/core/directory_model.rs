@@ -28,7 +28,7 @@ impl DirectoryModel {
     }
 
     pub fn load_with_options(path: &Path, options: &ViewOptions) -> io::Result<Vec<FileItem>> {
-        let mut items = Self::load_unsorted(path)?;
+        let mut items = Self::load_unsorted(path, options)?;
         sort_items(&mut items, options);
         Ok(items)
     }
@@ -42,17 +42,17 @@ impl DirectoryModel {
         ).map_err(|error| io::Error::new(io::ErrorKind::Other, error))?;
         let mut items = Vec::new();
         while let Some(info) = enumerator.next_file(gio::Cancellable::NONE).map_err(|error| io::Error::new(io::ErrorKind::Other, error))? {
-            if !info.name().to_string_lossy().starts_with('.') { items.push(FileItem::from_gio(&file, &info)); }
+            if options.show_hidden || !info.name().to_string_lossy().starts_with('.') { items.push(FileItem::from_gio(&file, &info)); }
         }
         sort_items(&mut items, options);
         Ok(items)
     }
 
-    fn load_unsorted(path: &Path) -> io::Result<Vec<FileItem>> {
+    fn load_unsorted(path: &Path, options: &ViewOptions) -> io::Result<Vec<FileItem>> {
         let mut items = Vec::new();
         for entry in fs::read_dir(path)? {
             let entry = entry?;
-            if entry.file_name().to_string_lossy().starts_with('.') {
+            if !options.show_hidden && entry.file_name().to_string_lossy().starts_with('.') {
                 continue;
             }
             items.push(FileItem::from_dir_entry(&entry)?);

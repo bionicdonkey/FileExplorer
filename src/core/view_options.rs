@@ -64,6 +64,15 @@ mod tests {
         assert!(small.vertical_padding < GridSize::Medium.grid_layout().vertical_padding);
         assert!(small.vertical_padding <= 8);
     }
+
+    #[test]
+    fn hidden_files_are_off_by_default_and_persist_per_folder() {
+        let path = Path::new("/tmp/hidden");
+        let mut store = ViewPreferencesStore::in_memory();
+        assert!(!ViewOptions::default().show_hidden);
+        store.set(path, ViewOptions { show_hidden: true, ..ViewOptions::default() });
+        assert!(store.options_for(path, &[]).show_hidden);
+    }
 }
 use std::collections::BTreeMap;
 use std::env;
@@ -227,6 +236,8 @@ pub struct ViewOptions {
     pub group_field: GroupField,
     pub thumbnails: bool,
     #[serde(default)]
+    pub show_hidden: bool,
+    #[serde(default)]
     pub list_columns: ListColumnLayout,
 }
 
@@ -240,6 +251,7 @@ impl Default for ViewOptions {
             folders_first: true,
             group_field: GroupField::None,
             thumbnails: true,
+            show_hidden: false,
             list_columns: ListColumnLayout::default(),
         }
     }

@@ -50,6 +50,7 @@ impl ExplorerWindow {
             .default_width(1280)
             .default_height(800)
             .build();
+        let operations = OperationManager::default();
 
         let header = HeaderBar::new();
         header.set_show_title(false);
@@ -72,6 +73,13 @@ impl ExplorerWindow {
         let preferences_button = Button::from_icon_name("emblem-system-symbolic");
         preferences_button.add_css_class("flat");
         preferences_button.set_tooltip_text(Some("Preferences"));
+        let operations_button = Button::from_icon_name("view-list-symbolic");
+        operations_button.add_css_class("flat");
+        operations_button.set_tooltip_text(Some("File operations"));
+        let operations_tabs = tabs.view.clone();
+        let operations_manager = operations.clone();
+        operations_button.connect_clicked(move |_| open_operations_tab(&operations_tabs, operations_manager.clone()));
+        header.pack_end(&operations_button);
         header.pack_end(&preferences_button);
 
         let initial_location = Rc::new(RefCell::new(initial.clone()));
@@ -79,7 +87,6 @@ impl ExplorerWindow {
         let tabs_data: Rc<RefCell<Vec<TabData>>> = Rc::new(RefCell::new(Vec::new()));
         let preferences = Rc::new(RefCell::new(ViewPreferencesStore::load_default().unwrap_or_else(|_| ViewPreferencesStore::in_memory())));
         let clipboard: Rc<RefCell<Option<FileClipboard>>> = Rc::new(RefCell::new(None));
-        let operations = OperationManager::default();
         let first_view = FileView::new(initial_location.clone());
         first_view.set_options(preferences.borrow().options_for(&initial, &[]));
         let first_page = tabs.view.append(&first_view.widget);
@@ -189,18 +196,12 @@ impl ExplorerWindow {
         status.set_margin_end(8);
         status.set_margin_bottom(6);
 
-        let operations_button = Button::from_icon_name("view-list-symbolic");
-        operations_button.add_css_class("flat");
-        operations_button.set_tooltip_text(Some("File operations"));
-        let operations_tabs = tabs.view.clone();
-        let operations_manager = operations.clone();
-        operations_button.connect_clicked(move |_| open_operations_tab(&operations_tabs, operations_manager.clone()));
         let preferences_tabs = tabs.view.clone();
         preferences_button.connect_clicked(move |_| open_preferences_tab(&preferences_tabs));
 
         let body = GtkBox::new(Orientation::Vertical, 0);
         body.append(&header_controls.widget);
-        body.append(&file_toolbar(search, view_controls(&tabs_data, &tabs.view, &preferences), operations_button));
+        body.append(&file_toolbar(search, view_controls(&tabs_data, &tabs.view, &preferences)));
         body.append(&content);
         body.append(&status);
         let toolbar = ToolbarView::new();
@@ -223,8 +224,13 @@ impl ExplorerWindow {
 
         let shortcut_data = tabs_data.clone();
         let shortcut_tabs = tabs.view.clone();
+        let shortcut_preferences = preferences.clone();
         let shortcuts = gtk::EventControllerKey::new();
         shortcuts.connect_key_pressed(move |_, key, _, modifiers| {
+            if key.to_unicode().is_some_and(|key| key.eq_ignore_ascii_case(&'h')) && modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK) {
+                update_active_options(&shortcut_data, &shortcut_tabs, &shortcut_preferences, "View:Toggle hidden files");
+                return glib::Propagation::Stop;
+            }
             let command = shortcut_command(
                 key.to_unicode().map(|key| key.to_ascii_lowercase()),
                 key == gtk::gdk::Key::Delete,
@@ -882,6 +888,7 @@ fn view_menu_body(label: &str, options: &ViewOptions, data: &Rc<RefCell<Vec<TabD
             append_radio_group(&menu, [("Small icons", options.grid_size == GridSize::Small), ("Medium icons", options.grid_size == GridSize::Medium), ("Large icons", options.grid_size == GridSize::Large), ("Extra Large icons", options.grid_size == GridSize::ExtraLarge)], "View", data, tabs, preferences);
             append_separator(&menu);
             append_check(&menu, "Show thumbnails", options.thumbnails, true, "View:Toggle thumbnails", data, tabs, preferences);
+            append_check(&menu, "Show hidden files", options.show_hidden, true, "View:Toggle hidden files", data, tabs, preferences);
         }
         _ => {}
     }
@@ -927,7 +934,7 @@ fn append_check(menu: &GtkBox, label: &str, active: bool, sensitive: bool, actio
     menu.append(&control);
 }
 
-fn file_toolbar(search: SearchEntry, controls: GtkBox, operations: Button) -> GtkBox {
+fn file_toolbar(search: SearchEntry, controls: GtkBox) -> GtkBox {
     search.set_hexpand(true);
     let row = GtkBox::new(Orientation::Horizontal, 6);
     row.set_margin_start(8);
@@ -935,7 +942,6 @@ fn file_toolbar(search: SearchEntry, controls: GtkBox, operations: Button) -> Gt
     row.set_margin_bottom(6);
     row.append(&search);
     row.append(&controls);
-    row.append(&operations);
     row
 }
 
@@ -963,6 +969,7 @@ fn update_active_options(data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, prefe
         "View:Large icons" => options.grid_size = GridSize::Large,
         "View:Extra Large icons" => options.grid_size = GridSize::ExtraLarge,
         "View:Toggle thumbnails" => options.thumbnails = !options.thumbnails,
+        "View:Toggle hidden files" => options.show_hidden = !options.show_hidden,
         _ => return,
     }
     let path = tab.location.borrow().clone(); tab.view.set_options(options.clone());
@@ -1046,7 +1053,7 @@ mod tests {
     fn file_toolbar_places_search_and_view_controls_in_one_row() {
         gtk::init().expect("GTK should initialize for widget tests");
 
-        let row = file_toolbar(SearchEntry::new(), GtkBox::new(Orientation::Horizontal, 6), gtk::Button::new());
+        let row = file_toolbar(SearchEntry::new(), GtkBox::new(Orientation::Horizontal, 6));
 
         assert_eq!(row.orientation(), Orientation::Horizontal);
         assert!(row.first_child().is_some());
