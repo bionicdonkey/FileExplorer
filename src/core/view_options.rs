@@ -73,6 +73,24 @@ mod tests {
         store.set(path, ViewOptions { show_hidden: true, ..ViewOptions::default() });
         assert!(store.options_for(path, &[]).show_hidden);
     }
+
+    #[test]
+    fn global_defaults_apply_when_a_folder_has_no_override() {
+        let mut store = ViewPreferencesStore::in_memory();
+        store.set_defaults(ViewOptions { view_mode: ViewMode::IconGrid, ..ViewOptions::default() });
+
+        assert_eq!(store.options_for(Path::new("/tmp/plain"), &[]).view_mode, ViewMode::IconGrid);
+    }
+
+    #[test]
+    fn explicit_folder_options_override_global_defaults() {
+        let path = Path::new("/tmp/custom");
+        let mut store = ViewPreferencesStore::in_memory();
+        store.set_defaults(ViewOptions { view_mode: ViewMode::IconGrid, ..ViewOptions::default() });
+        store.set(path, ViewOptions { view_mode: ViewMode::DetailedList, ..ViewOptions::default() });
+
+        assert_eq!(store.options_for(path, &[]).view_mode, ViewMode::DetailedList);
+    }
 }
 use std::collections::BTreeMap;
 use std::env;
@@ -259,17 +277,21 @@ impl Default for ViewOptions {
 
 #[derive(Default, Serialize, Deserialize)]
 struct StoredOptions {
+    #[serde(default)]
+    defaults: Option<ViewOptions>,
+    #[serde(default)]
     folders: BTreeMap<String, ViewOptions>,
 }
 
 pub struct ViewPreferencesStore {
     path: Option<PathBuf>,
+    defaults: Option<ViewOptions>,
     folders: BTreeMap<String, ViewOptions>,
 }
 
 impl ViewPreferencesStore {
     pub fn in_memory() -> Self {
-        Self { path: None, folders: BTreeMap::new() }
+        Self { path: None, defaults: None, folders: BTreeMap::new() }
     }
 
     pub fn load_default() -> io::Result<Self> {
@@ -282,16 +304,31 @@ impl ViewPreferencesStore {
 
     pub fn load_from(path: PathBuf) -> io::Result<Self> {
         if !path.exists() {
-            return Ok(Self { path: Some(path), folders: BTreeMap::new() });
+            return Ok(Self { path: Some(path), defaults: None, folders: BTreeMap::new() });
         }
         let bytes = fs::read(&path)?;
         let stored: StoredOptions = serde_json::from_slice(&bytes)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        Ok(Self { path: Some(path), folders: stored.folders })
+        Ok(Self { path: Some(path), defaults: stored.defaults, folders: stored.folders })
     }
 
     pub fn options_for(&self, path: &Path, items: &[FileItem]) -> ViewOptions {
-        self.folders.get(&folder_key(path)).cloned().unwrap_or_else(|| automatic_options(path, items))
+        self.folders.get(&folder_key(path))
+            .cloned()
+            .or_else(|| self.defaults.clone())
+            .unwrap_or_else(|| automatic_options(path, items))
+    }
+
+    pub fn defaults(&self) -> ViewOptions {
+        self.defaults.clone().unwrap_or_default()
+    }
+
+    pub fn set_defaults(&mut self, defaults: ViewOptions) {
+        self.defaults = Some(ViewOptions { list_columns: defaults.list_columns.normalized(), ..defaults });
+    }
+
+    pub fn clear(&mut self, path: &Path) -> bool {
+        self.folders.remove(&folder_key(path)).is_some()
     }
 
     pub fn set(&mut self, path: &Path, options: ViewOptions) {
@@ -302,7 +339,7 @@ impl ViewPreferencesStore {
         let Some(path) = &self.path else { return Ok(()); };
         let parent = path.parent().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "preference path has no parent"))?;
         fs::create_dir_all(parent)?;
-        let bytes = serde_json::to_vec_pretty(&StoredOptions { folders: self.folders.clone() })
+        let bytes = serde_json::to_vec_pretty(&StoredOptions { defaults: self.defaults.clone(), folders: self.folders.clone() })
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         let temporary = path.with_extension("json.tmp");
         fs::write(&temporary, bytes)?;

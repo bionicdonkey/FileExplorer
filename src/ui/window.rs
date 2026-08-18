@@ -909,6 +909,15 @@ fn view_menu_body(label: &str, options: &ViewOptions, data: &Rc<RefCell<Vec<TabD
             append_separator(&menu);
             append_check(&menu, "Show thumbnails", options.thumbnails, true, "View:Toggle thumbnails", data, tabs, preferences);
             append_check(&menu, "Show hidden files", options.show_hidden, true, "View:Toggle hidden files", data, tabs, preferences);
+            append_separator(&menu);
+            let reset = Button::with_label("Reset folder view");
+            reset.set_margin_start(8);
+            reset.set_margin_end(8);
+            let data = data.clone();
+            let tabs = tabs.clone();
+            let preferences = preferences.clone();
+            reset.connect_clicked(move |_| reset_active_options(&data, &tabs, &preferences));
+            menu.append(&reset);
         }
         _ => {}
     }
@@ -994,6 +1003,19 @@ fn update_active_options(data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, prefe
     }
     let path = tab.location.borrow().clone(); tab.view.set_options(options.clone());
     persist_options(&mut preferences.borrow_mut(), &path, options);
+}
+
+fn reset_active_options(data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, preferences: &Rc<RefCell<ViewPreferencesStore>>) {
+    let Some(index) = selected_index(tabs, data) else { return; };
+    let path = data.borrow()[index].location.borrow().clone();
+    let options = {
+        let mut preferences = preferences.borrow_mut();
+        preferences.clear(&path);
+        let options = preferences.options_for(&path, &[]);
+        let _ = preferences.save();
+        options
+    };
+    data.borrow()[index].view.set_options(options);
 }
 
 fn persist_options(store: &mut ViewPreferencesStore, path: &Path, options: ViewOptions) {
