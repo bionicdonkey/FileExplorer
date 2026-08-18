@@ -233,6 +233,7 @@ impl SidebarModel {
     fn local_mounts(&self) -> Vec<SidebarNode> {
         let mut mounts = gio::VolumeMonitor::get().mounts().into_iter().filter_map(|mount| {
             let root = mount.root();
+            if !is_local_mount_uri(&root.uri()) { return None; }
             let path = root.path()?;
             if path == Path::new("/") || path.starts_with(&self.home) { return None; }
             let icon = mount_icon_name(&mount, "drive-harddisk-symbolic");
@@ -245,7 +246,7 @@ impl SidebarModel {
     fn remote_mounts(&self) -> Vec<SidebarNode> {
         gio::VolumeMonitor::get().mounts().into_iter().filter_map(|mount| {
             let root = mount.root();
-            root.path().is_none().then(|| SidebarNode::remote(root.uri().to_string(), mount.name(), mount_icon_name(&mount, "folder-remote-symbolic"), true))
+            (!is_local_mount_uri(&root.uri())).then(|| SidebarNode::remote(root.uri().to_string(), mount.name(), mount_icon_name(&mount, "folder-remote-symbolic"), true))
         }).collect()
     }
 
@@ -300,6 +301,10 @@ fn device_kind_rank(icon_name: &str) -> u8 {
     else { 2 }
 }
 
+fn is_local_mount_uri(uri: &str) -> bool {
+    uri.starts_with("file://")
+}
+
 fn themed_icon_name(icon: gio::Icon) -> Option<String> {
     icon
         .downcast::<gio::ThemedIcon>()
@@ -331,7 +336,7 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
 
-    use super::{device_kind_rank, user_section_title, SidebarLocation, SidebarModel, SidebarPreferences};
+    use super::{device_kind_rank, is_local_mount_uri, user_section_title, SidebarLocation, SidebarModel, SidebarPreferences};
 
     #[test]
     fn pinning_a_path_is_persisted_once() {
@@ -388,6 +393,12 @@ mod tests {
     fn user_section_prefers_the_account_display_name() {
         assert_eq!(user_section_title(std::ffi::OsStr::new("Alex Example"), Path::new("/home/user")), "Alex Example");
         assert_eq!(user_section_title(std::ffi::OsStr::new(""), Path::new("/home/user")), "user");
+    }
+
+    #[test]
+    fn only_file_uris_are_classified_as_local_devices() {
+        assert!(is_local_mount_uri("file:///media/user/Storage"));
+        assert!(!is_local_mount_uri("smb://octavia.local/software"));
     }
 
     #[test]

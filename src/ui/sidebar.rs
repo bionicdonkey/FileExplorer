@@ -103,7 +103,7 @@ impl Sidebar {
                     rows.append(&device_heading);
                     rows.append(&device_rows);
                 }
-                if has_devices && index > 0 { self.append_node(&device_rows, node, 0); }
+                if has_devices && index > 0 { self.append_node(&device_rows, node, 1); }
                 else { self.append_node(&rows, node, 0); }
             }
 
