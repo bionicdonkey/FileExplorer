@@ -373,8 +373,16 @@ impl ExplorerWindow {
     }
 }
 
-#[allow(deprecated)]
-fn show_last_tab_dialog(parent: &ApplicationWindow) { let dialog = gtk::Dialog::new(); dialog.set_title(Some("Close Zorin Explorer?")); dialog.set_modal(true); dialog.set_transient_for(Some(parent)); dialog.add_css_class("explorer-dialog"); dialog.add_button("Close Application", gtk::ResponseType::Accept); dialog.add_button("Cancel", gtk::ResponseType::Cancel); let text = Label::new(Some("This is the last tab. Closing it will close Zorin Explorer.")); text.set_wrap(true); text.set_xalign(0.0); text.set_margin_top(12); text.set_margin_bottom(12); text.set_margin_start(12); text.set_margin_end(12); dialog.content_area().append(&text); let window = parent.clone(); dialog.connect_response(move |dialog, response| { if response == gtk::ResponseType::Accept { window.close(); } dialog.close(); }); dialog.present(); }
+fn show_last_tab_dialog(parent: &ApplicationWindow) {
+    let dialog = adw::MessageDialog::new(Some(parent), Some("Close Zorin Explorer?"), Some("This is the last tab. Closing it will close Zorin Explorer."));
+    dialog.add_responses(&[("close", "Close Application"), ("cancel", "Cancel")]);
+    dialog.set_default_response(Some("cancel"));
+    dialog.set_close_response("cancel");
+    dialog.set_response_appearance("close", adw::ResponseAppearance::Destructive);
+    let window = parent.clone();
+    dialog.connect_response(None, move |_, response| { if response == "close" { window.close(); } });
+    dialog.present();
+}
 
 fn history_with(path: PathBuf) -> Rc<RefCell<NavigationHistory>> {
     let history = Rc::new(RefCell::new(NavigationHistory::new()));
