@@ -9,7 +9,7 @@ use gtk::{Align, Box as GtkBox, Button, CheckButton, Entry, Label, MenuButton, O
 use crate::core::location::Location;
 use crate::core::navigation::NavigationHistory;
 use crate::core::operations::FileOperations;
-use crate::core::{ApplicationPreferences, OperationKind, OperationManager};
+use crate::core::{ApplicationPreferences, ConflictDefault, OperationKind, OperationManager};
 use crate::core::{GridSize, GroupField, SidebarModel, SidebarPreferences, SortDirection, SortField, ViewMode, ViewOptions, ViewPreferencesStore};
 use crate::ui::context_menu::{ContextCommand, ContextTarget};
 use crate::ui::file_view::FileView;
@@ -741,6 +741,18 @@ fn start_transfer(view: &FileView, source: PathBuf, destination: PathBuf, kind: 
         schedule_refresh(refresh_view.clone(), operations.clone(), operation_id);
     };
     if !target.exists() { submit(None); return; }
+    match ApplicationPreferences::load_default().unwrap_or_default().conflict_default {
+        ConflictDefault::Replace => {
+            submit(None);
+            return;
+        }
+        ConflictDefault::KeepBoth => {
+            submit(Some(FileOperations::keep_both_destination(&target)));
+            return;
+        }
+        ConflictDefault::Skip => return,
+        ConflictDefault::Ask => {}
+    }
     let parent = view.widget.root().and_downcast::<gtk::Window>();
     let dialog = adw::MessageDialog::new(parent.as_ref(), Some("An item with this name already exists"), Some(&format!("“{}” already exists in this folder. Choose how to continue.", name.to_string_lossy())));
     dialog.add_responses(&[("replace", "Replace"), ("keep", "Keep Both"), ("skip", "Skip"), ("cancel", "Cancel")]); dialog.set_default_response(Some("cancel")); dialog.set_close_response("cancel");

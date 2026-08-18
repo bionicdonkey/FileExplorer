@@ -4,6 +4,16 @@ use std::path::PathBuf;
 use gio::prelude::*;
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ConflictDefault {
+    #[default]
+    Ask,
+    Replace,
+    KeepBoth,
+    Skip,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ApplicationPreferences {
     pub operation_history_days: u32,
@@ -13,6 +23,8 @@ pub struct ApplicationPreferences {
     pub restore_previous_tabs: bool,
     #[serde(default = "default_new_tab_location")]
     pub new_tab_location: String,
+    #[serde(default)]
+    pub conflict_default: ConflictDefault,
     #[serde(skip)]
     path: Option<PathBuf>,
 }
@@ -29,6 +41,7 @@ impl Default for ApplicationPreferences {
             close_on_last_tab: false,
             restore_previous_tabs: false,
             new_tab_location: default_new_tab_location(),
+            conflict_default: ConflictDefault::Ask,
             path: None,
         }
     }
@@ -127,5 +140,11 @@ mod tests {
         let locations = vec!["file:///tmp".to_owned(), "preferences:".to_owned(), "smb://server/share".to_owned()];
 
         assert_eq!(file_session_locations(&locations), vec!["file:///tmp"]);
+    }
+
+    #[test]
+    fn conflict_handling_defaults_to_asking() {
+        assert_eq!(ConflictDefault::default(), ConflictDefault::Ask);
+        assert_eq!(ApplicationPreferences::default().conflict_default, ConflictDefault::Ask);
     }
 }

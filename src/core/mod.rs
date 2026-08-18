@@ -10,7 +10,7 @@ pub mod sidebar_model;
 pub mod view_options;
 
 pub use directory_model::DirectoryModel;
-pub use application_preferences::ApplicationPreferences;
+pub use application_preferences::{ApplicationPreferences, ConflictDefault};
 pub use file_item::FileItem;
 pub use location::Location;
 pub use navigation::NavigationHistory;
