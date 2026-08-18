@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use adw::prelude::*;
-use adw::HeaderBar;
+use adw::{HeaderBar, ToolbarView};
 use gtk::{Box as GtkBox, Button, Entry, Image, Label, ListBox, ListBoxRow, Orientation, ScrolledWindow, SelectionMode, Separator};
 
 use crate::core::location::Location;
@@ -16,23 +16,23 @@ use crate::core::{SidebarLocation, SidebarModel};
 /// shortcuts pane mirrors the real sidebar (same sections, pins, devices,
 /// and network locations); remote/GVfs entries are shown for consistency
 /// but disabled, since copy/move only supports local destinations.
-#[allow(deprecated)]
-pub fn pick_folder<F: Fn(PathBuf) + 'static>(parent: &impl IsA<gtk::Window>, title: &str, action_label: &str, initial: PathBuf, sidebar_model: Rc<RefCell<SidebarModel>>, on_selected: F) {
-    let dialog = gtk::Dialog::new();
-    dialog.set_transient_for(Some(parent));
-    dialog.set_modal(true);
-    dialog.set_resizable(true);
-    dialog.add_css_class("explorer-dialog");
-    dialog.set_default_size(720, 480);
+///
+/// Built on `adw::Dialog` + `adw::ToolbarView` (the same composition the
+/// main window uses), not the deprecated `gtk::Dialog` action-area, so the
+/// chrome (header bar, rounded corners, bottom action bar) matches the rest
+/// of the app instead of looking like an unstyled GTK3-era dialog.
+pub fn pick_folder<F: Fn(PathBuf) + 'static>(parent: &impl IsA<gtk::Widget>, title: &str, action_label: &str, initial: PathBuf, sidebar_model: Rc<RefCell<SidebarModel>>, on_selected: F) {
+    let dialog = adw::Dialog::new();
+    dialog.set_title(title);
+    dialog.set_content_width(760);
+    dialog.set_content_height(520);
+
+    let toolbar_view = ToolbarView::new();
     let titlebar = HeaderBar::new();
     titlebar.set_show_start_title_buttons(false);
     titlebar.set_show_end_title_buttons(false);
     titlebar.set_title_widget(Some(&Label::new(Some(title))));
-    dialog.set_titlebar(Some(&titlebar));
-    dialog.add_button("Cancel", gtk::ResponseType::Cancel);
-    let select_button = dialog.add_button(action_label, gtk::ResponseType::Accept);
-    select_button.add_css_class("suggested-action");
-    dialog.set_default_response(gtk::ResponseType::Accept);
+    toolbar_view.add_top_bar(&titlebar);
 
     let start = if initial.is_dir() { initial } else { Location::home().path().to_path_buf() };
     let location = Rc::new(RefCell::new(start.clone()));
@@ -41,8 +41,7 @@ pub fn pick_folder<F: Fn(PathBuf) + 'static>(parent: &impl IsA<gtk::Window>, tit
     history.borrow_mut().push(start);
     let listed_folders: Rc<RefCell<Vec<PathBuf>>> = Rc::new(RefCell::new(Vec::new()));
 
-    let content = dialog.content_area();
-    content.set_orientation(Orientation::Vertical);
+    let content = GtkBox::new(Orientation::Vertical, 0);
 
     let toolbar = GtkBox::new(Orientation::Horizontal, 6);
     toolbar.set_margin_top(8); toolbar.set_margin_bottom(8); toolbar.set_margin_start(8); toolbar.set_margin_end(8);
@@ -183,18 +182,35 @@ pub fn pick_folder<F: Fn(PathBuf) + 'static>(parent: &impl IsA<gtk::Window>, tit
     let start_path = location.borrow().clone();
     navigate(start_path, false);
 
-    dialog.connect_response({
-        let location = location.clone();
-        let selected = selected.clone();
-        move |dialog, response| {
-            if response == gtk::ResponseType::Accept {
-                let chosen = selected.borrow().clone().unwrap_or_else(|| location.borrow().clone());
-                on_selected(chosen);
-            }
-            dialog.destroy();
+    toolbar_view.set_content(Some(&content));
+
+    toolbar_view.set_bottom_bar_style(adw::ToolbarStyle::RaisedBorder);
+    let actions = GtkBox::new(Orientation::Horizontal, 8);
+    actions.set_halign(gtk::Align::End);
+    actions.set_margin_top(8); actions.set_margin_bottom(8); actions.set_margin_start(12); actions.set_margin_end(12);
+    let cancel_button = Button::with_label("Cancel");
+    let select_button = Button::with_label(action_label);
+    select_button.add_css_class("suggested-action");
+    actions.append(&cancel_button);
+    actions.append(&select_button);
+    toolbar_view.add_bottom_bar(&actions);
+
+    dialog.set_child(Some(&toolbar_view));
+
+    cancel_button.connect_clicked({
+        let dialog = dialog.clone();
+        move |_| { dialog.close(); }
+    });
+    select_button.connect_clicked({
+        let dialog = dialog.clone();
+        move |_| {
+            let chosen = selected.borrow().clone().unwrap_or_else(|| location.borrow().clone());
+            on_selected(chosen);
+            dialog.close();
         }
     });
-    dialog.present();
+
+    dialog.present(parent);
 }
 
 fn folder_row(path: &Path) -> ListBoxRow {
