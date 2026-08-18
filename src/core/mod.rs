@@ -6,6 +6,7 @@ pub mod navigation;
 pub mod operations;
 pub mod operation_manager;
 pub mod properties;
+pub mod search;
 pub mod sidebar_model;
 pub mod view_options;
 

@@ -7,6 +7,8 @@ use std::collections::BTreeMap;
 use gio::prelude::*;
 use serde::{Deserialize, Serialize};
 
+fn default_expanded_section() -> String { "Quick access".into() }
+
 const REMOTE_CHILD_ATTRIBUTES: &str = "standard::name,standard::display-name,standard::type,standard::icon,standard::content-type,standard::target-uri";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -77,6 +79,8 @@ struct StoredPreferences {
     remote_pins: Vec<String>,
     #[serde(default)]
     section_expanded: BTreeMap<String, bool>,
+    #[serde(default = "default_expanded_section")]
+    default_expanded_section: String,
 }
 
 pub struct SidebarPreferences {
@@ -84,11 +88,12 @@ pub struct SidebarPreferences {
     pins: Vec<PathBuf>,
     remote_pins: Vec<String>,
     section_expanded: BTreeMap<String, bool>,
+    default_expanded_section: String,
     needs_defaults: bool,
 }
 
 impl SidebarPreferences {
-    pub fn in_memory() -> Self { Self { path: None, pins: Vec::new(), remote_pins: Vec::new(), section_expanded: BTreeMap::new(), needs_defaults: false } }
+    pub fn in_memory() -> Self { Self { path: None, pins: Vec::new(), remote_pins: Vec::new(), section_expanded: BTreeMap::new(), default_expanded_section: default_expanded_section(), needs_defaults: false } }
 
     pub fn load_default() -> io::Result<Self> {
         let config_home = env::var_os("XDG_CONFIG_HOME")
@@ -99,10 +104,10 @@ impl SidebarPreferences {
     }
 
     pub fn load_from(path: PathBuf) -> io::Result<Self> {
-        if !path.exists() { return Ok(Self { path: Some(path), pins: Vec::new(), remote_pins: Vec::new(), section_expanded: BTreeMap::new(), needs_defaults: true }); }
+        if !path.exists() { return Ok(Self { path: Some(path), pins: Vec::new(), remote_pins: Vec::new(), section_expanded: BTreeMap::new(), default_expanded_section: default_expanded_section(), needs_defaults: true }); }
         let stored = serde_json::from_slice::<StoredPreferences>(&fs::read(&path)?)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        let mut preferences = Self { path: Some(path), pins: Vec::new(), remote_pins: Vec::new(), section_expanded: stored.section_expanded, needs_defaults: false };
+        let mut preferences = Self { path: Some(path), pins: Vec::new(), remote_pins: Vec::new(), section_expanded: stored.section_expanded, default_expanded_section: stored.default_expanded_section, needs_defaults: false };
         for pin in stored.pins { preferences.pin(pin); }
         for uri in stored.remote_pins { let _ = preferences.pin_remote(uri); }
         Ok(preferences)
@@ -110,7 +115,10 @@ impl SidebarPreferences {
 
     pub fn pins(&self) -> &[PathBuf] { &self.pins }
     pub fn remote_pins(&self) -> &[String] { &self.remote_pins }
-    pub fn section_expanded(&self, section: &str) -> bool { self.section_expanded.get(section).copied().unwrap_or(true) }
+    pub fn section_expanded(&self, section: &str) -> bool { self.section_expanded.get(section).copied().unwrap_or_else(|| section == self.default_expanded_section) }
+    pub fn default_expanded_section(&self) -> &str { &self.default_expanded_section }
+    pub fn set_default_expanded_section(&mut self, section: impl Into<String>) { self.default_expanded_section = section.into(); }
+    pub fn clear_section_expansion(&mut self) { self.section_expanded.clear(); }
     pub fn set_section_expanded(&mut self, section: impl Into<String>, expanded: bool) { self.section_expanded.insert(section.into(), expanded); }
     pub fn devices_expanded(&self) -> bool { self.section_expanded.get("This PC/Devices").copied().unwrap_or(false) }
     pub fn set_devices_expanded(&mut self, expanded: bool) { self.section_expanded.insert("This PC/Devices".into(), expanded); }
@@ -139,7 +147,7 @@ impl SidebarPreferences {
         let Some(path) = &self.path else { return Ok(()); };
         let parent = path.parent().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "sidebar preference path has no parent"))?;
         fs::create_dir_all(parent)?;
-        let bytes = serde_json::to_vec_pretty(&StoredPreferences { pins: self.pins.clone(), remote_pins: self.remote_pins.clone(), section_expanded: self.section_expanded.clone() })
+        let bytes = serde_json::to_vec_pretty(&StoredPreferences { pins: self.pins.clone(), remote_pins: self.remote_pins.clone(), section_expanded: self.section_expanded.clone(), default_expanded_section: self.default_expanded_section.clone() })
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         let temporary = path.with_extension("json.tmp");
         fs::write(&temporary, bytes)?;
