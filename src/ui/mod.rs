@@ -1,5 +1,6 @@
 pub mod context_menu;
 pub mod file_view;
+pub mod folder_picker;
 pub mod header;
 pub mod properties_dialog;
 pub mod operations_page;

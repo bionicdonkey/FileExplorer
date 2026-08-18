@@ -788,24 +788,14 @@ fn show_network_location_dialog(parent: &ApplicationWindow, model: Rc<RefCell<Si
     dialog.present();
 }
 
-#[allow(deprecated)]
 fn choose_destination(view: &FileView, source: PathBuf, move_source: bool, operations: OperationManager) {
-    let chooser = gtk::FileChooserNative::new(Some(if move_source { "Move To" } else { "Copy To" }), view.widget.root().and_downcast_ref::<gtk::Window>(), gtk::FileChooserAction::SelectFolder, Some(if move_source { "Move" } else { "Copy" }), Some("Cancel"));
-    // A FileChooserNative with no other reference held is finalized as soon
-    // as this function returns, which tears the dialog down mid-enumeration
-    // and surfaces as "Operation was cancelled". Keep it alive until it responds.
-    let keep_chooser_alive = chooser.clone();
+    let Some(parent) = view.widget.root().and_downcast::<gtk::Window>() else { return; };
     let reload = view.clone();
-    chooser.connect_response(move |chooser, response| {
-        let _keep_chooser_alive = &keep_chooser_alive;
-        if response == gtk::ResponseType::Accept {
-            if let Some(destination) = chooser.file().and_then(|file| file.path()) {
-                start_transfer(&reload, source.clone(), destination, if move_source { OperationKind::Move } else { OperationKind::Copy }, operations.clone(), None);
-            }
-        }
-        chooser.destroy();
+    let title = if move_source { "Move To" } else { "Copy To" };
+    let action_label = if move_source { "Move" } else { "Copy" };
+    crate::ui::folder_picker::pick_folder(&parent, title, action_label, view.location(), move |destination| {
+        start_transfer(&reload, source.clone(), destination, if move_source { OperationKind::Move } else { OperationKind::Copy }, operations.clone(), None);
     });
-    chooser.show();
 }
 
 #[allow(deprecated)]

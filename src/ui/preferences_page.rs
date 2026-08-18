@@ -69,27 +69,15 @@ fn new_tab_location_display(uri: &str) -> String {
     gio::File::for_uri(uri).path().map(|path| path.display().to_string()).unwrap_or_else(|| uri.to_owned())
 }
 
-#[allow(deprecated)]
 fn choose_new_tab_location(button: &Button, preferences: Rc<RefCell<ApplicationPreferences>>, label: Label) {
-    let parent = button.root().and_downcast::<gtk::Window>();
-    let chooser = gtk::FileChooserNative::new(Some("New Tabs Open To"), parent.as_ref(), gtk::FileChooserAction::SelectFolder, Some("Select"), Some("Cancel"));
-    // Without another reference, the dialog is finalized as soon as this
-    // function returns, tearing itself down mid-enumeration ("Operation was
-    // cancelled"). Keep it alive until it responds.
-    let keep_chooser_alive = chooser.clone();
-    chooser.connect_response(move |chooser, response| {
-        let _keep_chooser_alive = &keep_chooser_alive;
-        if response == gtk::ResponseType::Accept {
-            if let Some(file) = chooser.file() {
-                let uri = file.uri().to_string();
-                preferences.borrow_mut().new_tab_location = uri.clone();
-                let _ = preferences.borrow().save();
-                label.set_text(&new_tab_location_display(&uri));
-            }
-        }
-        chooser.destroy();
+    let Some(parent) = button.root().and_downcast::<gtk::Window>() else { return; };
+    let initial = gio::File::for_uri(&preferences.borrow().new_tab_location).path().unwrap_or_default();
+    crate::ui::folder_picker::pick_folder(&parent, "New Tabs Open To", "Select", initial, move |path| {
+        let uri = gio::File::for_path(&path).uri().to_string();
+        preferences.borrow_mut().new_tab_location = uri.clone();
+        let _ = preferences.borrow().save();
+        label.set_text(&new_tab_location_display(&uri));
     });
-    chooser.show();
 }
 
 fn search_privacy_page(preferences: Rc<RefCell<ApplicationPreferences>>, history: Rc<RefCell<SearchHistory>>) -> GtkBox {
