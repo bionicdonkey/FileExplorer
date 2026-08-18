@@ -19,7 +19,7 @@ pub fn build(manager: OperationManager) -> ScrolledWindow {
     let clear = Button::with_label("Clear completed"); clear.set_halign(gtk::Align::End); let clear_manager = manager.clone(); clear.connect_clicked(move |_| clear_manager.clear_completed()); content.append(&clear);
     refresh_rows(&rows, &manager);
     let periodic_rows = rows.clone(); let periodic_manager = manager.clone();
-    glib::timeout_add_local(Duration::from_millis(250), move || { refresh_rows(&periodic_rows, &periodic_manager); glib::ControlFlow::Continue });
+    glib::timeout_add_local(Duration::from_millis(100), move || { refresh_rows(&periodic_rows, &periodic_manager); glib::ControlFlow::Continue });
     let scroll = ScrolledWindow::new(); scroll.set_child(Some(&content)); scroll
 }
 
@@ -33,7 +33,15 @@ fn refresh_rows(rows: &GtkBox, manager: &OperationManager) {
         let action = match record.kind { crate::core::OperationKind::Copy => "Copying", crate::core::OperationKind::Move => "Moving", crate::core::OperationKind::Trash => "Moving to Trash", crate::core::OperationKind::Delete => "Deleting" };
         let state = match &record.state { OperationState::Queued => "Queued".into(), OperationState::Running => format!("{} of {} item(s)", record.completed, record.total), OperationState::Completed => "Completed".into(), OperationState::Cancelled => "Cancelled".into(), OperationState::Failed(error) => format!("Failed: {error}") };
         let line = Label::new(Some(&format!("{action} {item} — {state}"))); line.set_xalign(0.0); line.set_wrap(true); row.append(&line);
-        if matches!(record.state, OperationState::Queued | OperationState::Running) { let progress = ProgressBar::new(); progress.set_fraction(if record.total == 0 { 0.0 } else { record.completed as f64 / record.total as f64 }); row.append(&progress); let cancel = Button::with_label("Cancel"); cancel.set_halign(gtk::Align::End); let cancel_manager = manager.clone(); let id = record.id; cancel.connect_clicked(move |_| cancel_manager.cancel(id)); row.append(&cancel); }
+        if matches!(record.state, OperationState::Queued | OperationState::Running) {
+            let fraction = if record.total == 0 { 0.0 } else { record.completed as f64 / record.total as f64 };
+            let progress = ProgressBar::new();
+            progress.set_fraction(fraction);
+            progress.set_show_text(true);
+            progress.set_text(Some(&format!("{:.0}%", fraction * 100.0)));
+            row.append(&progress);
+            let cancel = Button::with_label("Cancel"); cancel.set_halign(gtk::Align::End); let cancel_manager = manager.clone(); let id = record.id; cancel.connect_clicked(move |_| cancel_manager.cancel(id)); row.append(&cancel);
+        }
         if is_eligible_for_retry(&record) {
             let retry = Button::with_label("Authenticate & Retry"); retry.set_halign(gtk::Align::End); retry.set_tooltip_text(Some("Retries this single item with administrator privileges"));
             let retry_manager = manager.clone(); let id = record.id;

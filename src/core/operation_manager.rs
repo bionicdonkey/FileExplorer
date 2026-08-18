@@ -189,6 +189,33 @@ mod tests {
     }
 
     #[test]
+    fn copying_many_files_is_observable_mid_transfer_through_records() {
+        // Regression guard for "the progress bar doesn't update": poll
+        // records() the way the Operations page does and confirm we can
+        // observe completed strictly between 0 and total at least once,
+        // not just an initial 0 followed immediately by "Completed".
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source");
+        let destination = directory.path().join("destination");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir(&destination).unwrap();
+        for index in 0..2000 { fs::write(source.join(format!("file-{index}.txt")), "x").unwrap(); }
+        let manager = OperationManager::default();
+
+        let id = manager.submit(OperationKind::Copy, vec![source], Some(destination));
+        let mut saw_mid_transfer_progress = false;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            if let Some(record) = manager.records().into_iter().find(|record| record.id == id) {
+                if record.completed > 0 && record.completed < record.total { saw_mid_transfer_progress = true; }
+                if record.finished_at.is_some() { break; }
+            }
+        }
+
+        assert!(saw_mid_transfer_progress, "never observed an intermediate completed/total value while the copy was running");
+    }
+
+    #[test]
     fn copying_a_folder_reports_progress_per_file_not_per_top_level_source() {
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("source");
