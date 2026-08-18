@@ -111,7 +111,14 @@ pub fn pick_folder<F: Fn(PathBuf) + 'static>(parent: &impl IsA<gtk::Window>, tit
     folder_list.connect_row_activated({
         let listed_folders = listed_folders.clone();
         let navigate = navigate.clone();
-        move |_, row| { if let Some(path) = listed_folders.borrow().get(row.index() as usize).cloned() { navigate(path, true); } }
+        // `if let Some(x) = refcell.borrow()... { }` keeps the borrow alive for
+        // the whole body (a temporary-lifetime-extension gotcha), so `navigate`
+        // below would re-borrow `listed_folders` while this one is still held.
+        // Bind the owned value first so the borrow ends before `navigate` runs.
+        move |_, row| {
+            let path = listed_folders.borrow().get(row.index() as usize).cloned();
+            if let Some(path) = path { navigate(path, true); }
+        }
     });
 
     for (label, path) in shortcuts_for(&Location::home().path().to_path_buf()) {
@@ -123,20 +130,31 @@ pub fn pick_folder<F: Fn(PathBuf) + 'static>(parent: &impl IsA<gtk::Window>, tit
         shortcuts.append(&row);
     }
 
+    // Same temporary-lifetime-extension pitfall as above: bind the owned
+    // path first so the RefCell borrow ends before `navigate` re-borrows it.
     back.connect_clicked({
         let history = history.clone();
         let navigate = navigate.clone();
-        move |_| { if let Some(path) = history.borrow_mut().back().map(Path::to_path_buf) { navigate(path, false); } }
+        move |_| {
+            let path = history.borrow_mut().back().map(Path::to_path_buf);
+            if let Some(path) = path { navigate(path, false); }
+        }
     });
     forward.connect_clicked({
         let history = history.clone();
         let navigate = navigate.clone();
-        move |_| { if let Some(path) = history.borrow_mut().forward().map(Path::to_path_buf) { navigate(path, false); } }
+        move |_| {
+            let path = history.borrow_mut().forward().map(Path::to_path_buf);
+            if let Some(path) = path { navigate(path, false); }
+        }
     });
     up.connect_clicked({
         let location = location.clone();
         let navigate = navigate.clone();
-        move |_| { if let Some(parent) = location.borrow().parent().map(Path::to_path_buf) { navigate(parent, true); } }
+        move |_| {
+            let parent = location.borrow().parent().map(Path::to_path_buf);
+            if let Some(parent) = parent { navigate(parent, true); }
+        }
     });
     path_entry.connect_activate({
         let navigate = navigate.clone();
@@ -146,11 +164,15 @@ pub fn pick_folder<F: Fn(PathBuf) + 'static>(parent: &impl IsA<gtk::Window>, tit
         let location = location.clone();
         let navigate = navigate.clone();
         move |_| {
-            if let Ok(path) = FileOperations::create_folder(&location.borrow(), "New Folder") { navigate(path, true); }
+            let created = FileOperations::create_folder(&location.borrow(), "New Folder").ok();
+            if let Some(path) = created { navigate(path, true); }
         }
     });
 
-    navigate(location.borrow().clone(), false);
+    // Same pitfall: `location.borrow()` must not still be a live temporary
+    // when `navigate` tries to re-borrow `location`, so bind it first.
+    let start_path = location.borrow().clone();
+    navigate(start_path, false);
 
     dialog.connect_response({
         let location = location.clone();
