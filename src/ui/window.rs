@@ -864,7 +864,19 @@ fn confirm_permanent_delete(view: &FileView, path: PathBuf, operations: Operatio
 }
 
 fn show_close_operations_dialog(parent: &ApplicationWindow, operations: OperationManager) {
-    let dialog = adw::MessageDialog::new(Some(parent), Some("File operations are still running"), Some(&format!("{} operation(s) will continue while Zorin Explorer stays open.", operations.active_count()))); dialog.add_responses(&[("continue", "Continue Transfers"), ("cancel", "Cancel")]); dialog.set_default_response(Some("cancel")); dialog.set_close_response("cancel"); dialog.present();
+    let dialog = adw::MessageDialog::new(Some(parent), Some("File operations are still running"), Some(&format!("{} operation(s) are still running. Closing now will stop them and may leave partial files behind.", operations.active_count())));
+    dialog.add_responses(&[("wait", "Keep Waiting"), ("close", "Cancel All & Close")]);
+    dialog.set_default_response(Some("wait"));
+    dialog.set_close_response("wait");
+    dialog.set_response_appearance("close", adw::ResponseAppearance::Destructive);
+    let window = parent.clone();
+    dialog.connect_response(None, move |_, response| {
+        if response == "close" {
+            operations.cancel_all_active();
+            window.destroy();
+        }
+    });
+    dialog.present();
 }
 
 fn navigate_tab(index: usize, path: PathBuf, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, header: &HeaderControls, preferences: &Rc<RefCell<ViewPreferencesStore>>, sidebar: &Sidebar, record_history: bool) {
