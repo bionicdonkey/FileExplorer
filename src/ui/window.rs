@@ -440,9 +440,8 @@ fn wire_tab(page: TabPage, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, hea
                 let destination = command_data.borrow().iter().find(|tab| tab.page == command_page).map(|tab| tab.location.borrow().clone());
                 if let (Some(clipboard), Some(destination)) = (command_clipboard.borrow().clone(), destination) {
                     let kind = match clipboard.operation { ClipboardOperation::Copy => OperationKind::Copy, ClipboardOperation::Move => OperationKind::Move };
-                    let operation_id = command_operations.submit(kind, vec![clipboard.path], Some(destination.clone()));
-                    if matches!(clipboard.operation, ClipboardOperation::Move) { clipboard.source_view.set_pending_cut(None); }
-                    schedule_refresh(command_view.clone(), command_operations.clone(), operation_id);
+                    let cut_source = matches!(clipboard.operation, ClipboardOperation::Move).then_some(clipboard.source_view);
+                    start_transfer(&command_view, clipboard.path, destination, kind, command_operations.clone(), cut_source);
                 }
             }
             ContextCommand::NewFolder => {
@@ -648,13 +647,35 @@ fn choose_destination(view: &FileView, source: PathBuf, move_source: bool, opera
     chooser.connect_response(move |chooser, response| {
         if response == gtk::ResponseType::Accept {
             if let Some(destination) = chooser.file().and_then(|file| file.path()) {
-                let operation_id = operations.submit(if move_source { OperationKind::Move } else { OperationKind::Copy }, vec![source.clone()], Some(destination));
-                schedule_refresh(reload.clone(), operations.clone(), operation_id);
+                start_transfer(&reload, source.clone(), destination, if move_source { OperationKind::Move } else { OperationKind::Copy }, operations.clone(), None);
             }
         }
         chooser.destroy();
     });
     chooser.show();
+}
+
+#[allow(deprecated)]
+fn start_transfer(view: &FileView, source: PathBuf, destination: PathBuf, kind: OperationKind, operations: OperationManager, cut_source: Option<FileView>) {
+    let Some(name) = source.file_name().map(|name| name.to_owned()) else { return; };
+    let target = destination.join(&name);
+    let refresh_view = view.clone();
+    let submit = move |target: Option<PathBuf>| {
+        let operation_id = match target { Some(target) => operations.submit_to_target(kind, source.clone(), target), None => operations.submit(kind, vec![source.clone()], Some(destination.clone())) };
+        if kind == OperationKind::Move { if let Some(cut_source) = &cut_source { cut_source.set_pending_cut(None); } }
+        schedule_refresh(refresh_view.clone(), operations.clone(), operation_id);
+    };
+    if !target.exists() { submit(None); return; }
+    let dialog = gtk::Dialog::new();
+    dialog.set_title(Some("An item with this name already exists")); dialog.set_modal(true); dialog.add_css_class("explorer-dialog");
+    if let Some(parent) = view.widget.root().and_downcast::<gtk::Window>() { dialog.set_transient_for(Some(&parent)); }
+    dialog.add_button("Replace", gtk::ResponseType::Accept);
+    dialog.add_button("Keep Both", gtk::ResponseType::Apply);
+    dialog.add_button("Skip", gtk::ResponseType::Reject);
+    dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+    let text = Label::new(Some(&format!("“{}” already exists in this folder. Choose how to continue.", name.to_string_lossy()))); text.set_wrap(true); text.set_xalign(0.0); text.set_margin_top(12); text.set_margin_bottom(12); text.set_margin_start(12); text.set_margin_end(12); dialog.content_area().append(&text);
+    dialog.connect_response(move |dialog, response| { match response { gtk::ResponseType::Accept => submit(None), gtk::ResponseType::Apply => submit(Some(FileOperations::keep_both_destination(&target))), _ => {} } dialog.close(); });
+    dialog.present();
 }
 
 fn schedule_refresh(view: FileView, operations: OperationManager, operation_id: u64) {

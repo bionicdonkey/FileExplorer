@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -30,6 +30,14 @@ pub struct OperationManager {
 
 impl OperationManager {
     pub fn submit(&self, kind: OperationKind, sources: Vec<PathBuf>, destination: Option<PathBuf>) -> u64 {
+        self.submit_inner(kind, sources, destination, None)
+    }
+
+    pub fn submit_to_target(&self, kind: OperationKind, source: PathBuf, target: PathBuf) -> u64 {
+        self.submit_inner(kind, vec![source], target.parent().map(Path::to_path_buf), Some(target))
+    }
+
+    fn submit_inner(&self, kind: OperationKind, sources: Vec<PathBuf>, destination: Option<PathBuf>, explicit_target: Option<PathBuf>) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         let cancel = Arc::new(AtomicBool::new(false));
         let total = sources.len();
@@ -44,8 +52,8 @@ impl OperationManager {
                     return;
                 }
                 let result = match kind {
-                    OperationKind::Copy => FileOperations::copy(&[source.clone()], destination.as_deref().expect("copy requires destination")),
-                    OperationKind::Move => FileOperations::move_to(&[source.clone()], destination.as_deref().expect("move requires destination")),
+                    OperationKind::Copy => match &explicit_target { Some(target) => FileOperations::copy_to_target(source, target), None => FileOperations::copy(&[source.clone()], destination.as_deref().expect("copy requires destination")) },
+                    OperationKind::Move => match &explicit_target { Some(target) => FileOperations::move_to_target(source, target), None => FileOperations::move_to(&[source.clone()], destination.as_deref().expect("move requires destination")) },
                     OperationKind::Trash => FileOperations::move_to_trash(&[source.clone()]),
                     OperationKind::Delete => FileOperations::delete_permanently(&[source.clone()]),
                 };

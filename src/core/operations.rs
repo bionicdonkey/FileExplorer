@@ -36,6 +36,10 @@ impl FileOperations {
         Ok(())
     }
 
+    pub fn copy_to_target(source: &Path, target: &Path) -> io::Result<()> {
+        if source.is_dir() { copy_dir(source, target) } else { fs::copy(source, target).map(|_| ()) }
+    }
+
     pub fn move_to(sources: &[PathBuf], destination: &Path) -> io::Result<()> {
         for source in sources {
             let target = destination.join(source.file_name().ok_or_else(|| {
@@ -45,6 +49,8 @@ impl FileOperations {
         }
         Ok(())
     }
+
+    pub fn move_to_target(source: &Path, target: &Path) -> io::Result<()> { fs::rename(source, target) }
 
     pub fn move_to_trash(sources: &[PathBuf]) -> io::Result<()> {
         for source in sources {
@@ -60,6 +66,19 @@ impl FileOperations {
             if source.is_dir() { fs::remove_dir_all(source)?; } else { fs::remove_file(source)?; }
         }
         Ok(())
+    }
+
+    pub fn keep_both_destination(target: &Path) -> PathBuf {
+        if !target.exists() { return target.to_path_buf(); }
+        let parent = target.parent().unwrap_or_else(|| Path::new("."));
+        let stem = target.file_stem().and_then(|value| value.to_str()).unwrap_or("item");
+        let extension = target.extension().and_then(|value| value.to_str());
+        for index in 2.. {
+            let name = match extension { Some(extension) => format!("{stem} ({index}).{extension}"), None => format!("{stem} ({index})") };
+            let candidate = parent.join(name);
+            if !candidate.exists() { return candidate; }
+        }
+        unreachable!()
     }
 }
 
@@ -86,6 +105,14 @@ mod tests {
         assert_eq!(fs::read_to_string(destination_dir.join("report.txt")).unwrap(), "contents");
         let _ = fs::remove_dir_all(&source_dir);
         let _ = fs::remove_dir_all(&destination_dir);
+    }
+
+    #[test]
+    fn keep_both_name_increments_until_destination_is_available() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("report.txt"), "old").unwrap();
+        fs::write(directory.path().join("report (2).txt"), "old").unwrap();
+        assert_eq!(FileOperations::keep_both_destination(&directory.path().join("report.txt")), directory.path().join("report (3).txt"));
     }
 }
 
