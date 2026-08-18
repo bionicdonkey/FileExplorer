@@ -64,13 +64,16 @@ impl OperationManager {
         self.cancelled.lock().unwrap().push((id, cancel.clone()));
         let records = self.records.clone();
         let manager = self.clone();
+        eprintln!("[operations] #{id} queued: {kind:?} {sources:?} -> {destination:?} (explicit_target={explicit_target:?})");
         std::thread::spawn(move || {
+            eprintln!("[operations] #{id} thread started");
             update(&records, id, |record| record.state = OperationState::Running);
             if kind == OperationKind::Copy {
                 // Progress is tracked in bytes, not file count: a single huge
                 // file is one "file" but the transfer still needs to show
                 // motion throughout, not just jump from 0% to 100%.
                 let counted_total = (FileOperations::count_bytes(&sources) as usize).max(1);
+                eprintln!("[operations] #{id} counted {counted_total} bytes");
                 update(&records, id, |record| record.total = counted_total);
                 let progress_records = records.clone();
                 let mut completed = 0usize;
@@ -79,6 +82,7 @@ impl OperationManager {
                     Some(target) => sources.first().map_or(Ok(()), |source| FileOperations::copy_to_target_with_progress(source, target, &cancel, &mut on_progress)),
                     None => FileOperations::copy_with_progress(&sources, destination.as_deref().expect("copy requires destination"), &cancel, &mut on_progress),
                 };
+                eprintln!("[operations] #{id} copy finished: {result:?}");
                 finish(&records, &manager, id, result);
                 return;
             }
