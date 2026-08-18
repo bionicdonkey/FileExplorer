@@ -73,7 +73,12 @@ fn new_tab_location_display(uri: &str) -> String {
 fn choose_new_tab_location(button: &Button, preferences: Rc<RefCell<ApplicationPreferences>>, label: Label) {
     let parent = button.root().and_downcast::<gtk::Window>();
     let chooser = gtk::FileChooserNative::new(Some("New Tabs Open To"), parent.as_ref(), gtk::FileChooserAction::SelectFolder, Some("Select"), Some("Cancel"));
+    // Without another reference, the dialog is finalized as soon as this
+    // function returns, tearing itself down mid-enumeration ("Operation was
+    // cancelled"). Keep it alive until it responds.
+    let keep_chooser_alive = chooser.clone();
     chooser.connect_response(move |chooser, response| {
+        let _keep_chooser_alive = &keep_chooser_alive;
         if response == gtk::ResponseType::Accept {
             if let Some(file) = chooser.file() {
                 let uri = file.uri().to_string();
