@@ -527,7 +527,7 @@ fn wire_tab(page: TabPage, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, hea
                 if let Some(path) = path { copy_text(&command_view, &path.display().to_string()); }
             }
             ContextCommand::CopyTo | ContextCommand::MoveTo => {
-                if let Some(path) = path { choose_destination(&command_view, path, command == ContextCommand::MoveTo, command_operations.clone()); }
+                if let Some(path) = path { choose_destination(&command_view, path, command == ContextCommand::MoveTo, command_operations.clone(), command_sidebar.model()); }
             }
             ContextCommand::Paste => {
                 let destination = command_data.borrow().iter().find(|tab| tab.page == command_page).map(|tab| tab.location.borrow().clone());
@@ -788,12 +788,12 @@ fn show_network_location_dialog(parent: &ApplicationWindow, model: Rc<RefCell<Si
     dialog.present();
 }
 
-fn choose_destination(view: &FileView, source: PathBuf, move_source: bool, operations: OperationManager) {
+fn choose_destination(view: &FileView, source: PathBuf, move_source: bool, operations: OperationManager, sidebar_model: Rc<RefCell<SidebarModel>>) {
     let Some(parent) = view.widget.root().and_downcast::<gtk::Window>() else { return; };
     let reload = view.clone();
     let title = if move_source { "Move To" } else { "Copy To" };
     let action_label = if move_source { "Move" } else { "Copy" };
-    crate::ui::folder_picker::pick_folder(&parent, title, action_label, view.location(), move |destination| {
+    crate::ui::folder_picker::pick_folder(&parent, title, action_label, view.location(), sidebar_model, move |destination| {
         start_transfer(&reload, source.clone(), destination, if move_source { OperationKind::Move } else { OperationKind::Copy }, operations.clone(), None);
     });
 }

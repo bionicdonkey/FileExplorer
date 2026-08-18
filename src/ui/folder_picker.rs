@@ -9,11 +9,15 @@ use gtk::{Box as GtkBox, Button, Entry, Image, Label, ListBox, ListBoxRow, Orien
 use crate::core::location::Location;
 use crate::core::navigation::NavigationHistory;
 use crate::core::operations::FileOperations;
+use crate::core::{SidebarLocation, SidebarModel};
 
 /// An in-process folder picker built from this app's own widgets, so
-/// choosing a destination never hands off to an external file manager.
+/// choosing a destination never hands off to an external file manager. The
+/// shortcuts pane mirrors the real sidebar (same sections, pins, devices,
+/// and network locations); remote/GVfs entries are shown for consistency
+/// but disabled, since copy/move only supports local destinations.
 #[allow(deprecated)]
-pub fn pick_folder<F: Fn(PathBuf) + 'static>(parent: &impl IsA<gtk::Window>, title: &str, action_label: &str, initial: PathBuf, on_selected: F) {
+pub fn pick_folder<F: Fn(PathBuf) + 'static>(parent: &impl IsA<gtk::Window>, title: &str, action_label: &str, initial: PathBuf, sidebar_model: Rc<RefCell<SidebarModel>>, on_selected: F) {
     let dialog = gtk::Dialog::new();
     dialog.set_transient_for(Some(parent));
     dialog.set_modal(true);
@@ -56,12 +60,12 @@ pub fn pick_folder<F: Fn(PathBuf) + 'static>(parent: &impl IsA<gtk::Window>, tit
     let body = GtkBox::new(Orientation::Horizontal, 0);
     body.set_vexpand(true);
 
-    let shortcuts = ListBox::new();
-    shortcuts.set_selection_mode(SelectionMode::None);
-    shortcuts.add_css_class("navigation-sidebar");
+    let shortcuts = GtkBox::new(Orientation::Vertical, 2);
+    shortcuts.add_css_class("explorer-sidebar");
+    shortcuts.set_margin_top(4); shortcuts.set_margin_bottom(4); shortcuts.set_margin_start(4); shortcuts.set_margin_end(4);
     let shortcuts_scroll = ScrolledWindow::new();
     shortcuts_scroll.set_child(Some(&shortcuts));
-    shortcuts_scroll.set_width_request(180);
+    shortcuts_scroll.set_width_request(200);
     shortcuts_scroll.set_hscrollbar_policy(gtk::PolicyType::Never);
     body.append(&shortcuts_scroll);
     body.append(&Separator::new(Orientation::Vertical));
@@ -121,13 +125,18 @@ pub fn pick_folder<F: Fn(PathBuf) + 'static>(parent: &impl IsA<gtk::Window>, tit
         }
     });
 
-    for (label, path) in shortcuts_for(&Location::home().path().to_path_buf()) {
-        let row = shortcut_row(&label, &path);
-        let gesture = gtk::GestureClick::new();
-        let navigate = navigate.clone();
-        gesture.connect_released(move |_, _, _, _| navigate(path.clone(), true));
-        row.add_controller(gesture);
-        shortcuts.append(&row);
+    for section in sidebar_model.borrow().sections() {
+        if section.nodes.is_empty() { continue; }
+        let heading = Label::new(Some(&section.title));
+        heading.add_css_class("heading");
+        heading.add_css_class("dim-label");
+        heading.set_xalign(0.0);
+        heading.set_margin_top(10);
+        heading.set_margin_start(6);
+        shortcuts.append(&heading);
+        for node in section.nodes {
+            shortcuts.append(&shortcut_button(&node.location, &navigate));
+        }
     }
 
     // Same temporary-lifetime-extension pitfall as above: bind the owned
@@ -201,39 +210,32 @@ fn folder_row(path: &Path) -> ListBoxRow {
     row
 }
 
-fn shortcut_row(label: &str, path: &Path) -> ListBoxRow {
-    let row = ListBoxRow::new();
-    row.set_selectable(false);
+/// A single sidebar row. Local locations navigate the picker; remote/GVfs
+/// locations are shown (for parity with the real sidebar) but disabled,
+/// since this app's copy/move pipeline only supports local destinations.
+fn shortcut_button(location: &SidebarLocation, navigate: &Rc<dyn Fn(PathBuf, bool)>) -> Button {
+    let button = Button::new();
+    button.add_css_class("flat");
+    button.add_css_class("sidebar-location");
     let content = GtkBox::new(Orientation::Horizontal, 8);
-    content.set_margin_top(6); content.set_margin_bottom(6); content.set_margin_start(8); content.set_margin_end(8);
-    let icon = Image::from_icon_name(standard_folder_icon(path, label)); icon.set_pixel_size(18);
-    let text = Label::new(Some(label)); text.set_xalign(0.0); text.set_hexpand(true); text.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    content.set_margin_top(4); content.set_margin_bottom(4); content.set_margin_start(4); content.set_margin_end(4);
+    let icon = Image::from_icon_name(location.icon_name()); icon.set_pixel_size(18); icon.add_css_class("sidebar-location-icon");
+    let label = Label::new(Some(location.label())); label.set_xalign(0.0); label.set_hexpand(true); label.set_ellipsize(gtk::pango::EllipsizeMode::End);
     content.append(&icon);
-    content.append(&text);
-    row.set_child(Some(&content));
-    row
-}
-
-pub fn shortcuts_for(home: &Path) -> Vec<(String, PathBuf)> {
-    let mut shortcuts = vec![("Home".to_owned(), home.to_path_buf())];
-    for name in ["Desktop", "Documents", "Downloads", "Pictures"] {
-        let path = home.join(name);
-        if path.exists() { shortcuts.push((name.to_owned(), path)); }
+    content.append(&label);
+    button.set_child(Some(&content));
+    match location.local_path() {
+        Some(path) => {
+            let path = path.to_path_buf();
+            let navigate = navigate.clone();
+            button.connect_clicked(move |_| navigate(path.clone(), true));
+        }
+        None => {
+            button.set_sensitive(false);
+            button.set_tooltip_text(Some("Remote locations aren't supported as a destination yet"));
+        }
     }
-    shortcuts.push(("This PC".to_owned(), PathBuf::from("/")));
-    shortcuts
-}
-
-fn standard_folder_icon(path: &Path, label: &str) -> &'static str {
-    if label == "This PC" { return "drive-harddisk-symbolic"; }
-    match path.file_name().and_then(|name| name.to_str()) {
-        Some("Desktop") => "user-desktop-symbolic",
-        Some("Documents") => "folder-documents-symbolic",
-        Some("Downloads") => "folder-download-symbolic",
-        Some("Pictures") => "folder-pictures-symbolic",
-        _ if label == "Home" => "user-home-symbolic",
-        _ => "folder-symbolic",
-    }
+    button
 }
 
 fn subfolders(path: &Path) -> Vec<PathBuf> {
@@ -251,24 +253,6 @@ fn subfolders(path: &Path) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn shortcuts_always_include_home_and_this_pc() {
-        let shortcuts = shortcuts_for(Path::new("/tmp/does-not-exist"));
-        assert_eq!(shortcuts.first(), Some(&("Home".to_owned(), PathBuf::from("/tmp/does-not-exist"))));
-        assert_eq!(shortcuts.last(), Some(&("This PC".to_owned(), PathBuf::from("/"))));
-    }
-
-    #[test]
-    fn shortcuts_only_include_folders_that_exist() {
-        let temporary = tempfile::tempdir().unwrap();
-        std::fs::create_dir(temporary.path().join("Desktop")).unwrap();
-
-        let shortcuts = shortcuts_for(temporary.path());
-
-        assert!(shortcuts.iter().any(|(label, _)| label == "Desktop"));
-        assert!(!shortcuts.iter().any(|(label, _)| label == "Documents"));
-    }
 
     #[test]
     fn subfolders_are_sorted_and_exclude_hidden_and_files() {

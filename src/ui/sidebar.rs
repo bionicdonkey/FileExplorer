@@ -67,6 +67,8 @@ impl Sidebar {
         sidebar
     }
 
+    pub fn model(&self) -> Rc<RefCell<SidebarModel>> { self.model.clone() }
+
     pub fn refresh(&self) {
         while let Some(child) = self.content.first_child() { self.content.remove(&child); }
         for section in self.model.borrow().sections() {
