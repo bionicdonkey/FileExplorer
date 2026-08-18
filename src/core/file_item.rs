@@ -30,6 +30,14 @@ impl FileItem {
         ))
     }
 
+    /// Builds an item for a search result path, which may live outside the
+    /// folder currently on screen.
+    pub fn from_path(path: &Path) -> io::Result<Self> {
+        let metadata = std::fs::metadata(path)?;
+        let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_else(|| path.display().to_string());
+        Ok(Self::from_metadata(path.to_path_buf(), name, metadata))
+    }
+
     fn from_metadata(path: PathBuf, name: String, metadata: Metadata) -> Self {
         let content_type = content_type_for(&path);
         Self {
@@ -178,6 +186,19 @@ mod tests {
 
         assert!(item.is_dir());
         assert_eq!(item.uri(), Some("smb://octavia.local/"));
+    }
+
+    #[test]
+    fn from_path_reads_the_file_named_at_that_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("report.txt");
+        fs::write(&path, "contents").unwrap();
+
+        let item = FileItem::from_path(&path).unwrap();
+
+        assert_eq!(item.name(), "report.txt");
+        assert!(!item.is_dir());
+        assert_eq!(item.size(), 8);
     }
 
     #[cfg(unix)]

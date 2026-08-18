@@ -25,6 +25,12 @@ pub struct ApplicationPreferences {
     pub new_tab_location: String,
     #[serde(default)]
     pub conflict_default: ConflictDefault,
+    #[serde(default)]
+    pub content_search_enabled: bool,
+    #[serde(default = "default_record_search_history")]
+    pub record_search_history: bool,
+    #[serde(default = "default_search_history_retention_days")]
+    pub search_history_retention_days: u32,
     #[serde(skip)]
     path: Option<PathBuf>,
 }
@@ -42,6 +48,9 @@ impl Default for ApplicationPreferences {
             restore_previous_tabs: false,
             new_tab_location: default_new_tab_location(),
             conflict_default: ConflictDefault::Ask,
+            content_search_enabled: false,
+            record_search_history: default_record_search_history(),
+            search_history_retention_days: default_search_history_retention_days(),
             path: None,
         }
     }
@@ -73,6 +82,10 @@ impl ApplicationPreferences {
         self.path.as_ref().and_then(|path| path.parent().map(|parent| parent.join("session.json")))
     }
 
+    pub fn search_history_path(&self) -> Option<PathBuf> {
+        self.path.as_ref().and_then(|path| path.parent().map(|parent| parent.join("search-history.json")))
+    }
+
     pub fn save_session(&self, locations: &[String]) -> io::Result<()> {
         if !self.restore_previous_tabs {
             return self.clear_session();
@@ -102,6 +115,9 @@ impl ApplicationPreferences {
         Ok(())
     }
 }
+
+fn default_record_search_history() -> bool { true }
+fn default_search_history_retention_days() -> u32 { 30 }
 
 pub(crate) fn default_new_tab_location() -> String {
     let home = env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"));
@@ -146,5 +162,24 @@ mod tests {
     fn conflict_handling_defaults_to_asking() {
         assert_eq!(ConflictDefault::default(), ConflictDefault::Ask);
         assert_eq!(ApplicationPreferences::default().conflict_default, ConflictDefault::Ask);
+    }
+
+    #[test]
+    fn search_defaults_favour_privacy_over_content_indexing() {
+        let preferences = ApplicationPreferences::default();
+
+        assert!(!preferences.content_search_enabled);
+        assert!(preferences.record_search_history);
+        assert_eq!(preferences.search_history_retention_days, 30);
+    }
+
+    #[test]
+    fn existing_preferences_json_without_search_fields_still_deserializes() {
+        let stored = serde_json::json!({ "operation_history_days": 7 });
+        let preferences: ApplicationPreferences = serde_json::from_value(stored).unwrap();
+
+        assert!(!preferences.content_search_enabled);
+        assert!(preferences.record_search_history);
+        assert_eq!(preferences.search_history_retention_days, 30);
     }
 }

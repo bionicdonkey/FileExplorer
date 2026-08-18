@@ -29,6 +29,7 @@ pub struct FileView {
     options: Rc<RefCell<ViewOptions>>,
     selected_target: Rc<RefCell<Option<ContextTarget>>>,
     pending_cut: Rc<RefCell<Option<PathBuf>>>,
+    search_results: Rc<RefCell<Option<Vec<FileItem>>>>,
 }
 
 impl FileView {
@@ -36,7 +37,7 @@ impl FileView {
         let scroll = ScrolledWindow::new();
         scroll.set_vexpand(true);
         let on_navigate = Rc::new(RefCell::new(None));
-        let view = Self { widget: scroll, location, remote_uri: Rc::new(RefCell::new(None)), on_navigate, on_uri_navigate: Rc::new(RefCell::new(None)), on_context_command: Rc::new(RefCell::new(None)), on_options_changed: Rc::new(RefCell::new(None)), options: Rc::new(RefCell::new(ViewOptions::default())), selected_target: Rc::new(RefCell::new(None)), pending_cut: Rc::new(RefCell::new(None)) };
+        let view = Self { widget: scroll, location, remote_uri: Rc::new(RefCell::new(None)), on_navigate, on_uri_navigate: Rc::new(RefCell::new(None)), on_context_command: Rc::new(RefCell::new(None)), on_options_changed: Rc::new(RefCell::new(None)), options: Rc::new(RefCell::new(ViewOptions::default())), selected_target: Rc::new(RefCell::new(None)), pending_cut: Rc::new(RefCell::new(None)), search_results: Rc::new(RefCell::new(None)) };
         let background_view = view.clone();
         let background = GestureClick::new();
         background.set_button(3);
@@ -51,12 +52,14 @@ impl FileView {
         *self.remote_uri.borrow_mut() = None;
         *self.location.borrow_mut() = path;
         *self.selected_target.borrow_mut() = None;
+        *self.search_results.borrow_mut() = None;
         self.reload();
     }
 
     pub fn set_uri(&self, uri: String) {
         *self.remote_uri.borrow_mut() = Some(uri.clone());
         *self.selected_target.borrow_mut() = None;
+        *self.search_results.borrow_mut() = None;
         self.widget.set_child(Some(&Label::new(Some("Connecting to remote location…"))));
 
         let location = gio::File::for_uri(&uri);
@@ -122,26 +125,50 @@ impl FileView {
 
     pub fn uri(&self) -> Option<String> { self.remote_uri.borrow().clone() }
 
+    /// Replaces the current listing with search results, which may include
+    /// items outside the folder currently open in this view.
+    pub fn show_search_results(&self, items: Vec<FileItem>) {
+        *self.search_results.borrow_mut() = Some(items);
+        self.reload();
+    }
+
+    /// Returns the view to its normal folder listing.
+    pub fn clear_search_results(&self) {
+        if self.search_results.borrow().is_none() { return; }
+        *self.search_results.borrow_mut() = None;
+        self.reload();
+    }
+
+    pub fn is_showing_search_results(&self) -> bool { self.search_results.borrow().is_some() }
+
     fn reload(&self) {
         let options = self.options();
+        if let Some(items) = self.search_results.borrow().clone() {
+            self.render(items, &options);
+            return;
+        }
         let result = self.remote_uri.borrow().as_deref()
             .map(|uri| DirectoryModel::load_uri_with_options(uri, &options))
             .unwrap_or_else(|| DirectoryModel::load_with_options(&self.location.borrow(), &options));
         match result {
-            Ok(items) if items.is_empty() => {
-                self.widget.set_child(Some(&Label::new(Some("This folder is empty"))));
-            }
-            Ok(items) => {
-                match options.view_mode {
-                    ViewMode::DetailedList | ViewMode::CompactList => self.widget.set_child(Some(&self.column_view_for(&items, &options))),
-                    ViewMode::IconGrid => self.widget.set_child(Some(&self.grid_view(&items, &options))),
-                    ViewMode::Hybrid => self.widget.set_child(Some(&self.hybrid_view(&items, &options))),
-                };
-            }
+            Ok(items) => self.render(items, &options),
             Err(error) => {
                 self.widget.set_child(Some(&Label::new(Some(&format!("Unable to open folder: {error}")))));
             }
         }
+    }
+
+    fn render(&self, items: Vec<FileItem>, options: &ViewOptions) {
+        if items.is_empty() {
+            let message = if self.is_showing_search_results() { "No files matched your search" } else { "This folder is empty" };
+            self.widget.set_child(Some(&Label::new(Some(message))));
+            return;
+        }
+        match options.view_mode {
+            ViewMode::DetailedList | ViewMode::CompactList => self.widget.set_child(Some(&self.column_view_for(&items, options))),
+            ViewMode::IconGrid => self.widget.set_child(Some(&self.grid_view(&items, options))),
+            ViewMode::Hybrid => self.widget.set_child(Some(&self.hybrid_view(&items, options))),
+        };
     }
 
     fn column_view_for(&self, items: &[FileItem], options: &ViewOptions) -> ColumnView {

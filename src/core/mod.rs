@@ -19,5 +19,6 @@ pub use location::Location;
 pub use navigation::NavigationHistory;
 pub use properties::{PermissionBits, PropertyDetails};
 pub use operation_manager::{OperationKind, OperationManager, OperationRecord, OperationState};
+pub use search::{SearchBackend, SearchHistory, SearchQuery, SearchService};
 pub use sidebar_model::{SidebarLocation, SidebarModel, SidebarNode, SidebarPreferences};
 pub use view_options::{GridSize, GroupField, ListColumn, ListColumnLayout, SortDirection, SortField, ViewMode, ViewOptions, ViewPreferencesStore};
