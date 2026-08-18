@@ -2,6 +2,7 @@ use adw::prelude::*;
 use std::cell::RefCell;
 use std::rc::Rc;
 use gtk::{Adjustment, Box as GtkBox, Button, CheckButton, Label, Orientation, ScrolledWindow, SpinButton, Stack, StackSwitcher};
+use crate::core::application_preferences::default_new_tab_location;
 use crate::core::{ApplicationPreferences, ConflictDefault, GridSize, GroupField, OperationManager, SearchHistory, SidebarModel, SortDirection, SortField, ViewMode, ViewOptions, ViewPreferencesStore};
 use crate::ui::sidebar::Sidebar;
 
@@ -41,8 +42,52 @@ fn general_page(preferences: Rc<RefCell<ApplicationPreferences>>) -> GtkBox {
     let stored = preferences.clone();
     restore.connect_toggled(move |button| { stored.borrow_mut().restore_previous_tabs = button.is_active(); let _ = stored.borrow().save(); if !button.is_active() { let _ = stored.borrow().clear_session(); } });
     page.append(&restore);
-    let new_tab_row = Label::new(Some("New tabs open to Home")); new_tab_row.add_css_class("dim-label"); new_tab_row.set_xalign(0.0); new_tab_row.set_margin_top(4); page.append(&new_tab_row);
+
+    let new_tab_heading = Label::new(Some("New tabs open to")); new_tab_heading.add_css_class("heading"); new_tab_heading.set_xalign(0.0); new_tab_heading.set_margin_top(8); page.append(&new_tab_heading);
+    let new_tab_row = GtkBox::new(Orientation::Horizontal, 8);
+    let new_tab_label = Label::new(Some(&new_tab_location_display(&preferences.borrow().new_tab_location)));
+    new_tab_label.set_hexpand(true); new_tab_label.set_xalign(0.0); new_tab_label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+    new_tab_row.append(&new_tab_label);
+    let browse = Button::with_label("Browse…");
+    let browse_preferences = preferences.clone(); let browse_label = new_tab_label.clone();
+    browse.connect_clicked(move |button| choose_new_tab_location(button, browse_preferences.clone(), browse_label.clone()));
+    new_tab_row.append(&browse);
+    let reset = Button::with_label("Reset to Home");
+    let reset_preferences = preferences.clone(); let reset_label = new_tab_label.clone();
+    reset.connect_clicked(move |_| {
+        let home = default_new_tab_location();
+        reset_preferences.borrow_mut().new_tab_location = home.clone();
+        let _ = reset_preferences.borrow().save();
+        reset_label.set_text(&new_tab_location_display(&home));
+    });
+    new_tab_row.append(&reset);
+    page.append(&new_tab_row);
     page
+}
+
+fn new_tab_location_display(uri: &str) -> String {
+    gio::File::for_uri(uri).path().map(|path| path.display().to_string()).unwrap_or_else(|| uri.to_owned())
+}
+
+#[allow(deprecated)]
+fn choose_new_tab_location(button: &Button, preferences: Rc<RefCell<ApplicationPreferences>>, label: Label) {
+    let parent = button.root().and_downcast::<gtk::Window>();
+    let chooser = gtk::FileChooserNative::new(Some("New Tabs Open To"), parent.as_ref(), gtk::FileChooserAction::SelectFolder, Some("Select"), Some("Cancel"));
+    if let Some(path) = gio::File::for_uri(&preferences.borrow().new_tab_location).path() {
+        let _ = chooser.set_current_folder(Some(&gio::File::for_path(path)));
+    }
+    chooser.connect_response(move |chooser, response| {
+        if response == gtk::ResponseType::Accept {
+            if let Some(file) = chooser.file() {
+                let uri = file.uri().to_string();
+                preferences.borrow_mut().new_tab_location = uri.clone();
+                let _ = preferences.borrow().save();
+                label.set_text(&new_tab_location_display(&uri));
+            }
+        }
+        chooser.destroy();
+    });
+    chooser.show();
 }
 
 fn search_privacy_page(preferences: Rc<RefCell<ApplicationPreferences>>, history: Rc<RefCell<SearchHistory>>) -> GtkBox {
@@ -208,5 +253,15 @@ mod tests {
     #[test]
     fn view_preferences_expose_all_default_groups() {
         assert_eq!(super::view_default_groups(), ["Layout", "Icon size", "Sort", "Sort direction", "Grouping", "Content"]);
+    }
+
+    #[test]
+    fn new_tab_location_displays_as_a_plain_filesystem_path() {
+        assert_eq!(super::new_tab_location_display("file:///home/user/Documents"), "/home/user/Documents");
+    }
+
+    #[test]
+    fn a_non_file_new_tab_location_falls_back_to_the_raw_uri() {
+        assert_eq!(super::new_tab_location_display("network:///"), "network:///");
     }
 }
