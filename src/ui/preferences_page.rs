@@ -2,25 +2,106 @@ use adw::prelude::*;
 use std::cell::RefCell;
 use std::rc::Rc;
 use gtk::{Adjustment, Box as GtkBox, Button, CheckButton, Label, Orientation, ScrolledWindow, SpinButton, Stack, StackSwitcher};
-use crate::core::{ApplicationPreferences, ConflictDefault, GridSize, GroupField, OperationManager, SortDirection, SortField, ViewMode, ViewOptions, ViewPreferencesStore};
+use crate::core::{ApplicationPreferences, ConflictDefault, GridSize, GroupField, OperationManager, SearchHistory, SidebarModel, SortDirection, SortField, ViewMode, ViewOptions, ViewPreferencesStore};
+use crate::ui::sidebar::Sidebar;
 
-pub fn category_names() -> [&'static str; 3] { ["General", "Views", "File operations"] }
+pub fn category_names() -> [&'static str; 5] { ["General", "Views", "File operations", "Search & privacy", "Sidebar"] }
 fn conflict_default_labels() -> [&'static str; 4] { ["Ask", "Replace", "Keep Both", "Skip"] }
 fn view_default_groups() -> [&'static str; 6] { ["Layout", "Icon size", "Sort", "Sort direction", "Grouping", "Content"] }
 
-pub fn build(preferences: Rc<RefCell<ApplicationPreferences>>, operations: OperationManager, views: Rc<RefCell<ViewPreferencesStore>>) -> ScrolledWindow {
+pub fn build(preferences: Rc<RefCell<ApplicationPreferences>>, operations: OperationManager, views: Rc<RefCell<ViewPreferencesStore>>, search_history: Rc<RefCell<SearchHistory>>, sidebar_model: Rc<RefCell<SidebarModel>>, sidebar_holder: Rc<RefCell<Option<Sidebar>>>) -> ScrolledWindow {
     let content = GtkBox::new(Orientation::Vertical, 14);
     content.set_margin_top(24); content.set_margin_bottom(24); content.set_margin_start(32); content.set_margin_end(32);
     let title = Label::new(Some("Preferences")); title.add_css_class("title-1"); title.set_xalign(0.0); content.append(&title);
     let subtitle = Label::new(Some("Settings are grouped here as their behaviour becomes available.")); subtitle.add_css_class("dim-label"); subtitle.set_xalign(0.0); subtitle.set_wrap(true); content.append(&subtitle);
     let stack = Stack::new(); stack.set_vexpand(true); stack.set_hexpand(true);
     let switcher = StackSwitcher::new(); switcher.set_stack(Some(&stack)); switcher.set_halign(gtk::Align::Start); content.append(&switcher);
-    for category in category_names() { let page = if category == "File operations" { operations_page(preferences.clone(), operations.clone()) } else if category == "General" { general_page(preferences.clone()) } else { views_page(views.clone()) }; stack.add_titled(&page, Some(&category.to_lowercase().replace(' ', "-")), category); }
+    for category in category_names() {
+        let page = match category {
+            "File operations" => operations_page(preferences.clone(), operations.clone()),
+            "General" => general_page(preferences.clone()),
+            "Search & privacy" => search_privacy_page(preferences.clone(), search_history.clone()),
+            "Sidebar" => sidebar_page(preferences.clone(), sidebar_model.clone(), sidebar_holder.clone()),
+            _ => views_page(views.clone()),
+        };
+        stack.add_titled(&page, Some(&category.to_lowercase().replace(' ', "-")), category);
+    }
     content.append(&stack);
     let scroll = ScrolledWindow::new(); scroll.set_child(Some(&content)); scroll
 }
 
-fn general_page(preferences: Rc<RefCell<ApplicationPreferences>>) -> GtkBox { let page = GtkBox::new(Orientation::Vertical, 10); page.set_margin_top(18); let heading = Label::new(Some("General")); heading.add_css_class("title-3"); heading.set_xalign(0.0); page.append(&heading); let close = CheckButton::with_label("Close Zorin Explorer when the last tab is closed"); close.set_active(preferences.borrow().close_on_last_tab); close.connect_toggled(move |button| { preferences.borrow_mut().close_on_last_tab = button.is_active(); let _ = preferences.borrow().save(); }); page.append(&close); page }
+fn general_page(preferences: Rc<RefCell<ApplicationPreferences>>) -> GtkBox {
+    let page = GtkBox::new(Orientation::Vertical, 10); page.set_margin_top(18);
+    let heading = Label::new(Some("General")); heading.add_css_class("title-3"); heading.set_xalign(0.0); page.append(&heading);
+    let close = CheckButton::with_label("Close Zorin Explorer when the last tab is closed"); close.set_active(preferences.borrow().close_on_last_tab);
+    let stored = preferences.clone();
+    close.connect_toggled(move |button| { stored.borrow_mut().close_on_last_tab = button.is_active(); let _ = stored.borrow().save(); });
+    page.append(&close);
+    let restore = CheckButton::with_label("Restore previous tabs on launch"); restore.set_active(preferences.borrow().restore_previous_tabs);
+    let stored = preferences.clone();
+    restore.connect_toggled(move |button| { stored.borrow_mut().restore_previous_tabs = button.is_active(); let _ = stored.borrow().save(); if !button.is_active() { let _ = stored.borrow().clear_session(); } });
+    page.append(&restore);
+    let new_tab_row = Label::new(Some("New tabs open to Home")); new_tab_row.add_css_class("dim-label"); new_tab_row.set_xalign(0.0); new_tab_row.set_margin_top(4); page.append(&new_tab_row);
+    page
+}
+
+fn search_privacy_page(preferences: Rc<RefCell<ApplicationPreferences>>, history: Rc<RefCell<SearchHistory>>) -> GtkBox {
+    let page = GtkBox::new(Orientation::Vertical, 10); page.set_margin_top(18);
+    let heading = Label::new(Some("Search & privacy")); heading.add_css_class("title-3"); heading.set_xalign(0.0); page.append(&heading);
+    let content_search = CheckButton::with_label("Search file contents when the desktop search index is available"); content_search.set_active(preferences.borrow().content_search_enabled);
+    let stored = preferences.clone();
+    content_search.connect_toggled(move |button| { stored.borrow_mut().content_search_enabled = button.is_active(); let _ = stored.borrow().save(); });
+    page.append(&content_search);
+    let record_history = CheckButton::with_label("Remember recent searches"); record_history.set_active(preferences.borrow().record_search_history);
+    let stored = preferences.clone(); let record_history_effect = history.clone();
+    record_history.connect_toggled(move |button| { stored.borrow_mut().record_search_history = button.is_active(); let _ = stored.borrow().save(); if !button.is_active() { record_history_effect.borrow_mut().clear(); let _ = record_history_effect.borrow().save(); } });
+    page.append(&record_history);
+    let retention_row = GtkBox::new(Orientation::Horizontal, 8); let label = Label::new(Some("Keep recent searches for (days)")); label.set_hexpand(true); label.set_xalign(0.0); retention_row.append(&label);
+    let spin = SpinButton::new(Some(&Adjustment::new(preferences.borrow().search_history_retention_days as f64, 1.0, 365.0, 1.0, 7.0, 0.0)), 1.0, 0);
+    let stored = preferences.clone(); let retention_history = history.clone();
+    spin.connect_value_changed(move |spin| { let days = spin.value() as u32; stored.borrow_mut().search_history_retention_days = days; let _ = stored.borrow().save(); retention_history.borrow_mut().prune(days); let _ = retention_history.borrow().save(); });
+    retention_row.append(&spin); page.append(&retention_row);
+    let clear = Button::with_label("Clear search history"); clear.set_halign(gtk::Align::Start);
+    let clear_history = history.clone();
+    clear.connect_clicked(move |_| { clear_history.borrow_mut().clear(); let _ = clear_history.borrow().save(); });
+    page.append(&clear);
+    page
+}
+
+fn sidebar_page(_preferences: Rc<RefCell<ApplicationPreferences>>, sidebar_model: Rc<RefCell<SidebarModel>>, sidebar_holder: Rc<RefCell<Option<Sidebar>>>) -> GtkBox {
+    let page = GtkBox::new(Orientation::Vertical, 10); page.set_margin_top(18);
+    let heading = Label::new(Some("Sidebar")); heading.add_css_class("title-3"); heading.set_xalign(0.0); page.append(&heading);
+    let description = Label::new(Some("Choose which sidebar section opens expanded by default for sections you haven't toggled yourself.")); description.add_css_class("dim-label"); description.set_wrap(true); description.set_xalign(0.0); page.append(&description);
+    let section_titles = sidebar_model.borrow().sections().into_iter().map(|section| section.title).collect::<Vec<_>>();
+    let current_default = sidebar_model.borrow().preferences().default_expanded_section().to_owned();
+    let mut first: Option<CheckButton> = None;
+    for title in &section_titles {
+        let control = CheckButton::with_label(title);
+        control.set_active(*title == current_default);
+        if let Some(first) = &first { control.set_group(Some(first)); } else { first = Some(control.clone()); }
+        let model = sidebar_model.clone(); let holder = sidebar_holder.clone(); let title = title.clone();
+        control.connect_toggled(move |control| {
+            if !control.is_active() { return; }
+            let mut model = model.borrow_mut();
+            model.preferences_mut().set_default_expanded_section(title.clone());
+            let _ = model.preferences().save();
+            drop(model);
+            if let Some(sidebar) = holder.borrow().as_ref() { sidebar.refresh(); }
+        });
+        page.append(&control);
+    }
+    let reset = Button::with_label("Reset sidebar expansion"); reset.set_halign(gtk::Align::Start); reset.set_margin_top(12);
+    let model = sidebar_model.clone(); let holder = sidebar_holder.clone();
+    reset.connect_clicked(move |_| {
+        let mut model = model.borrow_mut();
+        model.preferences_mut().clear_section_expansion();
+        let _ = model.preferences().save();
+        drop(model);
+        if let Some(sidebar) = holder.borrow().as_ref() { sidebar.refresh(); }
+    });
+    page.append(&reset);
+    page
+}
 
 fn operations_page(preferences: Rc<RefCell<ApplicationPreferences>>, operations: OperationManager) -> GtkBox {
     let page = GtkBox::new(Orientation::Vertical, 10); page.set_margin_top(18);
@@ -116,7 +197,7 @@ fn confirm_clear_all_folder_views(button: &Button, views: Rc<RefCell<ViewPrefere
 mod tests {
     #[test]
     fn categories_cover_current_and_planned_preference_areas() {
-        assert_eq!(super::category_names(), ["General", "Views", "File operations"]);
+        assert_eq!(super::category_names(), ["General", "Views", "File operations", "Search & privacy", "Sidebar"]);
     }
 
     #[test]

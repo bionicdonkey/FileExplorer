@@ -6,11 +6,13 @@ use adw::prelude::*;
 use adw::{Application, ApplicationWindow, HeaderBar, TabPage, TabView, ToolbarView};
 use gtk::{Align, Box as GtkBox, Button, CheckButton, Entry, Label, MenuButton, Orientation, Paned, Popover, SearchEntry, Separator};
 
+use crate::core::file_item::FileItem;
 use crate::core::location::Location;
 use crate::core::navigation::NavigationHistory;
 use crate::core::operations::FileOperations;
 use crate::core::{ApplicationPreferences, ConflictDefault, OperationKind, OperationManager};
 use crate::core::{GridSize, GroupField, SidebarModel, SidebarPreferences, SortDirection, SortField, ViewMode, ViewOptions, ViewPreferencesStore};
+use crate::core::{SearchBackend, SearchHistory, SearchQuery, SearchService};
 use crate::ui::context_menu::{ContextCommand, ContextTarget};
 use crate::ui::file_view::FileView;
 use crate::ui::properties_dialog::PropertiesDialog;
@@ -52,6 +54,12 @@ impl ExplorerWindow {
             .build();
         let application_preferences = Rc::new(RefCell::new(ApplicationPreferences::load_default().unwrap_or_default()));
         let operations = OperationManager::load_history(application_preferences.borrow().history_path(), application_preferences.borrow().operation_history_days);
+        let search_history = Rc::new(RefCell::new({
+            let path = application_preferences.borrow().search_history_path();
+            let mut history = path.map(SearchHistory::load_from).transpose().unwrap_or(None).unwrap_or_else(SearchHistory::in_memory);
+            history.prune(application_preferences.borrow().search_history_retention_days);
+            history
+        }));
 
         let header = HeaderBar::new();
         header.set_show_title(false);
@@ -133,7 +141,7 @@ impl ExplorerWindow {
         let sidebar_window = window.clone();
         let sidebar_model_actions = sidebar_model.clone();
         let sidebar_holder_actions = sidebar_holder.clone();
-        let sidebar = Sidebar::new(sidebar_model, &window, move |action| match action {
+        let sidebar = Sidebar::new(sidebar_model.clone(), &window, move |action| match action {
             SidebarAction::Open(path) => {
                 let sidebar = sidebar_holder_actions.borrow().clone();
                 if let (Some(index), Some(sidebar)) = (selected_index(&sidebar_context_tabs, &sidebar_context_data), sidebar) {
@@ -213,7 +221,23 @@ impl ExplorerWindow {
         let preferences_values = application_preferences.clone();
         let preferences_operations = operations.clone();
         let preferences_views = preferences.clone();
-        preferences_button.connect_clicked(move |_| open_preferences_tab(&preferences_tabs, preferences_values.clone(), preferences_operations.clone(), preferences_views.clone()));
+        let preferences_search_history = search_history.clone();
+        let preferences_sidebar_model = sidebar_model.clone();
+        let preferences_sidebar_holder = sidebar_holder.clone();
+        preferences_button.connect_clicked(move |_| open_preferences_tab(&preferences_tabs, preferences_values.clone(), preferences_operations.clone(), preferences_views.clone(), preferences_search_history.clone(), preferences_sidebar_model.clone(), preferences_sidebar_holder.clone()));
+
+        let search_data = tabs_data.clone();
+        let search_tabs = tabs.view.clone();
+        let search_preferences = application_preferences.clone();
+        let search_status = status.clone();
+        search.connect_search_changed(move |entry| {
+            perform_search(&entry.text(), &search_data, &search_tabs, &search_preferences, &search_status);
+        });
+        let activate_preferences = application_preferences.clone();
+        let activate_history = search_history.clone();
+        search.connect_activate(move |entry| {
+            record_search_term(&entry.text(), &activate_preferences, &activate_history);
+        });
 
         let body = GtkBox::new(Orientation::Vertical, 0);
         body.append(&header_controls.widget);
@@ -660,11 +684,59 @@ fn open_operations_tab(tabs: &TabView, manager: OperationManager) {
     tabs.set_selected_page(&page);
 }
 
-fn open_preferences_tab(tabs: &TabView, preferences: Rc<RefCell<ApplicationPreferences>>, operations: OperationManager, views: Rc<RefCell<ViewPreferencesStore>>) {
+fn open_preferences_tab(tabs: &TabView, preferences: Rc<RefCell<ApplicationPreferences>>, operations: OperationManager, views: Rc<RefCell<ViewPreferencesStore>>, search_history: Rc<RefCell<SearchHistory>>, sidebar_model: Rc<RefCell<SidebarModel>>, sidebar_holder: Rc<RefCell<Option<Sidebar>>>) {
     if let Some(page) = tabs.pages().iter::<TabPage>().filter_map(Result::ok).find(|page| page.title().as_str() == "Preferences") { tabs.set_selected_page(&page); return; }
-    let page = tabs.append(&preferences_page::build(preferences, operations, views));
+    let page = tabs.append(&preferences_page::build(preferences, operations, views, search_history, sidebar_model, sidebar_holder));
     page.set_title("Preferences");
     tabs.set_selected_page(&page);
+}
+
+/// Runs a search against the active tab's folder and swaps its listing for
+/// the results. An empty query returns the view to its normal folder listing.
+fn perform_search(term: &str, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, preferences: &Rc<RefCell<ApplicationPreferences>>, status: &Label) {
+    let Some(index) = selected_index(tabs, data) else { return; };
+    let (view, folder, is_remote) = {
+        let data = data.borrow();
+        let tab = &data[index];
+        let snapshot = (tab.view.clone(), tab.location.borrow().clone(), tab.view.uri().is_some());
+        snapshot
+    };
+    if term.trim().is_empty() {
+        view.clear_search_results();
+        status.set_text("Ready");
+        return;
+    }
+    if is_remote {
+        status.set_text("Search isn't available for remote locations");
+        return;
+    }
+    let content_search = preferences.borrow().content_search_enabled;
+    let query = SearchQuery::new(term, content_search);
+    match SearchService::search(&query, &folder) {
+        Ok((backend, paths)) => {
+            let items: Vec<FileItem> = paths.iter().filter_map(|path| FileItem::from_path(path).ok()).collect();
+            status.set_text(&search_status_text(backend, items.len()));
+            view.show_search_results(items);
+        }
+        Err(error) => status.set_text(&format!("Search failed: {error}")),
+    }
+}
+
+fn search_status_text(backend: SearchBackend, count: usize) -> String {
+    let scope = match backend {
+        SearchBackend::Tracker => "the desktop search index",
+        SearchBackend::FolderFallback => "this folder only (desktop search index unavailable)",
+    };
+    format!("Found {count} item{} searching {scope}", if count == 1 { "" } else { "s" })
+}
+
+/// Recorded only when a search is committed with Enter, not on every
+/// keystroke, and only while the user has recent-search recording enabled.
+fn record_search_term(term: &str, preferences: &Rc<RefCell<ApplicationPreferences>>, history: &Rc<RefCell<SearchHistory>>) {
+    if term.trim().is_empty() || !preferences.borrow().record_search_history { return; }
+    let mut history = history.borrow_mut();
+    history.record(term);
+    let _ = history.save();
 }
 
 fn copy_text(view: &FileView, text: &str) {
