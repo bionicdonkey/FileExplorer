@@ -2,9 +2,10 @@ use gtk::prelude::*;
 use std::cell::RefCell;
 use std::rc::Rc;
 use gtk::{Adjustment, Box as GtkBox, Button, CheckButton, Label, Orientation, ScrolledWindow, SpinButton, Stack, StackSwitcher};
-use crate::core::{ApplicationPreferences, OperationManager};
+use crate::core::{ApplicationPreferences, ConflictDefault, OperationManager};
 
 pub fn category_names() -> [&'static str; 3] { ["General", "Views", "File operations"] }
+fn conflict_default_labels() -> [&'static str; 4] { ["Ask", "Replace", "Keep Both", "Skip"] }
 
 pub fn build(preferences: Rc<RefCell<ApplicationPreferences>>, operations: OperationManager) -> ScrolledWindow {
     let content = GtkBox::new(Orientation::Vertical, 14);
@@ -25,7 +26,24 @@ fn operations_page(preferences: Rc<RefCell<ApplicationPreferences>>, operations:
     let heading = Label::new(Some("File operations")); heading.add_css_class("title-3"); heading.set_xalign(0.0); page.append(&heading);
     let row = GtkBox::new(Orientation::Horizontal, 8); let label = Label::new(Some("Keep completed history for (days)")); label.set_hexpand(true); label.set_xalign(0.0); row.append(&label);
     let spin = SpinButton::new(Some(&Adjustment::new(preferences.borrow().operation_history_days as f64, 1.0, 365.0, 1.0, 7.0, 0.0)), 1.0, 0); let stored = preferences.clone(); let retention_manager = operations.clone(); spin.connect_value_changed(move |spin| { let days = spin.value() as u32; stored.borrow_mut().operation_history_days = days; let _ = stored.borrow().save(); retention_manager.set_retention_days(days); }); row.append(&spin); page.append(&row);
-    let clear = Button::with_label("Clear completed history"); clear.set_halign(gtk::Align::Start); clear.connect_clicked(move |_| operations.clear_completed()); page.append(&clear); page
+    let clear = Button::with_label("Clear completed history"); clear.set_halign(gtk::Align::Start); clear.connect_clicked(move |_| operations.clear_completed()); page.append(&clear);
+    let conflict_heading = Label::new(Some("When an item already exists")); conflict_heading.add_css_class("heading"); conflict_heading.set_xalign(0.0); conflict_heading.set_margin_top(12); page.append(&conflict_heading);
+    let conflict_description = Label::new(Some("Choose the default action for copy and move conflicts.")); conflict_description.add_css_class("dim-label"); conflict_description.set_xalign(0.0); page.append(&conflict_description);
+    let mut first: Option<CheckButton> = None;
+    for (label, value) in conflict_default_labels().into_iter().zip([ConflictDefault::Ask, ConflictDefault::Replace, ConflictDefault::KeepBoth, ConflictDefault::Skip]) {
+        let control = CheckButton::with_label(label);
+        control.set_active(preferences.borrow().conflict_default == value);
+        if let Some(first) = &first { control.set_group(Some(first)); } else { first = Some(control.clone()); }
+        let stored = preferences.clone();
+        control.connect_toggled(move |control| {
+            if control.is_active() {
+                stored.borrow_mut().conflict_default = value;
+                let _ = stored.borrow().save();
+            }
+        });
+        page.append(&control);
+    }
+    page
 }
 
 fn category_page(category: &str) -> GtkBox {
@@ -44,5 +62,10 @@ mod tests {
     #[test]
     fn categories_cover_current_and_planned_preference_areas() {
         assert_eq!(super::category_names(), ["General", "Views", "File operations"]);
+    }
+
+    #[test]
+    fn transfer_conflict_controls_expose_every_persisted_action() {
+        assert_eq!(super::conflict_default_labels(), ["Ask", "Replace", "Keep Both", "Skip"]);
     }
 }
