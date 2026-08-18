@@ -211,7 +211,7 @@ impl SidebarModel {
             let path = self.home.join(name);
             if path.exists() { nodes.push(SidebarNode::local(path, name, icon, true)); }
         }
-        SidebarSection { title: display_name(&self.home), nodes }
+        SidebarSection { title: user_section_title(&glib::real_name(), &self.home), nodes }
     }
 
     fn this_pc(&self) -> SidebarSection {
@@ -272,6 +272,11 @@ fn display_name(path: &Path) -> String {
     path.file_name().and_then(|name| name.to_str()).filter(|name| !name.is_empty()).map(ToOwned::to_owned).unwrap_or_else(|| path.display().to_string())
 }
 
+fn user_section_title(real_name: &std::ffi::OsStr, home: &Path) -> String {
+    let real_name = real_name.to_string_lossy().trim().to_owned();
+    if real_name.is_empty() || real_name.eq_ignore_ascii_case("unknown") { display_name(home) } else { real_name }
+}
+
 fn standard_folder_icon(path: &Path) -> &'static str {
     match path.file_name().and_then(|name| name.to_str()) {
         Some("Desktop") => "user-desktop-symbolic",
@@ -326,7 +331,7 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
 
-    use super::{device_kind_rank, SidebarLocation, SidebarModel, SidebarPreferences};
+    use super::{device_kind_rank, user_section_title, SidebarLocation, SidebarModel, SidebarPreferences};
 
     #[test]
     fn pinning_a_path_is_persisted_once() {
@@ -359,7 +364,10 @@ mod tests {
         let model = SidebarModel::new(SidebarPreferences::in_memory(), home);
 
         let titles = model.sections().into_iter().map(|section| section.title).collect::<Vec<_>>();
-        assert_eq!(titles, ["Quick access", "user", "This PC", "Network & online"]);
+        assert_eq!(titles[0], "Quick access");
+        assert_eq!(titles[1], user_section_title(&glib::real_name(), Path::new("/home/user")));
+        assert_eq!(titles[2], "This PC");
+        assert_eq!(titles[3], "Network & online");
     }
 
     #[test]
@@ -374,6 +382,12 @@ mod tests {
         assert!(!preferences.devices_expanded());
         preferences.set_devices_expanded(true);
         assert!(preferences.devices_expanded());
+    }
+
+    #[test]
+    fn user_section_prefers_the_account_display_name() {
+        assert_eq!(user_section_title(std::ffi::OsStr::new("Alex Example"), Path::new("/home/user")), "Alex Example");
+        assert_eq!(user_section_title(std::ffi::OsStr::new(""), Path::new("/home/user")), "user");
     }
 
     #[test]

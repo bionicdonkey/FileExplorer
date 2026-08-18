@@ -93,8 +93,6 @@ impl Sidebar {
                     devices.add_css_class("sidebar-subheading");
                     devices.add_css_class("dim-label");
                     devices.set_xalign(0.0);
-                    devices.set_margin_top(8);
-                    devices.set_margin_bottom(2);
                     device_heading.append(&devices);
                     rows.append(&device_heading);
                     rows.append(&device_rows);

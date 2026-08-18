@@ -92,6 +92,12 @@
   padding-left: 4px;
 }
 
+.sidebar-subheading {
+  margin-top: 6px;
+  margin-bottom: 3px;
+  padding-left: 4px;
+}
+
 .sidebar-tree-row,
 .sidebar-tree-child {
   min-height: 30px;
