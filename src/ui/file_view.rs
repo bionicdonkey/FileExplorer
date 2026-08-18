@@ -319,11 +319,44 @@ fn show_item_context_menu(parent: &impl IsA<gtk::Widget>, x: f64, y: f64, target
         if matches!(command, ContextCommand::CopyFilename | ContextCommand::CopyFullPath | ContextCommand::CopyTo | ContextCommand::MoveTo) {
             continue;
         }
-        let actual_command = if command == ContextCommand::MoveToTrash { delete_command(shift_held) } else { command };
-        menu.append(&command_button(context_command_label(actual_command), target.clone(), view.clone(), actual_command, Some(popover.clone())));
+        if command == ContextCommand::MoveToTrash {
+            menu.append(&dynamic_delete_button(target.clone(), view.clone(), popover.clone(), shift_held));
+        } else {
+            menu.append(&command_button(context_command_label(command), target.clone(), view.clone(), command, Some(popover.clone())));
+        }
     }
     popover.set_child(Some(&menu));
     popover.popup();
+}
+
+fn dynamic_delete_button(target: ContextTarget, view: FileView, popover: Popover, shift_held: bool) -> Button {
+    let shifted = Rc::new(RefCell::new(shift_held));
+    let button = Button::with_label(context_command_label(delete_command(shift_held)));
+    let update_label = {
+        let button = button.clone();
+        let shifted = shifted.clone();
+        move |is_shifted| { *shifted.borrow_mut() = is_shifted; button.set_label(context_command_label(delete_command(is_shifted))); }
+    };
+    let keys = gtk::EventControllerKey::new();
+    keys.connect_key_pressed(move |_, key, _, modifiers| {
+        if key == gtk::gdk::Key::Shift_L || key == gtk::gdk::Key::Shift_R || modifiers.contains(gtk::gdk::ModifierType::SHIFT_MASK) { update_label(true); }
+        glib::Propagation::Proceed
+    });
+    let button_on_release = button.clone();
+    let shifted_on_release = shifted.clone();
+    keys.connect_key_released(move |_, key, _, modifiers| {
+        if key == gtk::gdk::Key::Shift_L || key == gtk::gdk::Key::Shift_R || !modifiers.contains(gtk::gdk::ModifierType::SHIFT_MASK) {
+            *shifted_on_release.borrow_mut() = false;
+            button_on_release.set_label(context_command_label(delete_command(false)));
+        }
+    });
+    popover.add_controller(keys);
+    button.connect_clicked(move |_| {
+        popover.popdown();
+        let command = delete_command(*shifted.borrow());
+        if let Some(callback) = view.on_context_command.borrow().as_ref() { callback(target.clone(), command); }
+    });
+    button
 }
 
 fn command_submenu(label: &str, target: &ContextTarget, view: &FileView, commands: &[ContextCommand], root: Popover) -> Button {
