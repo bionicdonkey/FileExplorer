@@ -90,14 +90,17 @@ impl Sidebar {
                         let _ = model.preferences().save();
                     });
                     device_heading.append(&devices_toggle);
-                    let devices_icon = Image::from_icon_name("drive-harddisk-symbolic");
+                    // A collection of attached volumes, rather than one physical disk.
+                    // Zorin ships this symbolic icon and GTK resolves it through the
+                    // currently selected icon theme.
+                    let devices_icon = Image::from_icon_name("drive-multidisk-symbolic");
                     devices_icon.set_pixel_size(18);
                     devices_icon.set_margin_start(6);
                     devices_icon.set_margin_end(8);
+                    devices_icon.add_css_class("sidebar-location-icon");
                     device_heading.append(&devices_icon);
                     let devices = Label::new(Some("Devices"));
                     devices.add_css_class("sidebar-subheading");
-                    devices.add_css_class("dim-label");
                     devices.set_xalign(0.0);
                     device_heading.append(&devices);
                     rows.append(&device_heading);
@@ -160,6 +163,11 @@ impl Sidebar {
 
     pub fn set_active_path(&self, path: &Path) {
         *self.active_path.borrow_mut() = Some(path.to_path_buf());
+        self.refresh();
+    }
+
+    pub fn clear_active_path(&self) {
+        *self.active_path.borrow_mut() = None;
         self.refresh();
     }
 
@@ -248,6 +256,7 @@ impl Sidebar {
         button_content.set_margin_bottom(4);
         let icon = Image::from_icon_name(node.location.icon_name());
         icon.set_pixel_size(18);
+        icon.add_css_class("sidebar-location-icon");
         let label = Label::new(Some(node.location.label()));
         label.set_xalign(0.0);
         label.set_ellipsize(gtk::pango::EllipsizeMode::End);

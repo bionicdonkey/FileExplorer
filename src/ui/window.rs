@@ -106,16 +106,22 @@ impl ExplorerWindow {
         let sidebar_holder_actions = sidebar_holder.clone();
         let sidebar = Sidebar::new(sidebar_model, &window, move |action| match action {
             SidebarAction::Open(path) => {
-                if let Some(index) = selected_index(&sidebar_context_tabs, &sidebar_context_data) {
-                    navigate_tab(index, path, &sidebar_context_data, &sidebar_context_tabs, &sidebar_context_header, &sidebar_context_preferences, true);
+                let sidebar = sidebar_holder_actions.borrow().clone();
+                if let (Some(index), Some(sidebar)) = (selected_index(&sidebar_context_tabs, &sidebar_context_data), sidebar) {
+                    navigate_tab(index, path, &sidebar_context_data, &sidebar_context_tabs, &sidebar_context_header, &sidebar_context_preferences, &sidebar, true);
                 }
             }
-            SidebarAction::OpenInNewTab(path) => add_tab_at(path, &sidebar_context_data, &sidebar_context_tabs, &sidebar_context_header, &sidebar_context_preferences, &sidebar_context_app, &sidebar_context_clipboard),
+            SidebarAction::OpenInNewTab(path) => {
+                if let Some(sidebar) = sidebar_holder_actions.borrow().clone() {
+                    add_tab_at(path, &sidebar_context_data, &sidebar_context_tabs, &sidebar_context_header, &sidebar_context_preferences, &sidebar_context_app, &sidebar_context_clipboard, &sidebar);
+                }
+            }
             SidebarAction::OpenInNewWindow(path) => ExplorerWindow::new_at(&sidebar_context_app, path).present(),
             SidebarAction::OpenInTerminal(path) => open_terminal(&path),
             SidebarAction::OpenUri(uri) => {
-                if let Some(index) = selected_index(&sidebar_context_tabs, &sidebar_context_data) {
-                    navigate_uri_tab(index, uri, &sidebar_context_data, &sidebar_context_tabs, &sidebar_context_header);
+                let sidebar = sidebar_holder_actions.borrow().clone();
+                if let (Some(index), Some(sidebar)) = (selected_index(&sidebar_context_tabs, &sidebar_context_data), sidebar) {
+                    navigate_uri_tab(index, uri, &sidebar_context_data, &sidebar_context_tabs, &sidebar_context_header, &sidebar);
                 }
             }
             SidebarAction::Pin(path) => {
@@ -182,7 +188,7 @@ impl ExplorerWindow {
         toolbar.set_content(Some(&body));
         window.set_content(Some(&toolbar));
 
-        wire_tab(first_page.clone(), &tabs_data, &tabs.view, &header_controls, &preferences, app, &clipboard);
+        wire_tab(first_page.clone(), &tabs_data, &tabs.view, &header_controls, &preferences, app, &clipboard, &sidebar);
 
         let new_data = tabs_data.clone();
         let new_tabs = tabs.view.clone();
@@ -190,6 +196,7 @@ impl ExplorerWindow {
         let new_preferences = preferences.clone();
         let new_app = app.clone();
         let new_clipboard = clipboard.clone();
+        let new_sidebar = sidebar.clone();
         new_tab.connect_clicked(move |_| {
             let path = Location::home().path().to_path_buf();
             let location = Rc::new(RefCell::new(path.clone()));
@@ -198,7 +205,7 @@ impl ExplorerWindow {
             let page = new_tabs.append(&view.widget);
             page.set_title(&tab_title(&path));
             new_data.borrow_mut().push(TabData { view, location, history: history_with(path), page: page.clone() });
-            wire_tab(page.clone(), &new_data, &new_tabs, &new_header, &new_preferences, &new_app, &new_clipboard);
+            wire_tab(page.clone(), &new_data, &new_tabs, &new_header, &new_preferences, &new_app, &new_clipboard, &new_sidebar);
             new_tabs.set_selected_page(&page);
         });
 
@@ -218,6 +225,7 @@ impl ExplorerWindow {
         let tab_context_preferences = preferences.clone();
         let tab_context_app = app.clone();
         let tab_context_clipboard = clipboard.clone();
+        let tab_context_sidebar = sidebar.clone();
         tabs.set_context_handler(move |command| {
             let Some(page) = tab_context_view.selected_page() else { return; };
             match command {
@@ -225,7 +233,7 @@ impl ExplorerWindow {
                 ContextCommand::CloseOtherTabs => tab_context_view.close_other_pages(&page),
                 ContextCommand::DuplicateTab => {
                     let path = tab_context_data.borrow().iter().find(|tab| tab.page == page).map(|tab| tab.location.borrow().clone());
-                    if let Some(path) = path { add_tab_at(path, &tab_context_data, &tab_context_view, &tab_context_header, &tab_context_preferences, &tab_context_app, &tab_context_clipboard); }
+                    if let Some(path) = path { add_tab_at(path, &tab_context_data, &tab_context_view, &tab_context_header, &tab_context_preferences, &tab_context_app, &tab_context_clipboard, &tab_context_sidebar); }
                 }
                 _ => {}
             }
@@ -233,11 +241,13 @@ impl ExplorerWindow {
 
         let select_data = tabs_data.clone();
         let select_header = header_controls.clone();
+        let select_sidebar = sidebar.clone();
         tabs.view.connect_selected_page_notify(move |view| {
             if let Some(index) = selected_index(view, &select_data) {
                 let tab = &select_data.borrow()[index];
                 if let Some(uri) = tab.view.uri() { select_header.set_uri(&uri); }
                 else { select_header.set_location(&tab.location.borrow()); }
+                sync_sidebar_for_tab(&select_sidebar, &tab.location.borrow(), tab.view.uri().is_some());
             }
         });
 
@@ -245,6 +255,7 @@ impl ExplorerWindow {
         let navigation_tabs = tabs.view.clone();
         let navigation_header = header_controls.clone();
         let navigation_preferences = preferences.clone();
+        let navigation_sidebar = sidebar.clone();
         header_controls.connect_navigation(move |action| {
             let Some(index) = selected_index(&navigation_tabs, &navigation_data) else { return; };
             let next = {
@@ -257,7 +268,7 @@ impl ExplorerWindow {
                 }
             };
             if let Some(path) = next {
-                navigate_tab(index, path, &navigation_data, &navigation_tabs, &navigation_header, &navigation_preferences, !matches!(action, NavigationAction::Back | NavigationAction::Forward | NavigationAction::Refresh));
+                navigate_tab(index, path, &navigation_data, &navigation_tabs, &navigation_header, &navigation_preferences, &navigation_sidebar, !matches!(action, NavigationAction::Back | NavigationAction::Forward | NavigationAction::Refresh));
             }
         });
 
@@ -265,9 +276,10 @@ impl ExplorerWindow {
         let breadcrumb_tabs = tabs.view.clone();
         let breadcrumb_header = header_controls.clone();
         let breadcrumb_preferences = preferences.clone();
+        let breadcrumb_sidebar = sidebar.clone();
         header_controls.set_navigation_handler(move |path| {
             if let Some(index) = selected_index(&breadcrumb_tabs, &breadcrumb_data) {
-                navigate_tab(index, path, &breadcrumb_data, &breadcrumb_tabs, &breadcrumb_header, &breadcrumb_preferences, true);
+                navigate_tab(index, path, &breadcrumb_data, &breadcrumb_tabs, &breadcrumb_header, &breadcrumb_preferences, &breadcrumb_sidebar, true);
             }
         });
 
@@ -275,9 +287,10 @@ impl ExplorerWindow {
         let entry_tabs = tabs.view.clone();
         let entry_header = header_controls.clone();
         let entry_preferences = preferences.clone();
+        let entry_sidebar = sidebar.clone();
         header_controls.connect_location_changed(move |path| {
             if let Some(index) = selected_index(&entry_tabs, &entry_data) {
-                navigate_tab(index, path, &entry_data, &entry_tabs, &entry_header, &entry_preferences, true);
+                navigate_tab(index, path, &entry_data, &entry_tabs, &entry_header, &entry_preferences, &entry_sidebar, true);
             }
         });
 
@@ -295,7 +308,7 @@ fn history_with(path: PathBuf) -> Rc<RefCell<NavigationHistory>> {
     history
 }
 
-fn wire_tab(page: TabPage, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, header: &HeaderControls, preferences: &Rc<RefCell<ViewPreferencesStore>>, app: &Application, clipboard: &Rc<RefCell<Option<FileClipboard>>>) {
+fn wire_tab(page: TabPage, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, header: &HeaderControls, preferences: &Rc<RefCell<ViewPreferencesStore>>, app: &Application, clipboard: &Rc<RefCell<Option<FileClipboard>>>, sidebar: &Sidebar) {
     let view = data.borrow().iter().find(|tab| tab.page == page).map(|tab| tab.view.clone())
         .expect("a tab page should have corresponding tab data");
     let options_data = data.clone();
@@ -311,11 +324,12 @@ fn wire_tab(page: TabPage, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, hea
     let navigation_tabs = tabs.clone();
     let navigation_header = header.clone();
     let navigation_preferences = preferences.clone();
+    let navigation_sidebar = sidebar.clone();
     let navigation_page = page.clone();
     view.set_navigation_handler(move |path| {
         let index = { navigation_data.borrow().iter().position(|tab| tab.page == navigation_page) };
         if let Some(index) = index {
-            navigate_tab(index, path, &navigation_data, &navigation_tabs, &navigation_header, &navigation_preferences, true);
+            navigate_tab(index, path, &navigation_data, &navigation_tabs, &navigation_header, &navigation_preferences, &navigation_sidebar, true);
         }
     });
 
@@ -323,10 +337,11 @@ fn wire_tab(page: TabPage, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, hea
     let uri_navigation_tabs = tabs.clone();
     let uri_navigation_header = header.clone();
     let uri_navigation_page = page.clone();
+    let uri_navigation_sidebar = sidebar.clone();
     view.set_uri_navigation_handler(move |uri| {
         let index = { uri_navigation_data.borrow().iter().position(|tab| tab.page == uri_navigation_page) };
         if let Some(index) = index {
-            navigate_uri_tab(index, uri, &uri_navigation_data, &uri_navigation_tabs, &uri_navigation_header);
+            navigate_uri_tab(index, uri, &uri_navigation_data, &uri_navigation_tabs, &uri_navigation_header, &uri_navigation_sidebar);
         }
     });
 
@@ -337,13 +352,14 @@ fn wire_tab(page: TabPage, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, hea
     let command_page = page.clone();
     let command_app = app.clone();
     let command_clipboard = clipboard.clone();
+    let command_sidebar = sidebar.clone();
     let command_view = view.clone();
     view.set_context_handler(move |target, command| {
         let path = target_path(&target);
         match command {
             ContextCommand::OpenInNewTab => {
                 if let Some(path) = path {
-                    add_tab_at(path, &command_data, &command_tabs, &command_header, &command_preferences, &command_app, &command_clipboard);
+                    add_tab_at(path, &command_data, &command_tabs, &command_header, &command_preferences, &command_app, &command_clipboard, &command_sidebar);
                 }
             }
             ContextCommand::OpenInNewWindow => {
@@ -464,14 +480,14 @@ fn target_path(target: &ContextTarget) -> Option<PathBuf> {
     }
 }
 
-fn add_tab_at(path: PathBuf, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, header: &HeaderControls, preferences: &Rc<RefCell<ViewPreferencesStore>>, app: &Application, clipboard: &Rc<RefCell<Option<FileClipboard>>>) {
+fn add_tab_at(path: PathBuf, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, header: &HeaderControls, preferences: &Rc<RefCell<ViewPreferencesStore>>, app: &Application, clipboard: &Rc<RefCell<Option<FileClipboard>>>, sidebar: &Sidebar) {
     let location = Rc::new(RefCell::new(path.clone()));
     let view = FileView::new(location.clone());
     view.set_options(preferences.borrow().options_for(&path, &[]));
     let page = tabs.append(&view.widget);
     page.set_title(&tab_title(&path));
     data.borrow_mut().push(TabData { view, location, history: history_with(path), page: page.clone() });
-    wire_tab(page.clone(), data, tabs, header, preferences, app, clipboard);
+    wire_tab(page.clone(), data, tabs, header, preferences, app, clipboard, sidebar);
     tabs.set_selected_page(&page);
 }
 
@@ -539,7 +555,7 @@ fn choose_destination(view: &FileView, source: PathBuf, move_source: bool) {
     chooser.show();
 }
 
-fn navigate_tab(index: usize, path: PathBuf, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, header: &HeaderControls, preferences: &Rc<RefCell<ViewPreferencesStore>>, record_history: bool) {
+fn navigate_tab(index: usize, path: PathBuf, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, header: &HeaderControls, preferences: &Rc<RefCell<ViewPreferencesStore>>, sidebar: &Sidebar, record_history: bool) {
     if !path.is_dir() || index >= data.borrow().len() { return; }
     let mut data_ref = data.borrow_mut();
     let tab = &mut data_ref[index];
@@ -550,16 +566,30 @@ fn navigate_tab(index: usize, path: PathBuf, data: &Rc<RefCell<Vec<TabData>>>, t
     tab.page.set_title(&tab_title(&path));
     if tabs.selected_page().as_ref().is_some_and(|page| *page == tab.page) {
         header.set_location(&path);
+        sidebar.set_active_path(&path);
     }
 }
 
-fn navigate_uri_tab(index: usize, uri: String, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, header: &HeaderControls) {
+fn navigate_uri_tab(index: usize, uri: String, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, header: &HeaderControls, sidebar: &Sidebar) {
     let mut data_ref = data.borrow_mut();
     let Some(tab) = data_ref.get_mut(index) else { return; };
     tab.view.set_uri(uri.clone());
     tab.page.set_title(&uri_title(&uri));
     if tabs.selected_page().as_ref().is_some_and(|page| *page == tab.page) {
         header.set_uri(&uri);
+        sidebar.clear_active_path();
+    }
+}
+
+fn sidebar_path_for_tab(path: &Path, is_remote: bool) -> Option<PathBuf> {
+    (!is_remote).then(|| path.to_path_buf())
+}
+
+fn sync_sidebar_for_tab(sidebar: &Sidebar, path: &Path, is_remote: bool) {
+    if let Some(path) = sidebar_path_for_tab(path, is_remote) {
+        sidebar.set_active_path(&path);
+    } else {
+        sidebar.clear_active_path();
     }
 }
 
@@ -760,7 +790,7 @@ mod tests {
     use gtk::prelude::{OrientableExt, PopoverExt, WidgetExt};
     use gtk::{Box as GtkBox, Label, Orientation, SearchEntry};
 
-    use super::{content_right_inset, file_toolbar, menu_button, matching_index, persist_options, remove_matching};
+    use super::{content_right_inset, file_toolbar, menu_button, matching_index, persist_options, remove_matching, sidebar_path_for_tab};
     use crate::core::{SortField, ViewOptions, ViewPreferencesStore};
 
     #[test]
@@ -792,6 +822,14 @@ mod tests {
     #[test]
     fn content_right_inset_matches_toolbar() {
         assert_eq!(content_right_inset(), 8);
+    }
+
+    #[test]
+    fn sidebar_selection_follows_the_selected_tabs_local_location() {
+        let documents = PathBuf::from("/home/user/Documents");
+
+        assert_eq!(sidebar_path_for_tab(&documents, false), Some(documents));
+        assert_eq!(sidebar_path_for_tab(PathBuf::from("/unused").as_path(), true), None);
     }
 
     #[test]
