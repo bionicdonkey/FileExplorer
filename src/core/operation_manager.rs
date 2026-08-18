@@ -56,9 +56,10 @@ impl OperationManager {
     fn submit_inner(&self, kind: OperationKind, sources: Vec<PathBuf>, destination: Option<PathBuf>, explicit_target: Option<PathBuf>) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         let cancel = Arc::new(AtomicBool::new(false));
-        // Copy reports per-file progress (a folder copy is one "source" but
-        // may contain many files); other kinds stay one unit per top-level item.
-        let total = if kind == OperationKind::Copy { FileOperations::count_units(&sources) } else { sources.len() };
+        // A placeholder; count_units() walks the whole tree and must not run
+        // on the caller's thread (the GTK main loop), or submitting a large
+        // folder copy freezes the app before the record even appears queued.
+        let total = sources.len().max(1);
         self.records.lock().unwrap().push(OperationRecord { id, kind, sources: sources.clone(), destination: destination.clone(), completed: 0, total, state: OperationState::Queued, finished_at: None });
         self.cancelled.lock().unwrap().push((id, cancel.clone()));
         let records = self.records.clone();
@@ -66,6 +67,8 @@ impl OperationManager {
         std::thread::spawn(move || {
             update(&records, id, |record| record.state = OperationState::Running);
             if kind == OperationKind::Copy {
+                let counted_total = FileOperations::count_units(&sources);
+                update(&records, id, |record| record.total = counted_total);
                 let progress_records = records.clone();
                 let mut completed = 0usize;
                 let mut on_unit = move || { completed += 1; update(&progress_records, id, |record| record.completed = completed); };
@@ -197,8 +200,43 @@ mod tests {
         let manager = OperationManager::default();
 
         let id = manager.submit(OperationKind::Copy, vec![source], Some(destination));
+        let record = wait_for_finished(&manager, id);
 
-        let total = manager.records().into_iter().find(|record| record.id == id).unwrap().total;
-        assert_eq!(total, 2);
+        assert_eq!(record.total, 2);
+        assert_eq!(record.state, OperationState::Completed);
+    }
+
+    #[test]
+    fn submitting_a_copy_does_not_block_on_counting_the_source_tree() {
+        // count_units() must run on the background thread, not the caller's:
+        // otherwise submitting a large folder copy blocks the GTK main loop
+        // (reported as the app "freezing" / a transfer that never starts).
+        // A few hundred files take long enough to count that a regression
+        // here would make this test visibly slow, without making a passing
+        // run flaky the way asserting on the placeholder value would.
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source");
+        let destination = directory.path().join("destination");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir(&destination).unwrap();
+        for index in 0..500 { fs::write(source.join(format!("file-{index}.txt")), "x").unwrap(); }
+        let manager = OperationManager::default();
+
+        let started = std::time::Instant::now();
+        let id = manager.submit(OperationKind::Copy, vec![source], Some(destination));
+        assert!(started.elapsed() < std::time::Duration::from_millis(200), "submit() should return immediately, not after walking the source tree");
+
+        wait_for_finished(&manager, id);
+    }
+
+    fn wait_for_finished(manager: &OperationManager, id: u64) -> OperationRecord {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Some(record) = manager.records().into_iter().find(|record| record.id == id) {
+                if record.finished_at.is_some() { return record; }
+            }
+            assert!(std::time::Instant::now() < deadline, "operation did not finish in time");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
     }
 }
