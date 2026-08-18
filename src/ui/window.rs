@@ -212,7 +212,8 @@ impl ExplorerWindow {
         let preferences_tabs = tabs.view.clone();
         let preferences_values = application_preferences.clone();
         let preferences_operations = operations.clone();
-        preferences_button.connect_clicked(move |_| open_preferences_tab(&preferences_tabs, preferences_values.clone(), preferences_operations.clone()));
+        let preferences_views = preferences.clone();
+        preferences_button.connect_clicked(move |_| open_preferences_tab(&preferences_tabs, preferences_values.clone(), preferences_operations.clone(), preferences_views.clone()));
 
         let body = GtkBox::new(Orientation::Vertical, 0);
         body.append(&header_controls.widget);
@@ -659,9 +660,9 @@ fn open_operations_tab(tabs: &TabView, manager: OperationManager) {
     tabs.set_selected_page(&page);
 }
 
-fn open_preferences_tab(tabs: &TabView, preferences: Rc<RefCell<ApplicationPreferences>>, operations: OperationManager) {
+fn open_preferences_tab(tabs: &TabView, preferences: Rc<RefCell<ApplicationPreferences>>, operations: OperationManager, views: Rc<RefCell<ViewPreferencesStore>>) {
     if let Some(page) = tabs.pages().iter::<TabPage>().filter_map(Result::ok).find(|page| page.title().as_str() == "Preferences") { tabs.set_selected_page(&page); return; }
-    let page = tabs.append(&preferences_page::build(preferences, operations));
+    let page = tabs.append(&preferences_page::build(preferences, operations, views));
     page.set_title("Preferences");
     tabs.set_selected_page(&page);
 }
