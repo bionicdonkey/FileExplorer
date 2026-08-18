@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::fs;
+use std::io;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -55,23 +56,36 @@ impl OperationManager {
     fn submit_inner(&self, kind: OperationKind, sources: Vec<PathBuf>, destination: Option<PathBuf>, explicit_target: Option<PathBuf>) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         let cancel = Arc::new(AtomicBool::new(false));
-        let total = sources.len();
+        // Copy reports per-file progress (a folder copy is one "source" but
+        // may contain many files); other kinds stay one unit per top-level item.
+        let total = if kind == OperationKind::Copy { FileOperations::count_units(&sources) } else { sources.len() };
         self.records.lock().unwrap().push(OperationRecord { id, kind, sources: sources.clone(), destination: destination.clone(), completed: 0, total, state: OperationState::Queued, finished_at: None });
         self.cancelled.lock().unwrap().push((id, cancel.clone()));
         let records = self.records.clone();
         let manager = self.clone();
         std::thread::spawn(move || {
             update(&records, id, |record| record.state = OperationState::Running);
+            if kind == OperationKind::Copy {
+                let progress_records = records.clone();
+                let mut completed = 0usize;
+                let mut on_unit = move || { completed += 1; update(&progress_records, id, |record| record.completed = completed); };
+                let result = match &explicit_target {
+                    Some(target) => sources.first().map_or(Ok(()), |source| FileOperations::copy_to_target_with_progress(source, target, &cancel, &mut on_unit)),
+                    None => FileOperations::copy_with_progress(&sources, destination.as_deref().expect("copy requires destination"), &cancel, &mut on_unit),
+                };
+                finish(&records, &manager, id, result);
+                return;
+            }
             for (index, source) in sources.iter().enumerate() {
                 if cancel.load(Ordering::Relaxed) {
                     update(&records, id, |record| { record.state = OperationState::Cancelled; record.finished_at = Some(now()); }); manager.persist_history();
                     return;
                 }
                 let result = match kind {
-                    OperationKind::Copy => match &explicit_target { Some(target) => FileOperations::copy_to_target(source, target), None => FileOperations::copy(&[source.clone()], destination.as_deref().expect("copy requires destination")) },
                     OperationKind::Move => match &explicit_target { Some(target) => FileOperations::move_to_target(source, target), None => FileOperations::move_to(&[source.clone()], destination.as_deref().expect("move requires destination")) },
                     OperationKind::Trash => FileOperations::move_to_trash(&[source.clone()]),
                     OperationKind::Delete => FileOperations::delete_permanently(&[source.clone()]),
+                    OperationKind::Copy => unreachable!("copy is handled above"),
                 };
                 match result {
                     Ok(()) => update(&records, id, |record| record.completed = index + 1),
@@ -107,6 +121,10 @@ impl OperationManager {
     pub fn records(&self) -> Vec<OperationRecord> { self.records.lock().unwrap().clone() }
     pub fn active_count(&self) -> usize { self.records().iter().filter(|record| matches!(record.state, OperationState::Queued | OperationState::Running)).count() }
     pub fn cancel(&self, id: u64) { if let Some((_, flag)) = self.cancelled.lock().unwrap().iter().find(|(known, _)| *known == id) { flag.store(true, Ordering::Relaxed); } }
+    /// Signals every currently active record to stop. Cancellation still
+    /// happens on each operation's own background thread, so callers that
+    /// need to close the window immediately should not wait on this.
+    pub fn cancel_all_active(&self) { for (_, flag) in self.cancelled.lock().unwrap().iter() { flag.store(true, Ordering::Relaxed); } }
     pub fn clear_completed(&self) { self.records.lock().unwrap().retain(|record| matches!(record.state, OperationState::Queued | OperationState::Running)); self.persist_history(); }
     fn prune_history(&self) { let cutoff = now() - self.retention_days.load(Ordering::Relaxed) as i64 * 86_400; self.records.lock().unwrap().retain(|record| matches!(record.state, OperationState::Queued | OperationState::Running) || record.finished_at.is_some_and(|finished| finished >= cutoff)); self.persist_history(); }
     fn persist_history(&self) { let Some(path) = &self.history_path else { return; }; let records: Vec<_> = self.records().into_iter().filter(|record| !matches!(record.state, OperationState::Queued | OperationState::Running)).collect(); if let Some(parent) = path.parent() { let _ = fs::create_dir_all(parent); } if let Ok(bytes) = serde_json::to_vec_pretty(&records) { let _ = fs::write(path.as_ref(), bytes); } }
@@ -116,6 +134,16 @@ fn now() -> i64 { SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default
 
 fn update(records: &Arc<Mutex<Vec<OperationRecord>>>, id: u64, change: impl FnOnce(&mut OperationRecord)) {
     if let Some(record) = records.lock().unwrap().iter_mut().find(|record| record.id == id) { change(record); }
+}
+
+fn finish(records: &Arc<Mutex<Vec<OperationRecord>>>, manager: &OperationManager, id: u64, result: io::Result<()>) {
+    let state = match result {
+        Ok(()) => OperationState::Completed,
+        Err(error) if error.kind() == io::ErrorKind::Interrupted => OperationState::Cancelled,
+        Err(error) => OperationState::Failed(error.to_string()),
+    };
+    update(records, id, |record| { record.state = state; record.finished_at = Some(now()); });
+    manager.persist_history();
 }
 
 #[cfg(test)]
@@ -141,5 +169,36 @@ mod tests {
             destination: None, completed: 0, total: 1, state: OperationState::Failed("No such file or directory".into()), finished_at: None,
         });
         assert!(manager.retry_elevated(1).is_err());
+    }
+
+    #[test]
+    fn cancel_all_active_signals_every_tracked_operation() {
+        let manager = OperationManager::default();
+        let flag_one = Arc::new(AtomicBool::new(false));
+        let flag_two = Arc::new(AtomicBool::new(false));
+        manager.cancelled.lock().unwrap().push((1, flag_one.clone()));
+        manager.cancelled.lock().unwrap().push((2, flag_two.clone()));
+
+        manager.cancel_all_active();
+
+        assert!(flag_one.load(Ordering::Relaxed));
+        assert!(flag_two.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn copying_a_folder_reports_progress_per_file_not_per_top_level_source() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source");
+        let destination = directory.path().join("destination");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::write(source.join("a.txt"), "1").unwrap();
+        fs::write(source.join("b.txt"), "2").unwrap();
+        let manager = OperationManager::default();
+
+        let id = manager.submit(OperationKind::Copy, vec![source], Some(destination));
+
+        let total = manager.records().into_iter().find(|record| record.id == id).unwrap().total;
+        assert_eq!(total, 2);
     }
 }

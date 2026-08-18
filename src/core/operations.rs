@@ -1,6 +1,7 @@
 use std::fs;
-use std::io;
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use gio::prelude::*;
 
@@ -48,6 +49,36 @@ impl FileOperations {
         } else {
             fs::copy(source, target).map(|_| ())
         }
+    }
+
+    /// Counts the copy "units" (files, plus one for each otherwise-empty
+    /// directory) under `sources`, for progress reporting. Always at least 1
+    /// so a progress fraction never divides by zero.
+    pub fn count_units(sources: &[PathBuf]) -> usize {
+        sources.iter().map(|source| count_units_for(source)).sum::<usize>().max(1)
+    }
+
+    /// Same behaviour as [`copy`], but checks `cancel` between files (not
+    /// just between whole top-level sources) and calls `on_unit` after each
+    /// file finishes, so a single large folder still reports progress and
+    /// responds to Cancel promptly instead of running as one opaque step.
+    pub fn copy_with_progress(sources: &[PathBuf], destination: &Path, cancel: &AtomicBool, on_unit: &mut dyn FnMut()) -> io::Result<()> {
+        for source in sources {
+            let target = destination.join(source.file_name().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "source has no filename")
+            })?);
+            copy_path_with_progress(source, &target, cancel, on_unit)?;
+        }
+        Ok(())
+    }
+
+    /// Same behaviour as [`copy_to_target`], but cancellable and reporting
+    /// per-file progress; see [`copy_with_progress`].
+    pub fn copy_to_target_with_progress(source: &Path, target: &Path, cancel: &AtomicBool, on_unit: &mut dyn FnMut()) -> io::Result<()> {
+        if target.exists() {
+            return Err(io::Error::new(io::ErrorKind::AlreadyExists, "destination already exists"));
+        }
+        copy_path_with_progress(source, target, cancel, on_unit)
     }
 
     pub fn move_to(sources: &[PathBuf], destination: &Path) -> io::Result<()> {
@@ -111,6 +142,7 @@ fn split_copy_suffix(stem: &str) -> (&str, u32) {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::FileOperations;
 
@@ -161,6 +193,74 @@ mod tests {
 
         assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
     }
+
+    #[test]
+    fn counting_units_treats_each_file_as_one_unit() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("a.txt"), "1").unwrap();
+        fs::create_dir(directory.path().join("nested")).unwrap();
+        fs::write(directory.path().join("nested/b.txt"), "2").unwrap();
+
+        assert_eq!(FileOperations::count_units(&[directory.path().to_path_buf()]), 2);
+    }
+
+    #[test]
+    fn counting_units_is_never_zero_for_an_empty_source_list() {
+        assert_eq!(FileOperations::count_units(&[]), 1);
+    }
+
+    #[test]
+    fn copy_with_progress_reports_one_unit_per_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source");
+        let destination = directory.path().join("destination");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::write(source.join("a.txt"), "1").unwrap();
+        fs::write(source.join("b.txt"), "2").unwrap();
+        let cancel = AtomicBool::new(false);
+        let mut units = 0;
+
+        FileOperations::copy_with_progress(&[source], &destination, &cancel, &mut || units += 1).unwrap();
+
+        assert_eq!(units, 2);
+        assert_eq!(fs::read_to_string(destination.join("source/a.txt")).unwrap(), "1");
+    }
+
+    #[test]
+    fn a_pre_cancelled_copy_stops_before_touching_the_filesystem() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.txt");
+        let target = directory.path().join("target.txt");
+        fs::write(&source, "contents").unwrap();
+        let cancel = AtomicBool::new(true);
+
+        let error = FileOperations::copy_to_target_with_progress(&source, &target, &cancel, &mut || {}).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn cancelling_between_files_stops_the_remaining_copy() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source");
+        let destination = directory.path().join("destination");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::write(source.join("a.txt"), "1").unwrap();
+        fs::write(source.join("b.txt"), "2").unwrap();
+        let cancel = AtomicBool::new(false);
+        let mut units = 0;
+
+        let error = FileOperations::copy_with_progress(&[source], &destination, &cancel, &mut || {
+            units += 1;
+            cancel.store(true, Ordering::Relaxed);
+        }).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
+        assert_eq!(units, 1);
+    }
 }
 
 fn copy_dir(source: &Path, destination: &Path) -> io::Result<()> {
@@ -173,6 +273,52 @@ fn copy_dir(source: &Path, destination: &Path) -> io::Result<()> {
         } else {
             fs::copy(entry.path(), target)?;
         }
+    }
+    Ok(())
+}
+
+fn count_units_for(path: &Path) -> usize {
+    if path.is_dir() {
+        let count = fs::read_dir(path).map(|entries| entries.flatten().map(|entry| count_units_for(&entry.path())).sum()).unwrap_or(0);
+        count.max(1)
+    } else {
+        1
+    }
+}
+
+fn cancelled_error() -> io::Error { io::Error::new(io::ErrorKind::Interrupted, "operation cancelled") }
+
+fn copy_path_with_progress(source: &Path, target: &Path, cancel: &AtomicBool, on_unit: &mut dyn FnMut()) -> io::Result<()> {
+    if cancel.load(Ordering::Relaxed) { return Err(cancelled_error()); }
+    if source.is_dir() {
+        fs::create_dir_all(target)?;
+        let mut had_children = false;
+        for entry in fs::read_dir(source)? {
+            let entry = entry?;
+            had_children = true;
+            copy_path_with_progress(&entry.path(), &target.join(entry.file_name()), cancel, on_unit)?;
+        }
+        if !had_children { on_unit(); }
+        Ok(())
+    } else {
+        copy_file_cancelable(source, target, cancel)?;
+        on_unit();
+        Ok(())
+    }
+}
+
+/// Copies in chunks (rather than one `fs::copy` syscall) so `cancel` is
+/// checked throughout a single large file's transfer, not just between
+/// files — otherwise Cancel has no effect until the current file finishes.
+fn copy_file_cancelable(source: &Path, target: &Path, cancel: &AtomicBool) -> io::Result<()> {
+    let mut reader = fs::File::open(source)?;
+    let mut writer = fs::File::create(target)?;
+    let mut buffer = [0u8; 1 << 20];
+    loop {
+        if cancel.load(Ordering::Relaxed) { return Err(cancelled_error()); }
+        let read = reader.read(&mut buffer)?;
+        if read == 0 { break; }
+        writer.write_all(&buffer[..read])?;
     }
     Ok(())
 }
