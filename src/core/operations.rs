@@ -2,6 +2,8 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use gio::prelude::*;
+
 pub struct FileOperations;
 
 impl FileOperations {
@@ -45,16 +47,17 @@ impl FileOperations {
     }
 
     pub fn move_to_trash(sources: &[PathBuf]) -> io::Result<()> {
-        let trash = std::env::var_os("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(".local/share"))
-            .join("Trash/files");
-        fs::create_dir_all(&trash)?;
         for source in sources {
-            let name = source.file_name().ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidInput, "source has no filename")
-            })?;
-            fs::rename(source, trash.join(name))?;
+            gio::File::for_path(source)
+                .trash(gio::Cancellable::NONE)
+                .map_err(|error| io::Error::new(io::ErrorKind::Other, error))?;
+        }
+        Ok(())
+    }
+
+    pub fn delete_permanently(sources: &[PathBuf]) -> io::Result<()> {
+        for source in sources {
+            if source.is_dir() { fs::remove_dir_all(source)?; } else { fs::remove_file(source)?; }
         }
         Ok(())
     }

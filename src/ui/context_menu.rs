@@ -26,11 +26,20 @@ pub enum ContextCommand {
     Paste,
     Rename,
     MoveToTrash,
+    DeletePermanently,
     Properties,
     Refresh,
     CloseTab,
     CloseOtherTabs,
     DuplicateTab,
+}
+
+pub fn delete_command(shift_held: bool) -> ContextCommand {
+    if shift_held { ContextCommand::DeletePermanently } else { ContextCommand::MoveToTrash }
+}
+
+pub fn delete_label(shift_held: bool) -> &'static str {
+    if shift_held { "Delete Permanently…" } else { "Move to Trash" }
 }
 
 pub fn item_commands(target: &ContextTarget) -> Vec<ContextCommand> {
@@ -87,5 +96,12 @@ mod tests {
         assert!(commands.contains(&ContextCommand::CopyFullPath));
         assert!(commands.contains(&ContextCommand::CopyTo));
         assert!(commands.contains(&ContextCommand::MoveTo));
+    }
+
+    #[test]
+    fn shift_changes_the_delete_action_label() {
+        assert_eq!(super::delete_label(false), "Move to Trash");
+        assert_eq!(super::delete_label(true), "Delete Permanently…");
+        assert_eq!(super::delete_command(true), ContextCommand::DeletePermanently);
     }
 }

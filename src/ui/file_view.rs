@@ -4,12 +4,12 @@ use std::rc::Rc;
 
 use gio::prelude::*;
 use gtk::prelude::*;
-use gtk::{Box as GtkBox, Button, ColumnView, ColumnViewColumn, CustomSorter, FlowBox, GestureClick, Image, Label, NoSelection, Orientation, Popover, ScrolledWindow, Separator, SignalListItemFactory, SortListModel};
+use gtk::{Box as GtkBox, Button, ColumnView, ColumnViewColumn, CustomSorter, FlowBox, GestureClick, Image, Label, Orientation, Popover, ScrolledWindow, Separator, SignalListItemFactory, SingleSelection, SortListModel};
 
 use crate::core::directory_model::DirectoryModel;
 use crate::core::file_item::FileItem;
 use crate::core::{GroupField, ListColumn, ListColumnLayout, SortDirection, SortField, ViewMode, ViewOptions};
-use crate::ui::context_menu::{item_commands, open_with_apps, ContextCommand, ContextTarget};
+use crate::ui::context_menu::{delete_command, item_commands, open_with_apps, ContextCommand, ContextTarget};
 
 #[derive(Clone)]
 enum ListRow {
@@ -27,6 +27,8 @@ pub struct FileView {
     on_context_command: Rc<RefCell<Option<Box<dyn Fn(ContextTarget, ContextCommand)>>>>,
     on_options_changed: Rc<RefCell<Option<Box<dyn Fn(ViewOptions)>>>>,
     options: Rc<RefCell<ViewOptions>>,
+    selected_target: Rc<RefCell<Option<ContextTarget>>>,
+    pending_cut: Rc<RefCell<Option<PathBuf>>>,
 }
 
 impl FileView {
@@ -34,12 +36,12 @@ impl FileView {
         let scroll = ScrolledWindow::new();
         scroll.set_vexpand(true);
         let on_navigate = Rc::new(RefCell::new(None));
-        let view = Self { widget: scroll, location, remote_uri: Rc::new(RefCell::new(None)), on_navigate, on_uri_navigate: Rc::new(RefCell::new(None)), on_context_command: Rc::new(RefCell::new(None)), on_options_changed: Rc::new(RefCell::new(None)), options: Rc::new(RefCell::new(ViewOptions::default())) };
+        let view = Self { widget: scroll, location, remote_uri: Rc::new(RefCell::new(None)), on_navigate, on_uri_navigate: Rc::new(RefCell::new(None)), on_context_command: Rc::new(RefCell::new(None)), on_options_changed: Rc::new(RefCell::new(None)), options: Rc::new(RefCell::new(ViewOptions::default())), selected_target: Rc::new(RefCell::new(None)), pending_cut: Rc::new(RefCell::new(None)) };
         let background_view = view.clone();
         let background = GestureClick::new();
         background.set_button(3);
         let background_parent = view.widget.clone();
-        background.connect_pressed(move |_, _, x, y| show_item_context_menu(&background_parent, x, y, ContextTarget::Background(background_view.location()), &background_view));
+        background.connect_pressed(move |gesture, _, x, y| show_item_context_menu(&background_parent, x, y, ContextTarget::Background(background_view.location()), &background_view, gesture.current_event_state().contains(gtk::gdk::ModifierType::SHIFT_MASK)));
         view.widget.add_controller(background);
         view.reload();
         view
@@ -48,11 +50,13 @@ impl FileView {
     pub fn set_location(&self, path: PathBuf) {
         *self.remote_uri.borrow_mut() = None;
         *self.location.borrow_mut() = path;
+        *self.selected_target.borrow_mut() = None;
         self.reload();
     }
 
     pub fn set_uri(&self, uri: String) {
         *self.remote_uri.borrow_mut() = Some(uri.clone());
+        *self.selected_target.borrow_mut() = None;
         self.widget.set_child(Some(&Label::new(Some("Connecting to remote location…"))));
 
         let location = gio::File::for_uri(&uri);
@@ -94,6 +98,14 @@ impl FileView {
     pub fn set_context_handler<F: Fn(ContextTarget, ContextCommand) + 'static>(&self, callback: F) {
         *self.on_context_command.borrow_mut() = Some(Box::new(callback));
     }
+
+    pub fn selected_target(&self) -> Option<ContextTarget> { self.selected_target.borrow().clone() }
+
+    pub fn dispatch_context_command(&self, target: ContextTarget, command: ContextCommand) {
+        if let Some(callback) = self.on_context_command.borrow().as_ref() { callback(target, command); }
+    }
+
+    pub fn set_pending_cut(&self, path: Option<PathBuf>) { *self.pending_cut.borrow_mut() = path; self.reload(); }
 
     pub fn set_options_changed_handler<F: Fn(ViewOptions) + 'static>(&self, callback: F) {
         *self.on_options_changed.borrow_mut() = Some(Box::new(callback));
@@ -151,9 +163,15 @@ impl FileView {
         let native_row_sorting = uses_native_row_sorting(options.group_field);
         let sorted = native_row_sorting.then(|| SortListModel::new(Some(store.clone()), None::<gtk::Sorter>));
         let selection = match &sorted {
-            Some(sorted) => NoSelection::new(Some(sorted.clone())),
-            None => NoSelection::new(Some(store)),
+            Some(sorted) => SingleSelection::new(Some(sorted.clone())),
+            None => SingleSelection::new(Some(store)),
         };
+        let selected_target = self.selected_target.clone();
+        selection.connect_selection_changed(move |model, position, _| {
+            *selected_target.borrow_mut() = model.item(position)
+                .and_downcast::<glib::BoxedAnyObject>()
+                .and_then(|object| file_target_from_row(&object.borrow::<ListRow>()));
+        });
         let view = ColumnView::new(Some(selection.clone()));
         view.set_reorderable(true);
         view.set_show_row_separators(true);
@@ -224,7 +242,14 @@ impl FileView {
         let activation_items = items.to_vec();
         let activation_view = self.clone();
         grid.connect_child_activated(move |_, child| { if let Some(item) = activation_items.get(child.index() as usize) { activate_item(&activation_view, item.clone()); } });
-        for item in items { let tile = GtkBox::new(Orientation::Vertical, layout.gap / 2); tile.add_css_class("icon-grid-tile"); tile.set_size_request(layout.tile_width, -1); tile.set_halign(gtk::Align::Center); tile.set_valign(gtk::Align::Start); tile.set_vexpand(false); tile.set_tooltip_text(Some(item.name())); tile.set_margin_top(layout.vertical_padding); tile.set_margin_bottom(layout.vertical_padding); let icon = item_image(item, options.thumbnails); icon.set_pixel_size(options.grid_size.icon_size()); tile.append(&icon); tile.append(&grid_tile_label(item.name(), layout.label_width_chars)); let target = if item.is_dir() { ContextTarget::Folder(item.path().to_path_buf()) } else { ContextTarget::File { path: item.path().to_path_buf(), content_type: item.content_type().to_string() } }; let view = self.clone(); let grid_context = grid.clone(); let menu_tile = tile.clone(); let gesture = GestureClick::new(); gesture.set_button(3); gesture.connect_pressed(move |gesture, _, x, y| { gesture.set_state(gtk::EventSequenceState::Claimed); if let Some(child) = menu_tile.parent().and_downcast::<gtk::FlowBoxChild>() { grid_context.select_child(&child); } show_item_context_menu(&menu_tile, x, y, target.clone(), &view) }); tile.add_controller(gesture); grid.append(&tile); }
+        let grid_selection_items = items.to_vec();
+        let selected_target = self.selected_target.clone();
+        grid.connect_selected_children_changed(move |grid| {
+            *selected_target.borrow_mut() = grid.selected_children().first()
+                .and_then(|child| grid_selection_items.get(child.index() as usize))
+                .map(file_target);
+        });
+        for item in items { let tile = GtkBox::new(Orientation::Vertical, layout.gap / 2); tile.add_css_class("icon-grid-tile"); if self.pending_cut.borrow().as_ref().is_some_and(|path| path == item.path()) { tile.add_css_class("cut-pending"); } tile.set_size_request(layout.tile_width, -1); tile.set_halign(gtk::Align::Center); tile.set_valign(gtk::Align::Start); tile.set_vexpand(false); tile.set_tooltip_text(Some(item.name())); tile.set_margin_top(layout.vertical_padding); tile.set_margin_bottom(layout.vertical_padding); let icon = item_image(item, options.thumbnails); icon.set_pixel_size(options.grid_size.icon_size()); tile.append(&icon); tile.append(&grid_tile_label(item.name(), layout.label_width_chars)); let target = file_target(item); let view = self.clone(); let grid_context = grid.clone(); let menu_tile = tile.clone(); let selected_target = self.selected_target.clone(); let gesture = GestureClick::new(); gesture.set_button(3); gesture.connect_pressed(move |gesture, _, x, y| { gesture.set_state(gtk::EventSequenceState::Claimed); *selected_target.borrow_mut() = Some(target.clone()); if let Some(child) = menu_tile.parent().and_downcast::<gtk::FlowBoxChild>() { grid_context.select_child(&child); } show_item_context_menu(&menu_tile, x, y, target.clone(), &view, gesture.current_event_state().contains(gtk::gdk::ModifierType::SHIFT_MASK)) }); tile.add_controller(gesture); grid.append(&tile); }
         grid
     }
 
@@ -271,7 +296,7 @@ fn grid_tile_label(name: &str, width_chars: i32) -> Label {
     label
 }
 
-fn show_item_context_menu(parent: &impl IsA<gtk::Widget>, x: f64, y: f64, target: ContextTarget, view: &FileView) {
+fn show_item_context_menu(parent: &impl IsA<gtk::Widget>, x: f64, y: f64, target: ContextTarget, view: &FileView, shift_held: bool) {
     let popover = Popover::new();
     popover.set_parent(parent);
     popover.set_autohide(true);
@@ -284,23 +309,24 @@ fn show_item_context_menu(parent: &impl IsA<gtk::Widget>, x: f64, y: f64, target
             continue;
         }
         if command == ContextCommand::Copy {
-            menu.append(&command_submenu("Copy ›", &target, view, &[ContextCommand::Copy, ContextCommand::CopyFilename, ContextCommand::CopyFullPath, ContextCommand::CopyTo]));
+            menu.append(&command_submenu("Copy ›", &target, view, &[ContextCommand::Copy, ContextCommand::CopyFilename, ContextCommand::CopyFullPath, ContextCommand::CopyTo], popover.clone()));
             continue;
         }
         if command == ContextCommand::Cut {
-            menu.append(&command_submenu("Move ›", &target, view, &[ContextCommand::Cut, ContextCommand::MoveTo]));
+            menu.append(&command_submenu("Move ›", &target, view, &[ContextCommand::Cut, ContextCommand::MoveTo], popover.clone()));
             continue;
         }
         if matches!(command, ContextCommand::CopyFilename | ContextCommand::CopyFullPath | ContextCommand::CopyTo | ContextCommand::MoveTo) {
             continue;
         }
-        menu.append(&command_button(context_command_label(command), target.clone(), view.clone(), command, Some(popover.clone())));
+        let actual_command = if command == ContextCommand::MoveToTrash { delete_command(shift_held) } else { command };
+        menu.append(&command_button(context_command_label(actual_command), target.clone(), view.clone(), actual_command, Some(popover.clone())));
     }
     popover.set_child(Some(&menu));
     popover.popup();
 }
 
-fn command_submenu(label: &str, target: &ContextTarget, view: &FileView, commands: &[ContextCommand]) -> Button {
+fn command_submenu(label: &str, target: &ContextTarget, view: &FileView, commands: &[ContextCommand], root: Popover) -> Button {
     let button = Button::with_label(label);
     let submenu_parent = button.clone();
     let target = target.clone();
@@ -310,7 +336,7 @@ fn command_submenu(label: &str, target: &ContextTarget, view: &FileView, command
         let menu = GtkBox::new(Orientation::Vertical, 2);
         menu.set_margin_top(6); menu.set_margin_bottom(6);
         for command in &commands {
-            menu.append(&command_button(context_command_label(*command), target.clone(), view.clone(), *command, None));
+            menu.append(&command_button(context_command_label(*command), target.clone(), view.clone(), *command, Some(root.clone())));
         }
         show_submenu(&submenu_parent, &menu);
     });
@@ -386,7 +412,7 @@ fn command_button(label: &str, target: ContextTarget, view: FileView, command: C
 }
 
 fn context_command_label(command: ContextCommand) -> &'static str {
-    match command { ContextCommand::Open => "Open", ContextCommand::OpenInNewTab => "Open in New Tab", ContextCommand::OpenInNewWindow => "Open in New Window", ContextCommand::OpenInTerminal => "Open in Terminal", ContextCommand::Cut => "Cut", ContextCommand::Copy => "Copy", ContextCommand::CopyFilename => "Copy Filename", ContextCommand::CopyFullPath => "Copy Full Path", ContextCommand::CopyTo => "Copy To…", ContextCommand::MoveTo => "Move To…", ContextCommand::Rename => "Rename", ContextCommand::MoveToTrash => "Move to Trash", ContextCommand::Properties => "Properties", ContextCommand::NewFolder => "New Folder", ContextCommand::Paste => "Paste", ContextCommand::Refresh => "Refresh", ContextCommand::CloseTab => "Close Tab", ContextCommand::CloseOtherTabs => "Close Other Tabs", ContextCommand::DuplicateTab => "Duplicate Tab", ContextCommand::OpenWith => "Open With" }
+    match command { ContextCommand::Open => "Open", ContextCommand::OpenInNewTab => "Open in New Tab", ContextCommand::OpenInNewWindow => "Open in New Window", ContextCommand::OpenInTerminal => "Open in Terminal", ContextCommand::Cut => "Cut", ContextCommand::Copy => "Copy", ContextCommand::CopyFilename => "Copy Filename", ContextCommand::CopyFullPath => "Copy Full Path", ContextCommand::CopyTo => "Copy To…", ContextCommand::MoveTo => "Move To…", ContextCommand::Rename => "Rename", ContextCommand::MoveToTrash => "Move to Trash", ContextCommand::DeletePermanently => "Delete Permanently…", ContextCommand::Properties => "Properties", ContextCommand::NewFolder => "New Folder", ContextCommand::Paste => "Paste", ContextCommand::Refresh => "Refresh", ContextCommand::CloseTab => "Close Tab", ContextCommand::CloseOtherTabs => "Close Other Tabs", ContextCommand::DuplicateTab => "Duplicate Tab", ContextCommand::OpenWith => "Open With" }
 }
 
 fn column_title(column: ListColumn) -> &'static str {
@@ -464,10 +490,11 @@ fn column_factory(column: ListColumn, thumbnails: bool, view: FileView) -> Signa
                 let Some(object) = context_item.item().and_downcast::<glib::BoxedAnyObject>() else { return; };
                 let row = object.borrow::<ListRow>();
                 let ListRow::File(item) = &*row else { return; };
-                let target = if item.is_dir() { ContextTarget::Folder(item.path().to_path_buf()) } else { ContextTarget::File { path: item.path().to_path_buf(), content_type: item.content_type().to_string() } };
+                let target = file_target(item);
                 let Some(parent) = context_item.child() else { return; };
                 gesture.set_state(gtk::EventSequenceState::Claimed);
-                show_item_context_menu(&parent, x, y, target, &context_view);
+                *context_view.selected_target.borrow_mut() = Some(target.clone());
+                show_item_context_menu(&parent, x, y, target, &context_view, gesture.current_event_state().contains(gtk::gdk::ModifierType::SHIFT_MASK));
             });
             line.add_controller(gesture);
             list_item.set_child(Some(&line));
@@ -546,6 +573,15 @@ fn compare_items(left: &FileItem, right: &FileItem, column: ListColumn) -> gtk::
         std::cmp::Ordering::Equal => gtk::Ordering::Equal,
         std::cmp::Ordering::Greater => gtk::Ordering::Larger,
     }
+}
+
+fn file_target(item: &FileItem) -> ContextTarget {
+    if item.is_dir() { ContextTarget::Folder(item.path().to_path_buf()) }
+    else { ContextTarget::File { path: item.path().to_path_buf(), content_type: item.content_type().to_string() } }
+}
+
+fn file_target_from_row(row: &ListRow) -> Option<ContextTarget> {
+    match row { ListRow::File(item) => Some(file_target(item)), ListRow::Group(_) => None }
 }
 
 #[cfg(test)]

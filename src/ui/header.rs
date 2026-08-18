@@ -15,6 +15,14 @@ pub enum NavigationAction {
     Refresh,
 }
 
+#[derive(Clone, Copy)]
+pub enum FileAction {
+    Cut,
+    Copy,
+    Paste,
+    MoveToTrash,
+}
+
 #[derive(Clone)]
 pub struct HeaderControls {
     pub widget: GtkBox,
@@ -26,6 +34,7 @@ pub struct HeaderControls {
     forward: Button,
     up: Button,
     refresh: Button,
+    on_file_action: Rc<RefCell<Option<Box<dyn Fn(FileAction)>>>>,
 }
 
 impl HeaderControls {
@@ -81,19 +90,31 @@ impl HeaderControls {
         });
         breadcrumbs.add_controller(click);
 
+        let on_file_action: Rc<RefCell<Option<Box<dyn Fn(FileAction)>>>> = Rc::new(RefCell::new(None));
         let actions = GtkBox::new(Orientation::Horizontal, 0);
         actions.add_css_class("linked");
-        for (label, icon) in [("New", "document-new-symbolic"), ("Cut", "edit-cut-symbolic"), ("Copy", "edit-copy-symbolic"), ("Paste", "edit-paste-symbolic"), ("Move to Trash", "user-trash-symbolic")] {
+        for (action, label, icon) in [
+            (FileAction::Cut, "Cut", "edit-cut-symbolic"),
+            (FileAction::Copy, "Copy", "edit-copy-symbolic"),
+            (FileAction::Paste, "Paste", "edit-paste-symbolic"),
+            (FileAction::MoveToTrash, "Move to Trash", "user-trash-symbolic"),
+        ] {
             let button = Button::from_icon_name(icon);
             button.set_tooltip_text(Some(label));
             button.set_icon_name(icon);
             button.add_css_class("flat");
+            let callback = on_file_action.clone();
+            button.connect_clicked(move |_| {
+                if let Some(callback) = callback.borrow().as_ref() {
+                    callback(action);
+                }
+            });
             actions.append(&button);
         }
         widget.append(&actions);
 
         let on_navigate = Rc::new(RefCell::new(None));
-        let controls = Self { widget, entry, breadcrumbs, stack, on_navigate, back, forward, up, refresh };
+        let controls = Self { widget, entry, breadcrumbs, stack, on_navigate, back, forward, up, refresh, on_file_action };
         controls.render_breadcrumbs(&location.borrow());
         controls
     }
@@ -122,6 +143,10 @@ impl HeaderControls {
             let callback = callback.clone();
             button.connect_clicked(move |_| callback(action));
         }
+    }
+
+    pub fn connect_file_action<F: Fn(FileAction) + 'static>(&self, callback: F) {
+        *self.on_file_action.borrow_mut() = Some(Box::new(callback));
     }
 
     pub fn set_location(&self, path: &std::path::Path) {

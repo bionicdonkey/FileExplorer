@@ -9,12 +9,14 @@ use gtk::{Align, Box as GtkBox, Button, CheckButton, Entry, Label, MenuButton, O
 use crate::core::location::Location;
 use crate::core::navigation::NavigationHistory;
 use crate::core::operations::FileOperations;
+use crate::core::{OperationKind, OperationManager};
 use crate::core::{GridSize, GroupField, SidebarModel, SidebarPreferences, SortDirection, SortField, ViewMode, ViewOptions, ViewPreferencesStore};
 use crate::ui::context_menu::{ContextCommand, ContextTarget};
 use crate::ui::file_view::FileView;
 use crate::ui::properties_dialog::PropertiesDialog;
-use crate::ui::header::{HeaderControls, NavigationAction};
+use crate::ui::header::{FileAction, HeaderControls, NavigationAction};
 use crate::ui::sidebar::{Sidebar, SidebarAction};
+use crate::ui::operations_page;
 use crate::ui::tab_layout::{calculate_tab_layout, TabLayoutInput};
 use crate::ui::tabs::TabStrip;
 
@@ -29,7 +31,7 @@ struct TabData {
 enum ClipboardOperation { Copy, Move }
 
 #[derive(Clone)]
-struct FileClipboard { path: PathBuf, operation: ClipboardOperation }
+struct FileClipboard { path: PathBuf, operation: ClipboardOperation, source_view: FileView }
 
 pub struct ExplorerWindow {
     window: ApplicationWindow,
@@ -72,6 +74,7 @@ impl ExplorerWindow {
         let tabs_data: Rc<RefCell<Vec<TabData>>> = Rc::new(RefCell::new(Vec::new()));
         let preferences = Rc::new(RefCell::new(ViewPreferencesStore::load_default().unwrap_or_else(|_| ViewPreferencesStore::in_memory())));
         let clipboard: Rc<RefCell<Option<FileClipboard>>> = Rc::new(RefCell::new(None));
+        let operations = OperationManager::default();
         let first_view = FileView::new(initial_location.clone());
         first_view.set_options(preferences.borrow().options_for(&initial, &[]));
         let first_page = tabs.view.append(&first_view.widget);
@@ -101,6 +104,7 @@ impl ExplorerWindow {
         let sidebar_context_preferences = preferences.clone();
         let sidebar_context_app = app.clone();
         let sidebar_context_clipboard = clipboard.clone();
+        let sidebar_context_operations = operations.clone();
         let sidebar_window = window.clone();
         let sidebar_model_actions = sidebar_model.clone();
         let sidebar_holder_actions = sidebar_holder.clone();
@@ -113,7 +117,7 @@ impl ExplorerWindow {
             }
             SidebarAction::OpenInNewTab(path) => {
                 if let Some(sidebar) = sidebar_holder_actions.borrow().clone() {
-                    add_tab_at(path, &sidebar_context_data, &sidebar_context_tabs, &sidebar_context_header, &sidebar_context_preferences, &sidebar_context_app, &sidebar_context_clipboard, &sidebar);
+                    add_tab_at(path, &sidebar_context_data, &sidebar_context_tabs, &sidebar_context_header, &sidebar_context_preferences, &sidebar_context_app, &sidebar_context_clipboard, &sidebar, &sidebar_context_operations);
                 }
             }
             SidebarAction::OpenInNewWindow(path) => ExplorerWindow::new_at(&sidebar_context_app, path).present(),
@@ -158,8 +162,10 @@ impl ExplorerWindow {
                     });
                 }
             }
+            SidebarAction::OpenOperations => open_operations_tab(&sidebar_context_tabs, sidebar_context_operations.clone()),
         });
         sidebar.set_active_path(&initial);
+        sidebar.set_operation_manager(operations.clone());
         *sidebar_holder.borrow_mut() = Some(sidebar.clone());
 
         let content = Paned::new(Orientation::Horizontal);
@@ -188,7 +194,39 @@ impl ExplorerWindow {
         toolbar.set_content(Some(&body));
         window.set_content(Some(&toolbar));
 
-        wire_tab(first_page.clone(), &tabs_data, &tabs.view, &header_controls, &preferences, app, &clipboard, &sidebar);
+        wire_tab(first_page.clone(), &tabs_data, &tabs.view, &header_controls, &preferences, app, &clipboard, &sidebar, &operations);
+
+        let file_action_data = tabs_data.clone();
+        let file_action_tabs = tabs.view.clone();
+        header_controls.connect_file_action(move |action| {
+            dispatch_active_file_command(context_command_for_file_action(action), &file_action_data, &file_action_tabs);
+        });
+
+        let shortcut_data = tabs_data.clone();
+        let shortcut_tabs = tabs.view.clone();
+        let shortcuts = gtk::EventControllerKey::new();
+        shortcuts.connect_key_pressed(move |_, key, _, modifiers| {
+            let command = shortcut_command(
+                key.to_unicode().map(|key| key.to_ascii_lowercase()),
+                key == gtk::gdk::Key::Delete,
+                modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK),
+                modifiers.contains(gtk::gdk::ModifierType::SHIFT_MASK),
+            );
+            if let Some(command) = command {
+                dispatch_active_file_command(command, &shortcut_data, &shortcut_tabs);
+                glib::Propagation::Stop
+            } else {
+                glib::Propagation::Proceed
+            }
+        });
+        window.add_controller(shortcuts);
+
+        let close_operations = operations.clone();
+        window.connect_close_request(move |window| {
+            if close_operations.active_count() == 0 { return glib::Propagation::Proceed; }
+            show_close_operations_dialog(window, close_operations.clone());
+            glib::Propagation::Stop
+        });
 
         let new_data = tabs_data.clone();
         let new_tabs = tabs.view.clone();
@@ -196,6 +234,7 @@ impl ExplorerWindow {
         let new_preferences = preferences.clone();
         let new_app = app.clone();
         let new_clipboard = clipboard.clone();
+        let new_operations = operations.clone();
         let new_sidebar = sidebar.clone();
         new_tab.connect_clicked(move |_| {
             let path = Location::home().path().to_path_buf();
@@ -205,7 +244,7 @@ impl ExplorerWindow {
             let page = new_tabs.append(&view.widget);
             page.set_title(&tab_title(&path));
             new_data.borrow_mut().push(TabData { view, location, history: history_with(path), page: page.clone() });
-            wire_tab(page.clone(), &new_data, &new_tabs, &new_header, &new_preferences, &new_app, &new_clipboard, &new_sidebar);
+            wire_tab(page.clone(), &new_data, &new_tabs, &new_header, &new_preferences, &new_app, &new_clipboard, &new_sidebar, &new_operations);
             new_tabs.set_selected_page(&page);
         });
 
@@ -225,6 +264,7 @@ impl ExplorerWindow {
         let tab_context_preferences = preferences.clone();
         let tab_context_app = app.clone();
         let tab_context_clipboard = clipboard.clone();
+        let tab_context_operations = operations.clone();
         let tab_context_sidebar = sidebar.clone();
         tabs.set_context_handler(move |command| {
             let Some(page) = tab_context_view.selected_page() else { return; };
@@ -233,7 +273,7 @@ impl ExplorerWindow {
                 ContextCommand::CloseOtherTabs => tab_context_view.close_other_pages(&page),
                 ContextCommand::DuplicateTab => {
                     let path = tab_context_data.borrow().iter().find(|tab| tab.page == page).map(|tab| tab.location.borrow().clone());
-                    if let Some(path) = path { add_tab_at(path, &tab_context_data, &tab_context_view, &tab_context_header, &tab_context_preferences, &tab_context_app, &tab_context_clipboard, &tab_context_sidebar); }
+                    if let Some(path) = path { add_tab_at(path, &tab_context_data, &tab_context_view, &tab_context_header, &tab_context_preferences, &tab_context_app, &tab_context_clipboard, &tab_context_sidebar, &tab_context_operations); }
                 }
                 _ => {}
             }
@@ -308,7 +348,7 @@ fn history_with(path: PathBuf) -> Rc<RefCell<NavigationHistory>> {
     history
 }
 
-fn wire_tab(page: TabPage, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, header: &HeaderControls, preferences: &Rc<RefCell<ViewPreferencesStore>>, app: &Application, clipboard: &Rc<RefCell<Option<FileClipboard>>>, sidebar: &Sidebar) {
+fn wire_tab(page: TabPage, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, header: &HeaderControls, preferences: &Rc<RefCell<ViewPreferencesStore>>, app: &Application, clipboard: &Rc<RefCell<Option<FileClipboard>>>, sidebar: &Sidebar, operations: &OperationManager) {
     let view = data.borrow().iter().find(|tab| tab.page == page).map(|tab| tab.view.clone())
         .expect("a tab page should have corresponding tab data");
     let options_data = data.clone();
@@ -353,13 +393,14 @@ fn wire_tab(page: TabPage, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, hea
     let command_app = app.clone();
     let command_clipboard = clipboard.clone();
     let command_sidebar = sidebar.clone();
+    let command_operations = operations.clone();
     let command_view = view.clone();
     view.set_context_handler(move |target, command| {
         let path = target_path(&target);
         match command {
             ContextCommand::OpenInNewTab => {
                 if let Some(path) = path {
-                    add_tab_at(path, &command_data, &command_tabs, &command_header, &command_preferences, &command_app, &command_clipboard, &command_sidebar);
+                    add_tab_at(path, &command_data, &command_tabs, &command_header, &command_preferences, &command_app, &command_clipboard, &command_sidebar, &command_operations);
                 }
             }
             ContextCommand::OpenInNewWindow => {
@@ -370,7 +411,8 @@ fn wire_tab(page: TabPage, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, hea
             }
             ContextCommand::Copy | ContextCommand::Cut => {
                 if let Some(path) = path {
-                    *command_clipboard.borrow_mut() = Some(FileClipboard { path, operation: if command == ContextCommand::Copy { ClipboardOperation::Copy } else { ClipboardOperation::Move } });
+                    if command == ContextCommand::Cut { command_view.set_pending_cut(Some(path.clone())); }
+                    *command_clipboard.borrow_mut() = Some(FileClipboard { path, operation: if command == ContextCommand::Copy { ClipboardOperation::Copy } else { ClipboardOperation::Move }, source_view: command_view.clone() });
                 }
             }
             ContextCommand::CopyFilename => {
@@ -380,13 +422,15 @@ fn wire_tab(page: TabPage, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, hea
                 if let Some(path) = path { copy_text(&command_view, &path.display().to_string()); }
             }
             ContextCommand::CopyTo | ContextCommand::MoveTo => {
-                if let Some(path) = path { choose_destination(&command_view, path, command == ContextCommand::MoveTo); }
+                if let Some(path) = path { choose_destination(&command_view, path, command == ContextCommand::MoveTo, command_operations.clone()); }
             }
             ContextCommand::Paste => {
                 let destination = command_data.borrow().iter().find(|tab| tab.page == command_page).map(|tab| tab.location.borrow().clone());
                 if let (Some(clipboard), Some(destination)) = (command_clipboard.borrow().clone(), destination) {
-                    let _ = match clipboard.operation { ClipboardOperation::Copy => FileOperations::copy(&[clipboard.path], &destination), ClipboardOperation::Move => FileOperations::move_to(&[clipboard.path], &destination) };
-                    command_view.set_location(destination);
+                    let kind = match clipboard.operation { ClipboardOperation::Copy => OperationKind::Copy, ClipboardOperation::Move => OperationKind::Move };
+                    command_operations.submit(kind, vec![clipboard.path], Some(destination.clone()));
+                    if matches!(clipboard.operation, ClipboardOperation::Move) { clipboard.source_view.set_pending_cut(None); }
+                    schedule_refresh(command_view.clone(), command_operations.clone());
                 }
             }
             ContextCommand::NewFolder => {
@@ -404,8 +448,12 @@ fn wire_tab(page: TabPage, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, hea
             }
             ContextCommand::MoveToTrash => {
                 if let Some(path) = path {
-                    if FileOperations::move_to_trash(&[path]).is_ok() { command_view.set_location(command_view.location()); }
+                    command_operations.submit(OperationKind::Trash, vec![path], None);
+                    schedule_refresh(command_view.clone(), command_operations.clone());
                 }
+            }
+            ContextCommand::DeletePermanently => {
+                if let Some(path) = path { confirm_permanent_delete(&command_view, path, command_operations.clone()); }
             }
             ContextCommand::Properties => {
                 if let Some(path) = path { let refresh = command_view.clone(); PropertiesDialog::present(command_view.widget.root().and_downcast_ref::<gtk::Window>(), path, move || refresh.set_location(refresh.location())); }
@@ -422,9 +470,11 @@ where F: Fn(String) -> std::io::Result<()> + 'static, S: Fn() + 'static {
     let dialog = gtk::Dialog::new();
     dialog.set_title(Some(title));
     dialog.set_modal(true);
+    dialog.set_resizable(true);
+    dialog.add_css_class("explorer-dialog");
     if let Some(window) = view.widget.root().and_downcast::<gtk::Window>() { dialog.set_transient_for(Some(&window)); }
-    dialog.add_button("Cancel", gtk::ResponseType::Cancel);
     dialog.add_button(accept_label, gtk::ResponseType::Accept);
+    dialog.add_button("Cancel", gtk::ResponseType::Cancel);
     let content = dialog.content_area();
     content.set_spacing(8);
     content.set_margin_top(12); content.set_margin_bottom(12); content.set_margin_start(12); content.set_margin_end(12);
@@ -480,14 +530,47 @@ fn target_path(target: &ContextTarget) -> Option<PathBuf> {
     }
 }
 
-fn add_tab_at(path: PathBuf, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, header: &HeaderControls, preferences: &Rc<RefCell<ViewPreferencesStore>>, app: &Application, clipboard: &Rc<RefCell<Option<FileClipboard>>>, sidebar: &Sidebar) {
+fn context_command_for_file_action(action: FileAction) -> ContextCommand {
+    match action {
+        FileAction::Cut => ContextCommand::Cut,
+        FileAction::Copy => ContextCommand::Copy,
+        FileAction::Paste => ContextCommand::Paste,
+        FileAction::MoveToTrash => ContextCommand::MoveToTrash,
+    }
+}
+
+fn shortcut_command(key: Option<char>, delete: bool, control: bool, shift: bool) -> Option<ContextCommand> {
+    if delete { return Some(if shift { ContextCommand::DeletePermanently } else { ContextCommand::MoveToTrash }); }
+    control.then(|| match key {
+        Some('x') => Some(ContextCommand::Cut),
+        Some('c') => Some(ContextCommand::Copy),
+        Some('v') => Some(ContextCommand::Paste),
+        _ => None,
+    }).flatten()
+}
+
+fn dispatch_active_file_command(command: ContextCommand, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView) {
+    let Some(index) = selected_index(tabs, data) else { return; };
+    let view = data.borrow()[index].view.clone();
+    let target = if command == ContextCommand::Paste { Some(ContextTarget::Background(view.location())) } else { view.selected_target() };
+    if let Some(target) = target { view.dispatch_context_command(target, command); }
+}
+
+fn add_tab_at(path: PathBuf, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, header: &HeaderControls, preferences: &Rc<RefCell<ViewPreferencesStore>>, app: &Application, clipboard: &Rc<RefCell<Option<FileClipboard>>>, sidebar: &Sidebar, operations: &OperationManager) {
     let location = Rc::new(RefCell::new(path.clone()));
     let view = FileView::new(location.clone());
     view.set_options(preferences.borrow().options_for(&path, &[]));
     let page = tabs.append(&view.widget);
     page.set_title(&tab_title(&path));
     data.borrow_mut().push(TabData { view, location, history: history_with(path), page: page.clone() });
-    wire_tab(page.clone(), data, tabs, header, preferences, app, clipboard, sidebar);
+    wire_tab(page.clone(), data, tabs, header, preferences, app, clipboard, sidebar, operations);
+    tabs.set_selected_page(&page);
+}
+
+fn open_operations_tab(tabs: &TabView, manager: OperationManager) {
+    if let Some(page) = tabs.pages().iter::<TabPage>().filter_map(Result::ok).find(|page| page.title().as_str() == "Operations") { tabs.set_selected_page(&page); return; }
+    let page = tabs.append(&operations_page::build(manager));
+    page.set_title("Operations");
     tabs.set_selected_page(&page);
 }
 
@@ -540,19 +623,57 @@ fn show_network_location_dialog(parent: &ApplicationWindow, model: Rc<RefCell<Si
 }
 
 #[allow(deprecated)]
-fn choose_destination(view: &FileView, source: PathBuf, move_source: bool) {
+fn choose_destination(view: &FileView, source: PathBuf, move_source: bool, operations: OperationManager) {
     let chooser = gtk::FileChooserNative::new(Some(if move_source { "Move To" } else { "Copy To" }), view.widget.root().and_downcast_ref::<gtk::Window>(), gtk::FileChooserAction::SelectFolder, Some(if move_source { "Move" } else { "Copy" }), Some("Cancel"));
     let reload = view.clone();
     chooser.connect_response(move |chooser, response| {
         if response == gtk::ResponseType::Accept {
             if let Some(destination) = chooser.file().and_then(|file| file.path()) {
-                let _ = if move_source { FileOperations::move_to(&[source.clone()], &destination) } else { FileOperations::copy(&[source.clone()], &destination) };
-                reload.set_location(reload.location());
+                operations.submit(if move_source { OperationKind::Move } else { OperationKind::Copy }, vec![source.clone()], Some(destination));
+                schedule_refresh(reload.clone(), operations.clone());
             }
         }
         chooser.destroy();
     });
     chooser.show();
+}
+
+fn schedule_refresh(view: FileView, operations: OperationManager) {
+    glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
+        if operations.active_count() == 0 { view.set_location(view.location()); glib::ControlFlow::Break }
+        else { glib::ControlFlow::Continue }
+    });
+}
+
+#[allow(deprecated)]
+fn confirm_permanent_delete(view: &FileView, path: PathBuf, operations: OperationManager) {
+    let dialog = gtk::Dialog::new();
+    dialog.set_title(Some("Delete permanently?"));
+    dialog.set_modal(true);
+    dialog.set_resizable(false);
+    if let Some(parent) = view.widget.root().and_downcast::<gtk::Window>() { dialog.set_transient_for(Some(&parent)); }
+    dialog.add_css_class("explorer-dialog");
+    dialog.add_button("Delete Permanently", gtk::ResponseType::Accept);
+    dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+    let text = Label::new(Some(&format!("“{}” will be permanently deleted. This cannot be undone.", path.file_name().and_then(|name| name.to_str()).unwrap_or("This item"))));
+    text.set_wrap(true); text.set_xalign(0.0); text.set_margin_top(12); text.set_margin_bottom(12); text.set_margin_start(12); text.set_margin_end(12);
+    dialog.content_area().append(&text);
+    let reload = view.clone();
+    dialog.connect_response(move |dialog, response| { if response == gtk::ResponseType::Accept { operations.submit(OperationKind::Delete, vec![path.clone()], None); schedule_refresh(reload.clone(), operations.clone()); } dialog.close(); });
+    dialog.present();
+}
+
+#[allow(deprecated)]
+fn show_close_operations_dialog(parent: &ApplicationWindow, operations: OperationManager) {
+    let dialog = gtk::Dialog::new();
+    dialog.set_title(Some("File operations are still running")); dialog.set_modal(true); dialog.set_transient_for(Some(parent)); dialog.add_css_class("explorer-dialog");
+    dialog.add_button("Continue Transfers", gtk::ResponseType::Accept);
+    dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+    let message = Label::new(Some(&format!("{} operation(s) will continue while Zorin Explorer stays open.", operations.active_count())));
+    message.set_wrap(true); message.set_xalign(0.0); message.set_margin_top(12); message.set_margin_bottom(12); message.set_margin_start(12); message.set_margin_end(12);
+    dialog.content_area().append(&message);
+    dialog.connect_response(|dialog, _| dialog.close());
+    dialog.present();
 }
 
 fn navigate_tab(index: usize, path: PathBuf, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, header: &HeaderControls, preferences: &Rc<RefCell<ViewPreferencesStore>>, sidebar: &Sidebar, record_history: bool) {
@@ -790,8 +911,9 @@ mod tests {
     use gtk::prelude::{OrientableExt, PopoverExt, WidgetExt};
     use gtk::{Box as GtkBox, Label, Orientation, SearchEntry};
 
-    use super::{content_right_inset, file_toolbar, menu_button, matching_index, persist_options, remove_matching, sidebar_path_for_tab};
+    use super::{content_right_inset, file_toolbar, menu_button, matching_index, persist_options, remove_matching, shortcut_command, sidebar_path_for_tab};
     use crate::core::{SortField, ViewOptions, ViewPreferencesStore};
+    use crate::ui::context_menu::ContextCommand;
 
     #[test]
     fn remove_matching_releases_the_read_borrow_before_removing_the_middle_item() {
@@ -830,6 +952,22 @@ mod tests {
 
         assert_eq!(sidebar_path_for_tab(&documents, false), Some(documents));
         assert_eq!(sidebar_path_for_tab(PathBuf::from("/unused").as_path(), true), None);
+    }
+
+    #[test]
+    fn common_file_operation_shortcuts_map_to_context_commands() {
+        assert_eq!(shortcut_command(Some('x'), false, true, false), Some(ContextCommand::Cut));
+        assert_eq!(shortcut_command(Some('c'), false, true, false), Some(ContextCommand::Copy));
+        assert_eq!(shortcut_command(Some('v'), false, true, false), Some(ContextCommand::Paste));
+        assert_eq!(shortcut_command(None, true, false, false), Some(ContextCommand::MoveToTrash));
+        assert_eq!(shortcut_command(None, true, false, true), Some(ContextCommand::DeletePermanently));
+    }
+
+    #[test]
+    fn file_operation_shortcuts_require_the_control_modifier_except_delete() {
+        assert_eq!(shortcut_command(Some('x'), false, false, false), None);
+        assert_eq!(shortcut_command(Some('v'), false, false, false), None);
+        assert_eq!(shortcut_command(None, true, true, false), Some(ContextCommand::MoveToTrash));
     }
 
     #[test]

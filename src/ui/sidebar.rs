@@ -7,6 +7,8 @@ use gtk::prelude::*;
 use gtk::{Box as GtkBox, Button, GestureClick, Image, Label, Orientation, Popover, ScrolledWindow, ToggleButton};
 
 use crate::core::{SidebarLocation, SidebarModel, SidebarNode};
+use crate::ui::operations_page::active_summary;
+use crate::core::OperationManager;
 
 #[derive(Clone, Debug)]
 pub enum SidebarAction {
@@ -20,6 +22,7 @@ pub enum SidebarAction {
     AddNetworkLocation,
     UnpinRemote(String),
     Unmount(String),
+    OpenOperations,
 }
 
 #[derive(Clone)]
@@ -30,6 +33,7 @@ pub struct Sidebar {
     on_action: Rc<dyn Fn(SidebarAction)>,
     active_path: Rc<RefCell<Option<PathBuf>>>,
     mount_parent: gtk::Window,
+    operation_manager: Rc<RefCell<Option<OperationManager>>>,
 }
 
 impl Sidebar {
@@ -50,6 +54,7 @@ impl Sidebar {
             on_action: Rc::new(on_action),
             active_path: Rc::new(RefCell::new(None)),
             mount_parent: mount_parent.clone().upcast(),
+            operation_manager: Rc::new(RefCell::new(None)),
         };
         sidebar.refresh();
 
@@ -159,6 +164,18 @@ impl Sidebar {
 
             self.content.append(&rows);
         }
+        if let Some(manager) = self.operation_manager.borrow().as_ref() {
+            if let Some(summary) = active_summary(&manager.records()) {
+                let button = Button::with_label(&summary); button.add_css_class("flat"); button.add_css_class("sidebar-operation-summary"); button.set_halign(gtk::Align::Fill);
+                let action = self.on_action.clone(); button.connect_clicked(move |_| action(SidebarAction::OpenOperations)); self.content.append(&button);
+            }
+        }
+    }
+
+    pub fn set_operation_manager(&self, manager: OperationManager) {
+        *self.operation_manager.borrow_mut() = Some(manager.clone());
+        let sidebar = self.clone();
+        glib::timeout_add_local(std::time::Duration::from_millis(250), move || { sidebar.refresh(); glib::ControlFlow::Continue });
     }
 
     pub fn set_active_path(&self, path: &Path) {
