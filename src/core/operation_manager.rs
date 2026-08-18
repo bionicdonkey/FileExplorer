@@ -126,7 +126,22 @@ impl OperationManager {
 
     pub fn records(&self) -> Vec<OperationRecord> { self.records.lock().unwrap().clone() }
     pub fn active_count(&self) -> usize { self.records().iter().filter(|record| matches!(record.state, OperationState::Queued | OperationState::Running)).count() }
-    pub fn cancel(&self, id: u64) { if let Some((_, flag)) = self.cancelled.lock().unwrap().iter().find(|(known, _)| *known == id) { flag.store(true, Ordering::Relaxed); } }
+    /// Signals the operation's own thread to stop *and* immediately marks
+    /// the record Cancelled, rather than waiting for that thread to notice
+    /// the flag. If the thread is still running, its own completion write
+    /// will simply overwrite this again; if it never got scheduled (or died
+    /// without reporting), the record no longer sits stuck forever with a
+    /// Cancel button that visibly does nothing.
+    pub fn cancel(&self, id: u64) {
+        if let Some((_, flag)) = self.cancelled.lock().unwrap().iter().find(|(known, _)| *known == id) { flag.store(true, Ordering::Relaxed); }
+        update(&self.records, id, |record| {
+            if matches!(record.state, OperationState::Queued | OperationState::Running) {
+                record.state = OperationState::Cancelled;
+                record.finished_at = Some(now());
+            }
+        });
+        self.persist_history();
+    }
     /// Signals every currently active record to stop. Cancellation still
     /// happens on each operation's own background thread, so callers that
     /// need to close the window immediately should not wait on this.
@@ -158,6 +173,26 @@ mod tests {
     #[test]
     fn active_count_only_includes_running_operations() {
         let manager = OperationManager::default();
+        assert_eq!(manager.active_count(), 0);
+    }
+
+    #[test]
+    fn cancel_immediately_marks_the_record_cancelled_even_if_no_thread_is_listening() {
+        // Regression guard: cancel() used to only flip an atomic flag for the
+        // operation's own thread to notice. If that thread never got
+        // scheduled (or died before finishing), Cancel visibly did nothing
+        // and the record stayed Queued/Running forever.
+        let manager = OperationManager::default();
+        manager.records.lock().unwrap().push(OperationRecord {
+            id: 1, kind: OperationKind::Copy, sources: vec![PathBuf::from("/tmp/big.bin")],
+            destination: Some(PathBuf::from("/tmp/dest")), completed: 0, total: 100, state: OperationState::Queued, finished_at: None,
+        });
+
+        manager.cancel(1);
+
+        let record = manager.records().into_iter().find(|record| record.id == 1).unwrap();
+        assert_eq!(record.state, OperationState::Cancelled);
+        assert!(record.finished_at.is_some());
         assert_eq!(manager.active_count(), 0);
     }
 

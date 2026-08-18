@@ -828,16 +828,21 @@ fn start_transfer(view: &FileView, source: PathBuf, destination: PathBuf, kind: 
     dialog.present();
 }
 
+/// Waits for this specific operation to finish, not every operation in the
+/// manager: gating on the global active count meant one stuck or
+/// long-running operation anywhere silently blocked every other
+/// operation's post-completion refresh, including on unrelated tabs.
 fn schedule_refresh(view: FileView, operations: OperationManager, operation_id: u64) {
     glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
-        if operations.active_count() == 0 {
-            view.set_location(view.location());
-            if let Some(record) = operations.records().into_iter().find(|record| record.id == operation_id && matches!(record.state, crate::core::OperationState::Failed(_))) {
-                if let crate::core::OperationState::Failed(error) = record.state { show_operation_error(&view, &error); }
-            }
-            glib::ControlFlow::Break
+        let Some(record) = operations.records().into_iter().find(|record| record.id == operation_id) else {
+            return glib::ControlFlow::Break;
+        };
+        if matches!(record.state, crate::core::OperationState::Queued | crate::core::OperationState::Running) {
+            return glib::ControlFlow::Continue;
         }
-        else { glib::ControlFlow::Continue }
+        view.set_location(view.location());
+        if let crate::core::OperationState::Failed(error) = record.state { show_operation_error(&view, &error); }
+        glib::ControlFlow::Break
     });
 }
 
