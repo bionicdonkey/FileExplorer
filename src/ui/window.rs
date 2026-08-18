@@ -40,10 +40,10 @@ pub struct ExplorerWindow {
 
 impl ExplorerWindow {
     pub fn new(app: &Application) -> Self {
-        Self::new_at(app, Location::home().path().to_path_buf())
+        Self::new_at(app, Location::home().path().to_path_buf(), true)
     }
 
-    fn new_at(app: &Application, initial: PathBuf) -> Self {
+    fn new_at(app: &Application, initial: PathBuf, restore_session: bool) -> Self {
         let window = ApplicationWindow::builder()
             .application(app)
             .title("Zorin Explorer")
@@ -83,21 +83,33 @@ impl ExplorerWindow {
         header.pack_end(&operations_button);
         header.pack_end(&preferences_button);
 
-        let initial_location = Rc::new(RefCell::new(initial.clone()));
-        let header_controls = HeaderControls::new(initial_location.clone());
+        let startup_paths = if restore_session && application_preferences.borrow().restore_previous_tabs {
+            application_preferences.borrow().load_session().unwrap_or_default().into_iter()
+                .filter_map(|uri| gio::File::for_uri(&uri).path())
+                .filter(|path| path.is_dir())
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let startup_paths = if startup_paths.is_empty() { vec![initial.clone()] } else { startup_paths };
+        let first_location = Rc::new(RefCell::new(startup_paths[0].clone()));
+        let header_controls = HeaderControls::new(first_location.clone());
         let tabs_data: Rc<RefCell<Vec<TabData>>> = Rc::new(RefCell::new(Vec::new()));
         let preferences = Rc::new(RefCell::new(ViewPreferencesStore::load_default().unwrap_or_else(|_| ViewPreferencesStore::in_memory())));
         let clipboard: Rc<RefCell<Option<FileClipboard>>> = Rc::new(RefCell::new(None));
-        let first_view = FileView::new(initial_location.clone());
-        first_view.set_options(preferences.borrow().options_for(&initial, &[]));
-        let first_page = tabs.view.append(&first_view.widget);
-        first_page.set_title(&tab_title(&initial));
-        tabs_data.borrow_mut().push(TabData {
-            view: first_view,
-            location: initial_location,
-            history: history_with(initial.clone()),
-            page: first_page.clone(),
-        });
+        for path in startup_paths {
+            let location = Rc::new(RefCell::new(path.clone()));
+            let view = FileView::new(location.clone());
+            view.set_options(preferences.borrow().options_for(&path, &[]));
+            let page = tabs.view.append(&view.widget);
+            page.set_title(&tab_title(&path));
+            tabs_data.borrow_mut().push(TabData {
+                view,
+                location,
+                history: history_with(path),
+                page,
+            });
+        }
 
         apply_tab_layout(&window, &tabs);
         let layout_window = window.clone();
@@ -133,7 +145,7 @@ impl ExplorerWindow {
                     add_tab_at(path, &sidebar_context_data, &sidebar_context_tabs, &sidebar_context_header, &sidebar_context_preferences, &sidebar_context_app, &sidebar_context_clipboard, &sidebar, &sidebar_context_operations);
                 }
             }
-            SidebarAction::OpenInNewWindow(path) => ExplorerWindow::new_at(&sidebar_context_app, path).present(),
+            SidebarAction::OpenInNewWindow(path) => ExplorerWindow::new_at(&sidebar_context_app, path, false).present(),
             SidebarAction::OpenInTerminal(path) => open_terminal(&path),
             SidebarAction::OpenUri(uri) => {
                 let sidebar = sidebar_holder_actions.borrow().clone();
@@ -217,7 +229,10 @@ impl ExplorerWindow {
             collapsible_sidebar.set_visible(!collapsible_sidebar.is_visible());
         });
 
-        wire_tab(first_page.clone(), &tabs_data, &tabs.view, &header_controls, &preferences, app, &clipboard, &sidebar, &operations);
+        let startup_pages = tabs_data.borrow().iter().map(|tab| tab.page.clone()).collect::<Vec<_>>();
+        for page in startup_pages {
+            wire_tab(page, &tabs_data, &tabs.view, &header_controls, &preferences, app, &clipboard, &sidebar, &operations);
+        }
 
         let file_action_data = tabs_data.clone();
         let file_action_tabs = tabs.view.clone();
@@ -264,8 +279,9 @@ impl ExplorerWindow {
         let new_clipboard = clipboard.clone();
         let new_operations = operations.clone();
         let new_sidebar = sidebar.clone();
+        let new_application_preferences = application_preferences.clone();
         new_tab.connect_clicked(move |_| {
-            let path = Location::home().path().to_path_buf();
+            let path = new_tab_location(&new_application_preferences.borrow());
             let location = Rc::new(RefCell::new(path.clone()));
             let view = FileView::new(location.clone());
             view.set_options(new_preferences.borrow().options_for(&path, &[]));
@@ -274,6 +290,16 @@ impl ExplorerWindow {
             new_data.borrow_mut().push(TabData { view, location, history: history_with(path), page: page.clone() });
             wire_tab(page.clone(), &new_data, &new_tabs, &new_header, &new_preferences, &new_app, &new_clipboard, &new_sidebar, &new_operations);
             new_tabs.set_selected_page(&page);
+        });
+
+        let session_preferences = application_preferences.clone();
+        let session_data = tabs_data.clone();
+        window.connect_destroy(move |_| {
+            let locations = session_data.borrow().iter()
+                .filter(|tab| tab.view.uri().is_none())
+                .map(|tab| gio::File::for_path(&*tab.location.borrow()).uri().to_string())
+                .collect::<Vec<_>>();
+            let _ = session_preferences.borrow().save_session(&locations);
         });
 
         let close_data = tabs_data.clone();
@@ -390,6 +416,13 @@ fn history_with(path: PathBuf) -> Rc<RefCell<NavigationHistory>> {
     history
 }
 
+fn new_tab_location(preferences: &ApplicationPreferences) -> PathBuf {
+    gio::File::for_uri(&preferences.new_tab_location)
+        .path()
+        .filter(|path| path.is_dir())
+        .unwrap_or_else(|| Location::home().path().to_path_buf())
+}
+
 fn wire_tab(page: TabPage, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, header: &HeaderControls, preferences: &Rc<RefCell<ViewPreferencesStore>>, app: &Application, clipboard: &Rc<RefCell<Option<FileClipboard>>>, sidebar: &Sidebar, operations: &OperationManager) {
     let view = data.borrow().iter().find(|tab| tab.page == page).map(|tab| tab.view.clone())
         .expect("a tab page should have corresponding tab data");
@@ -446,7 +479,7 @@ fn wire_tab(page: TabPage, data: &Rc<RefCell<Vec<TabData>>>, tabs: &TabView, hea
                 }
             }
             ContextCommand::OpenInNewWindow => {
-                if let Some(path) = path { ExplorerWindow::new_at(&command_app, path).present(); }
+                if let Some(path) = path { ExplorerWindow::new_at(&command_app, path, false).present(); }
             }
             ContextCommand::OpenInTerminal => {
                 if let Some(path) = path { open_terminal(&path); }
