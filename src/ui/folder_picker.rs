@@ -4,11 +4,12 @@ use std::rc::Rc;
 
 use adw::prelude::*;
 use adw::{HeaderBar, ToolbarView};
-use gtk::{Box as GtkBox, Button, Entry, GestureClick, Image, Label, ListBox, ListBoxRow, Orientation, ScrolledWindow, SelectionMode, Separator, Stack};
+use gtk::{Box as GtkBox, Button, Entry, GestureClick, Image, Label, ListBox, ListBoxRow, Orientation, Paned, ScrolledWindow, SelectionMode, Separator, Stack};
 
 use crate::core::location::Location;
 use crate::core::navigation::NavigationHistory;
 use crate::core::operations::FileOperations;
+use crate::core::sidebar_model::standard_folder_icon;
 use crate::core::{SidebarLocation, SidebarModel};
 
 /// An in-process folder picker built from this app's own widgets, so
@@ -87,18 +88,24 @@ pub fn pick_folder<F: Fn(PathBuf) + 'static>(parent: &impl IsA<gtk::Widget>, tit
     content.append(&toolbar);
     content.append(&Separator::new(Orientation::Horizontal));
 
-    let body = GtkBox::new(Orientation::Horizontal, 0);
+    // A Paned (same as the main window's sidebar split) rather than a fixed
+    // Box: the shortcuts pane defaults narrower and the user can drag it
+    // wider if a location's name needs the room, instead of a fixed width
+    // that's permanently too wide for what's usually shown here.
+    let body = Paned::new(Orientation::Horizontal);
     body.set_vexpand(true);
+    body.set_position(160);
+    body.set_shrink_start_child(false);
+    body.set_shrink_end_child(false);
 
     let shortcuts = GtkBox::new(Orientation::Vertical, 2);
     shortcuts.add_css_class("explorer-sidebar");
     shortcuts.set_margin_top(4); shortcuts.set_margin_bottom(4); shortcuts.set_margin_start(4); shortcuts.set_margin_end(4);
     let shortcuts_scroll = ScrolledWindow::new();
     shortcuts_scroll.set_child(Some(&shortcuts));
-    shortcuts_scroll.set_width_request(200);
+    shortcuts_scroll.set_width_request(120);
     shortcuts_scroll.set_hscrollbar_policy(gtk::PolicyType::Never);
-    body.append(&shortcuts_scroll);
-    body.append(&Separator::new(Orientation::Vertical));
+    body.set_start_child(Some(&shortcuts_scroll));
 
     let folder_list = ListBox::new();
     folder_list.set_selection_mode(SelectionMode::Single);
@@ -106,7 +113,7 @@ pub fn pick_folder<F: Fn(PathBuf) + 'static>(parent: &impl IsA<gtk::Widget>, tit
     let folder_scroll = ScrolledWindow::new();
     folder_scroll.set_child(Some(&folder_list));
     folder_scroll.set_hexpand(true);
-    body.append(&folder_scroll);
+    body.set_end_child(Some(&folder_scroll));
     content.append(&body);
 
     // The one line that always answers "where exactly will this go" before
@@ -285,7 +292,10 @@ fn folder_row(path: &Path) -> ListBoxRow {
     row.add_css_class("picker-folder-row");
     let content = GtkBox::new(Orientation::Horizontal, 8);
     content.set_margin_top(6); content.set_margin_bottom(6); content.set_margin_start(8); content.set_margin_end(8);
-    let icon = Image::from_icon_name("folder-symbolic"); icon.set_pixel_size(18);
+    // Same name-to-icon table the sidebar and main file view use, so a
+    // Documents/Downloads/etc. folder gets its real themed icon here too,
+    // not a generic folder glyph regardless of what it actually is.
+    let icon = Image::from_icon_name(standard_folder_icon(path)); icon.set_pixel_size(18);
     let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("").to_owned();
     let label = Label::new(Some(&name)); label.set_xalign(0.0); label.set_hexpand(true); label.set_ellipsize(gtk::pango::EllipsizeMode::End);
     content.append(&icon);

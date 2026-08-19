@@ -286,7 +286,7 @@ fn user_section_title(real_name: &std::ffi::OsStr, home: &Path) -> String {
     if real_name.is_empty() || real_name.eq_ignore_ascii_case("unknown") { display_name(home) } else { real_name }
 }
 
-fn standard_folder_icon(path: &Path) -> &'static str {
+pub(crate) fn standard_folder_icon(path: &Path) -> &'static str {
     match path.file_name().and_then(|name| name.to_str()) {
         Some("Desktop") => "user-desktop-symbolic",
         Some("Documents") => "folder-documents-symbolic",
