@@ -4,7 +4,7 @@ use std::rc::Rc;
 
 use adw::prelude::*;
 use adw::{HeaderBar, ToolbarView};
-use gtk::{Box as GtkBox, Button, Entry, Image, Label, ListBox, ListBoxRow, Orientation, ScrolledWindow, SelectionMode, Separator};
+use gtk::{Box as GtkBox, Button, Entry, GestureClick, Image, Label, ListBox, ListBoxRow, Orientation, ScrolledWindow, SelectionMode, Separator, Stack};
 
 use crate::core::location::Location;
 use crate::core::navigation::NavigationHistory;
@@ -48,10 +48,41 @@ pub fn pick_folder<F: Fn(PathBuf) + 'static>(parent: &impl IsA<gtk::Widget>, tit
     let back = Button::from_icon_name("go-previous-symbolic"); back.add_css_class("flat"); back.set_tooltip_text(Some("Go back"));
     let forward = Button::from_icon_name("go-next-symbolic"); forward.add_css_class("flat"); forward.set_tooltip_text(Some("Go forward"));
     let up = Button::from_icon_name("go-up-symbolic"); up.add_css_class("flat"); up.set_tooltip_text(Some("Go up"));
-    let path_entry = Entry::new(); path_entry.set_hexpand(true);
+
+    // A clickable breadcrumb (same classes as the main window's location
+    // bar) is the primary display; double-clicking it reveals a plain entry
+    // for typing or pasting a path, exactly mirroring HeaderControls so the
+    // interaction is already familiar rather than a second, different one.
+    let path_entry = Entry::new();
+    path_entry.add_css_class("monospace");
+    path_entry.add_css_class("location-entry");
+    path_entry.set_text(&location.borrow().display().to_string());
+    let breadcrumbs = GtkBox::new(Orientation::Horizontal, 2);
+    breadcrumbs.set_hexpand(true);
+    breadcrumbs.add_css_class("location-bar");
+    let path_stack = Stack::new();
+    path_stack.set_hexpand(true);
+    path_stack.add_named(&breadcrumbs, Some("breadcrumbs"));
+    path_stack.add_named(&path_entry, Some("entry"));
+    path_stack.set_visible_child_name("breadcrumbs");
+    let breadcrumb_click = GestureClick::new();
+    breadcrumb_click.set_button(1);
+    breadcrumb_click.connect_released({
+        let path_stack = path_stack.clone();
+        let path_entry = path_entry.clone();
+        move |_, presses, _, _| {
+            if presses == 2 {
+                path_stack.set_visible_child_name("entry");
+                path_entry.grab_focus();
+                path_entry.select_region(0, -1);
+            }
+        }
+    });
+    breadcrumbs.add_controller(breadcrumb_click);
+
     let new_folder = Button::from_icon_name("folder-new-symbolic"); new_folder.add_css_class("flat"); new_folder.set_tooltip_text(Some("New Folder"));
     for button in [&back, &forward, &up] { toolbar.append(button); }
-    toolbar.append(&path_entry);
+    toolbar.append(&path_stack);
     toolbar.append(&new_folder);
     content.append(&toolbar);
     content.append(&Separator::new(Orientation::Horizontal));
@@ -78,6 +109,20 @@ pub fn pick_folder<F: Fn(PathBuf) + 'static>(parent: &impl IsA<gtk::Widget>, tit
     body.append(&folder_scroll);
     content.append(&body);
 
+    // The one line that always answers "where exactly will this go" before
+    // the user commits -- updated on every navigation and every selection.
+    let destination_label = Label::new(None);
+    destination_label.add_css_class("picker-destination");
+    destination_label.set_xalign(0.0);
+    destination_label.set_hexpand(true);
+    destination_label.set_ellipsize(gtk::pango::EllipsizeMode::Start);
+
+    // Rendering breadcrumb segments needs `navigate` to wire up their click
+    // handlers, but `navigate`'s own body needs to trigger that render --
+    // a `navigate` closure can't capture a not-yet-constructed `navigate`.
+    // This hook is filled in right after `navigate` exists, closing the loop.
+    let render_breadcrumb_hook: Rc<RefCell<Option<Box<dyn Fn(&Path)>>>> = Rc::new(RefCell::new(None));
+
     let navigate: Rc<dyn Fn(PathBuf, bool)> = {
         let location = location.clone();
         let history = history.clone();
@@ -88,6 +133,8 @@ pub fn pick_folder<F: Fn(PathBuf) + 'static>(parent: &impl IsA<gtk::Widget>, tit
         let up = up.clone();
         let folder_list = folder_list.clone();
         let listed_folders = listed_folders.clone();
+        let destination_label = destination_label.clone();
+        let render_breadcrumb_hook = render_breadcrumb_hook.clone();
         Rc::new(move |path: PathBuf, record_history: bool| {
             if !path.is_dir() { return; }
             *location.borrow_mut() = path.clone();
@@ -101,15 +148,29 @@ pub fn pick_folder<F: Fn(PathBuf) + 'static>(parent: &impl IsA<gtk::Widget>, tit
             let mut folders = listed_folders.borrow_mut();
             *folders = subfolders(&path);
             for folder in folders.iter() { folder_list.append(&folder_row(folder)); }
+            destination_label.set_text(&format!("Destination: {}", path.display()));
+            if let Some(render) = render_breadcrumb_hook.borrow().as_ref() { render(&path); }
         })
     };
+    *render_breadcrumb_hook.borrow_mut() = Some(Box::new({
+        let breadcrumbs = breadcrumbs.clone();
+        let home = Location::home().path().to_path_buf();
+        let navigate = navigate.clone();
+        move |path: &Path| render_breadcrumbs(&breadcrumbs, path, &home, &navigate)
+    }));
 
     // Connected once: row creation/removal happens inside `navigate`, but the
     // ListBox itself persists, so these must not be reconnected on refresh.
     folder_list.connect_row_selected({
         let selected = selected.clone();
         let listed_folders = listed_folders.clone();
-        move |_, row| { *selected.borrow_mut() = row.map(|row| row.index()).and_then(|index| listed_folders.borrow().get(index as usize).cloned()); }
+        let location = location.clone();
+        let destination_label = destination_label.clone();
+        move |_, row| {
+            *selected.borrow_mut() = row.map(|row| row.index()).and_then(|index| listed_folders.borrow().get(index as usize).cloned());
+            let target = selected.borrow().clone().unwrap_or_else(|| location.borrow().clone());
+            destination_label.set_text(&format!("Destination: {}", target.display()));
+        }
     });
     folder_list.connect_row_activated({
         let listed_folders = listed_folders.clone();
@@ -166,7 +227,11 @@ pub fn pick_folder<F: Fn(PathBuf) + 'static>(parent: &impl IsA<gtk::Widget>, tit
     });
     path_entry.connect_activate({
         let navigate = navigate.clone();
-        move |entry| navigate(PathBuf::from(entry.text().as_str()), true)
+        let path_stack = path_stack.clone();
+        move |entry| {
+            navigate(PathBuf::from(entry.text().as_str()), true);
+            path_stack.set_visible_child_name("breadcrumbs");
+        }
     });
     new_folder.connect_clicked({
         let location = location.clone();
@@ -185,15 +250,17 @@ pub fn pick_folder<F: Fn(PathBuf) + 'static>(parent: &impl IsA<gtk::Widget>, tit
     toolbar_view.set_content(Some(&content));
 
     toolbar_view.set_bottom_bar_style(adw::ToolbarStyle::RaisedBorder);
+    let footer = GtkBox::new(Orientation::Horizontal, 12);
+    footer.set_margin_top(8); footer.set_margin_bottom(8); footer.set_margin_start(12); footer.set_margin_end(12);
+    footer.append(&destination_label);
     let actions = GtkBox::new(Orientation::Horizontal, 8);
-    actions.set_halign(gtk::Align::End);
-    actions.set_margin_top(8); actions.set_margin_bottom(8); actions.set_margin_start(12); actions.set_margin_end(12);
     let cancel_button = Button::with_label("Cancel");
     let select_button = Button::with_label(action_label);
     select_button.add_css_class("suggested-action");
     actions.append(&cancel_button);
     actions.append(&select_button);
-    toolbar_view.add_bottom_bar(&actions);
+    footer.append(&actions);
+    toolbar_view.add_bottom_bar(&footer);
 
     dialog.set_child(Some(&toolbar_view));
 
@@ -215,6 +282,7 @@ pub fn pick_folder<F: Fn(PathBuf) + 'static>(parent: &impl IsA<gtk::Widget>, tit
 
 fn folder_row(path: &Path) -> ListBoxRow {
     let row = ListBoxRow::new();
+    row.add_css_class("picker-folder-row");
     let content = GtkBox::new(Orientation::Horizontal, 8);
     content.set_margin_top(6); content.set_margin_bottom(6); content.set_margin_start(8); content.set_margin_end(8);
     let icon = Image::from_icon_name("folder-symbolic"); icon.set_pixel_size(18);
@@ -224,6 +292,58 @@ fn folder_row(path: &Path) -> ListBoxRow {
     content.append(&label);
     row.set_child(Some(&content));
     row
+}
+
+/// Mirrors HeaderControls' breadcrumb rendering (same CSS classes), so the
+/// picker's navigation bar reads as the same component as the main window's,
+/// not a second, different-looking one. Local paths only -- this picker
+/// never browses remote/GVfs locations.
+fn render_breadcrumbs(breadcrumbs: &GtkBox, path: &Path, home: &Path, navigate: &Rc<dyn Fn(PathBuf, bool)>) {
+    while let Some(child) = breadcrumbs.first_child() { breadcrumbs.remove(&child); }
+    let under_home = path.starts_with(home);
+    let mut accumulated = if under_home { home.to_path_buf() } else { PathBuf::from("/") };
+    let base = Button::new();
+    base.add_css_class("flat");
+    base.add_css_class("breadcrumb-segment");
+    if under_home {
+        let content = GtkBox::new(Orientation::Horizontal, 6);
+        let icon = Image::from_icon_name("user-home-symbolic");
+        icon.set_pixel_size(16);
+        content.append(&icon);
+        content.append(&Label::new(Some("Home")));
+        base.set_child(Some(&content));
+    } else {
+        base.set_label("/");
+    }
+    let remaining = if under_home { path.strip_prefix(home).unwrap_or(path) } else { path };
+    let components = remaining.components()
+        .filter_map(|component| match component { std::path::Component::Normal(name) => Some(name.to_os_string()), _ => None })
+        .collect::<Vec<_>>();
+    let base_is_current = components.is_empty();
+    if base_is_current { base.add_css_class("breadcrumb-current"); }
+    connect_breadcrumb_segment(&base, accumulated.clone(), navigate);
+    breadcrumbs.append(&base);
+
+    for (index, component) in components.iter().enumerate() {
+        let separator = Label::new(Some("/"));
+        separator.add_css_class("breadcrumb-separator");
+        breadcrumbs.append(&separator);
+        accumulated.push(component);
+        let button = Button::with_label(&component.to_string_lossy());
+        button.add_css_class("flat");
+        button.add_css_class("breadcrumb-segment");
+        if index + 1 == components.len() { button.add_css_class("breadcrumb-current"); }
+        connect_breadcrumb_segment(&button, accumulated.clone(), navigate);
+        breadcrumbs.append(&button);
+    }
+    let trailing = Label::new(None);
+    trailing.set_hexpand(true);
+    breadcrumbs.append(&trailing);
+}
+
+fn connect_breadcrumb_segment(button: &Button, path: PathBuf, navigate: &Rc<dyn Fn(PathBuf, bool)>) {
+    let navigate = navigate.clone();
+    button.connect_clicked(move |_| navigate(path.clone(), true));
 }
 
 /// A single sidebar row. Local locations navigate the picker; remote/GVfs

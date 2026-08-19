@@ -157,3 +157,20 @@ button.sidebar-expander {
 }
 
 .explorer-dialog button { border-radius: 8px; }
+
+.picker-folder-row {
+  border-radius: 8px;
+  margin: 1px 6px;
+}
+
+.picker-folder-row:hover {
+  background-color: alpha(@window_fg_color, 0.055);
+}
+
+/* The one line the folder picker's footer exists to answer: exactly where
+ * the files are headed, still visible at the moment the user commits. */
+.picker-destination {
+  padding: 6px 10px;
+  border-radius: 8px;
+  background-color: alpha(@accent_bg_color, 0.1);
+}
