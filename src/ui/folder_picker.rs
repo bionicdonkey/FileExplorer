@@ -294,8 +294,10 @@ fn folder_row(path: &Path) -> ListBoxRow {
     content.set_margin_top(6); content.set_margin_bottom(6); content.set_margin_start(8); content.set_margin_end(8);
     // Same name-to-icon table the sidebar and main file view use, so a
     // Documents/Downloads/etc. folder gets its real themed icon here too,
-    // not a generic folder glyph regardless of what it actually is.
-    let icon = Image::from_icon_name(standard_folder_icon(path)); icon.set_pixel_size(18);
+    // not a generic folder glyph regardless of what it actually is. The
+    // sidebar-location-icon class matches these to the sidebar's dimmed
+    // icon color instead of rendering at full strength next to it.
+    let icon = Image::from_icon_name(standard_folder_icon(path)); icon.set_pixel_size(18); icon.add_css_class("sidebar-location-icon");
     let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("").to_owned();
     let label = Label::new(Some(&name)); label.set_xalign(0.0); label.set_hexpand(true); label.set_ellipsize(gtk::pango::EllipsizeMode::End);
     content.append(&icon);
