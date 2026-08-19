@@ -42,6 +42,15 @@ impl OperationManager {
     pub fn load_history(path: Option<PathBuf>, retention_days: u32) -> Self {
         let manager = Self { history_path: path.clone().map(Arc::new), retention_days: Arc::new(AtomicU64::new(retention_days as u64)), ..Self::default() };
         if let Some(path) = path { if let Ok(bytes) = fs::read(path) { if let Ok(records) = serde_json::from_slice::<Vec<OperationRecord>>(&bytes) { *manager.records.lock().unwrap() = records; } } }
+        // next_id otherwise always restarts at 0, so the first operation of
+        // every session would be id 1 -- colliding with whatever record
+        // already has id 1 in the loaded history. update() finds the first
+        // matching id, so every state write for the new operation would
+        // silently land on the old, already-finished record instead: it
+        // never appears to start, Cancel affects the wrong row, and the new
+        // operation never gets a row of its own in the Operations page.
+        let highest_loaded_id = manager.records.lock().unwrap().iter().map(|record| record.id).max().unwrap_or(0);
+        manager.next_id.store(highest_loaded_id, Ordering::Relaxed);
         manager.prune_history(); manager
     }
     pub fn set_retention_days(&self, days: u32) { self.retention_days.store(days as u64, Ordering::Relaxed); self.prune_history(); }
@@ -64,16 +73,13 @@ impl OperationManager {
         self.cancelled.lock().unwrap().push((id, cancel.clone()));
         let records = self.records.clone();
         let manager = self.clone();
-        eprintln!("[operations] #{id} queued: {kind:?} {sources:?} -> {destination:?} (explicit_target={explicit_target:?})");
         std::thread::spawn(move || {
-            eprintln!("[operations] #{id} thread started");
             update(&records, id, |record| record.state = OperationState::Running);
             if kind == OperationKind::Copy {
                 // Progress is tracked in bytes, not file count: a single huge
                 // file is one "file" but the transfer still needs to show
                 // motion throughout, not just jump from 0% to 100%.
                 let counted_total = (FileOperations::count_bytes(&sources) as usize).max(1);
-                eprintln!("[operations] #{id} counted {counted_total} bytes");
                 update(&records, id, |record| record.total = counted_total);
                 let progress_records = records.clone();
                 let mut completed = 0usize;
@@ -82,7 +88,6 @@ impl OperationManager {
                     Some(target) => sources.first().map_or(Ok(()), |source| FileOperations::copy_to_target_with_progress(source, target, &cancel, &mut on_progress)),
                     None => FileOperations::copy_with_progress(&sources, destination.as_deref().expect("copy requires destination"), &cancel, &mut on_progress),
                 };
-                eprintln!("[operations] #{id} copy finished: {result:?}");
                 finish(&records, &manager, id, result);
                 return;
             }
@@ -178,6 +183,35 @@ mod tests {
     fn active_count_only_includes_running_operations() {
         let manager = OperationManager::default();
         assert_eq!(manager.active_count(), 0);
+    }
+
+    #[test]
+    fn a_new_operation_never_collides_with_an_id_from_loaded_history() {
+        // Regression guard: next_id always restarted at 0, so the first
+        // operation of a fresh session got id 1 -- the same id almost every
+        // previous session's first operation also used. update() finds the
+        // *first* record with a matching id, so every write for the new
+        // operation silently landed on the old, already-finished one:
+        // it never appeared to start, Cancel hit the wrong row, and it
+        // never got a row of its own in the Operations page.
+        let directory = tempfile::tempdir().unwrap();
+        let history_path = directory.path().join("history.json");
+        let previous_session = vec![OperationRecord {
+            id: 1, kind: OperationKind::Copy, sources: vec![PathBuf::from("/tmp/old.zip")],
+            destination: Some(PathBuf::from("/tmp")), completed: 10, total: 10, state: OperationState::Completed, finished_at: Some(now()),
+        }];
+        std::fs::write(&history_path, serde_json::to_vec(&previous_session).unwrap()).unwrap();
+
+        let manager = OperationManager::load_history(Some(history_path), 7);
+        let new_id = manager.submit(OperationKind::Copy, vec![PathBuf::from("/tmp/new.zip")], Some(PathBuf::from("/tmp")));
+
+        assert_ne!(new_id, 1, "new operation reused an id already present in loaded history");
+        let record = wait_for_finished(&manager, new_id);
+        assert_eq!(record.sources, vec![PathBuf::from("/tmp/new.zip")]);
+        // The old record must be untouched by the new operation's updates.
+        let old_record = manager.records().into_iter().find(|record| record.id == 1).unwrap();
+        assert_eq!(old_record.sources, vec![PathBuf::from("/tmp/old.zip")]);
+        assert_eq!(old_record.completed, 10);
     }
 
     #[test]
