@@ -4,13 +4,13 @@ use std::rc::Rc;
 
 use adw::prelude::*;
 use adw::{HeaderBar, ToolbarView};
-use gtk::{Box as GtkBox, Button, Entry, GestureClick, Image, Label, ListBox, ListBoxRow, Orientation, Paned, ScrolledWindow, SelectionMode, Separator, Stack};
+use gtk::{Box as GtkBox, Button, Image, Label, ListBox, ListBoxRow, Orientation, Paned, ScrolledWindow, SelectionMode, Separator};
 
 use crate::core::location::Location;
 use crate::core::navigation::NavigationHistory;
 use crate::core::operations::FileOperations;
-use crate::core::sidebar_model::standard_folder_icon;
 use crate::core::{SidebarLocation, SidebarModel};
+use crate::ui::header::LocationBar;
 
 /// An in-process folder picker built from this app's own widgets, so
 /// choosing a destination never hands off to an external file manager. The
@@ -50,40 +50,14 @@ pub fn pick_folder<F: Fn(PathBuf) + 'static>(parent: &impl IsA<gtk::Widget>, tit
     let forward = Button::from_icon_name("go-next-symbolic"); forward.add_css_class("flat"); forward.set_tooltip_text(Some("Go forward"));
     let up = Button::from_icon_name("go-up-symbolic"); up.add_css_class("flat"); up.set_tooltip_text(Some("Go up"));
 
-    // A clickable breadcrumb (same classes as the main window's location
-    // bar) is the primary display; double-clicking it reveals a plain entry
-    // for typing or pasting a path, exactly mirroring HeaderControls so the
-    // interaction is already familiar rather than a second, different one.
-    let path_entry = Entry::new();
-    path_entry.add_css_class("monospace");
-    path_entry.add_css_class("location-entry");
-    path_entry.set_text(&location.borrow().display().to_string());
-    let breadcrumbs = GtkBox::new(Orientation::Horizontal, 2);
-    breadcrumbs.set_hexpand(true);
-    breadcrumbs.add_css_class("location-bar");
-    let path_stack = Stack::new();
-    path_stack.set_hexpand(true);
-    path_stack.add_named(&breadcrumbs, Some("breadcrumbs"));
-    path_stack.add_named(&path_entry, Some("entry"));
-    path_stack.set_visible_child_name("breadcrumbs");
-    let breadcrumb_click = GestureClick::new();
-    breadcrumb_click.set_button(1);
-    breadcrumb_click.connect_released({
-        let path_stack = path_stack.clone();
-        let path_entry = path_entry.clone();
-        move |_, presses, _, _| {
-            if presses == 2 {
-                path_stack.set_visible_child_name("entry");
-                path_entry.grab_focus();
-                path_entry.select_region(0, -1);
-            }
-        }
-    });
-    breadcrumbs.add_controller(breadcrumb_click);
+    // Shares HeaderControls' breadcrumb/location-entry implementation (same
+    // CSS classes, same double-click-to-edit interaction) instead of a second
+    // copy, so a fix to one applies to both.
+    let location_bar = LocationBar::new(&location.borrow());
 
     let new_folder = Button::from_icon_name("folder-new-symbolic"); new_folder.add_css_class("flat"); new_folder.set_tooltip_text(Some("New Folder"));
     for button in [&back, &forward, &up] { toolbar.append(button); }
-    toolbar.append(&path_stack);
+    toolbar.append(&location_bar.widget);
     toolbar.append(&new_folder);
     content.append(&toolbar);
     content.append(&Separator::new(Orientation::Horizontal));
@@ -98,8 +72,11 @@ pub fn pick_folder<F: Fn(PathBuf) + 'static>(parent: &impl IsA<gtk::Widget>, tit
     body.set_shrink_start_child(false);
     body.set_shrink_end_child(false);
 
+    // No `explorer-sidebar` class here: that class's only rule is a 220px
+    // min-width meant for the main window's sidebar, and it would silently
+    // override `set_position(160)` above by forcing this pane no narrower
+    // than 220px.
     let shortcuts = GtkBox::new(Orientation::Vertical, 2);
-    shortcuts.add_css_class("explorer-sidebar");
     shortcuts.set_margin_top(4); shortcuts.set_margin_bottom(4); shortcuts.set_margin_start(4); shortcuts.set_margin_end(4);
     let shortcuts_scroll = ScrolledWindow::new();
     shortcuts_scroll.set_child(Some(&shortcuts));
@@ -124,30 +101,23 @@ pub fn pick_folder<F: Fn(PathBuf) + 'static>(parent: &impl IsA<gtk::Widget>, tit
     destination_label.set_hexpand(true);
     destination_label.set_ellipsize(gtk::pango::EllipsizeMode::Start);
 
-    // Rendering breadcrumb segments needs `navigate` to wire up their click
-    // handlers, but `navigate`'s own body needs to trigger that render --
-    // a `navigate` closure can't capture a not-yet-constructed `navigate`.
-    // This hook is filled in right after `navigate` exists, closing the loop.
-    let render_breadcrumb_hook: Rc<RefCell<Option<Box<dyn Fn(&Path)>>>> = Rc::new(RefCell::new(None));
-
     let navigate: Rc<dyn Fn(PathBuf, bool)> = {
         let location = location.clone();
         let history = history.clone();
         let selected = selected.clone();
-        let path_entry = path_entry.clone();
+        let location_bar = location_bar.clone();
         let back = back.clone();
         let forward = forward.clone();
         let up = up.clone();
         let folder_list = folder_list.clone();
         let listed_folders = listed_folders.clone();
         let destination_label = destination_label.clone();
-        let render_breadcrumb_hook = render_breadcrumb_hook.clone();
         Rc::new(move |path: PathBuf, record_history: bool| {
             if !path.is_dir() { return; }
             *location.borrow_mut() = path.clone();
             *selected.borrow_mut() = None;
             if record_history { history.borrow_mut().push(path.clone()); }
-            path_entry.set_text(&path.display().to_string());
+            location_bar.set_location(&path);
             back.set_sensitive(history.borrow().can_go_back());
             forward.set_sensitive(history.borrow().can_go_forward());
             up.set_sensitive(path.parent().is_some());
@@ -156,15 +126,16 @@ pub fn pick_folder<F: Fn(PathBuf) + 'static>(parent: &impl IsA<gtk::Widget>, tit
             *folders = subfolders(&path);
             for folder in folders.iter() { folder_list.append(&folder_row(folder)); }
             destination_label.set_text(&format!("Destination: {}", path.display()));
-            if let Some(render) = render_breadcrumb_hook.borrow().as_ref() { render(&path); }
         })
     };
-    *render_breadcrumb_hook.borrow_mut() = Some(Box::new({
-        let breadcrumbs = breadcrumbs.clone();
-        let home = Location::home().path().to_path_buf();
+    location_bar.set_navigation_handler({
         let navigate = navigate.clone();
-        move |path: &Path| render_breadcrumbs(&breadcrumbs, path, &home, &navigate)
-    }));
+        move |path| navigate(path, true)
+    });
+    location_bar.connect_location_changed({
+        let navigate = navigate.clone();
+        move |path| navigate(path, true)
+    });
 
     // Connected once: row creation/removal happens inside `navigate`, but the
     // ListBox itself persists, so these must not be reconnected on refresh.
@@ -232,14 +203,6 @@ pub fn pick_folder<F: Fn(PathBuf) + 'static>(parent: &impl IsA<gtk::Widget>, tit
             if let Some(parent) = parent { navigate(parent, true); }
         }
     });
-    path_entry.connect_activate({
-        let navigate = navigate.clone();
-        let path_stack = path_stack.clone();
-        move |entry| {
-            navigate(PathBuf::from(entry.text().as_str()), true);
-            path_stack.set_visible_child_name("breadcrumbs");
-        }
-    });
     new_folder.connect_clicked({
         let location = location.clone();
         let navigate = navigate.clone();
@@ -292,70 +255,18 @@ fn folder_row(path: &Path) -> ListBoxRow {
     row.add_css_class("picker-folder-row");
     let content = GtkBox::new(Orientation::Horizontal, 8);
     content.set_margin_top(6); content.set_margin_bottom(6); content.set_margin_start(8); content.set_margin_end(8);
-    // Same name-to-icon table the sidebar and main file view use, so a
-    // Documents/Downloads/etc. folder gets its real themed icon here too,
-    // not a generic folder glyph regardless of what it actually is. The
-    // sidebar-location-icon class matches these to the sidebar's dimmed
-    // icon color instead of rendering at full strength next to it.
-    let icon = Image::from_icon_name(standard_folder_icon(path)); icon.set_pixel_size(18); icon.add_css_class("sidebar-location-icon");
+    // A plain folder glyph, not the curated Documents/Downloads/etc. icon
+    // table -- these are arbitrary subfolders being browsed, not the
+    // sidebar's pinned locations, so a folder named "Downloads" here isn't
+    // necessarily *the* Downloads folder. Matches sidebar_model's
+    // local_children(), which draws the same distinction.
+    let icon = Image::from_icon_name("folder-symbolic"); icon.set_pixel_size(18); icon.add_css_class("sidebar-location-icon");
     let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("").to_owned();
     let label = Label::new(Some(&name)); label.set_xalign(0.0); label.set_hexpand(true); label.set_ellipsize(gtk::pango::EllipsizeMode::End);
     content.append(&icon);
     content.append(&label);
     row.set_child(Some(&content));
     row
-}
-
-/// Mirrors HeaderControls' breadcrumb rendering (same CSS classes), so the
-/// picker's navigation bar reads as the same component as the main window's,
-/// not a second, different-looking one. Local paths only -- this picker
-/// never browses remote/GVfs locations.
-fn render_breadcrumbs(breadcrumbs: &GtkBox, path: &Path, home: &Path, navigate: &Rc<dyn Fn(PathBuf, bool)>) {
-    while let Some(child) = breadcrumbs.first_child() { breadcrumbs.remove(&child); }
-    let under_home = path.starts_with(home);
-    let mut accumulated = if under_home { home.to_path_buf() } else { PathBuf::from("/") };
-    let base = Button::new();
-    base.add_css_class("flat");
-    base.add_css_class("breadcrumb-segment");
-    if under_home {
-        let content = GtkBox::new(Orientation::Horizontal, 6);
-        let icon = Image::from_icon_name("user-home-symbolic");
-        icon.set_pixel_size(16);
-        content.append(&icon);
-        content.append(&Label::new(Some("Home")));
-        base.set_child(Some(&content));
-    } else {
-        base.set_label("/");
-    }
-    let remaining = if under_home { path.strip_prefix(home).unwrap_or(path) } else { path };
-    let components = remaining.components()
-        .filter_map(|component| match component { std::path::Component::Normal(name) => Some(name.to_os_string()), _ => None })
-        .collect::<Vec<_>>();
-    let base_is_current = components.is_empty();
-    if base_is_current { base.add_css_class("breadcrumb-current"); }
-    connect_breadcrumb_segment(&base, accumulated.clone(), navigate);
-    breadcrumbs.append(&base);
-
-    for (index, component) in components.iter().enumerate() {
-        let separator = Label::new(Some("/"));
-        separator.add_css_class("breadcrumb-separator");
-        breadcrumbs.append(&separator);
-        accumulated.push(component);
-        let button = Button::with_label(&component.to_string_lossy());
-        button.add_css_class("flat");
-        button.add_css_class("breadcrumb-segment");
-        if index + 1 == components.len() { button.add_css_class("breadcrumb-current"); }
-        connect_breadcrumb_segment(&button, accumulated.clone(), navigate);
-        breadcrumbs.append(&button);
-    }
-    let trailing = Label::new(None);
-    trailing.set_hexpand(true);
-    breadcrumbs.append(&trailing);
-}
-
-fn connect_breadcrumb_segment(button: &Button, path: PathBuf, navigate: &Rc<dyn Fn(PathBuf, bool)>) {
-    let navigate = navigate.clone();
-    button.connect_clicked(move |_| navigate(path.clone(), true));
 }
 
 /// A single sidebar row. Local locations navigate the picker; remote/GVfs
