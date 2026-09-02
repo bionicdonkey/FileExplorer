@@ -32,36 +32,66 @@ pub enum ContextCommand {
     CloseTab,
     CloseOtherTabs,
     DuplicateTab,
+    ToggleQuickAccess,
 }
 
 pub fn delete_command(shift_held: bool) -> ContextCommand {
-    if shift_held { ContextCommand::DeletePermanently } else { ContextCommand::MoveToTrash }
+    if shift_held {
+        ContextCommand::DeletePermanently
+    } else {
+        ContextCommand::MoveToTrash
+    }
 }
 
 pub fn delete_label(shift_held: bool) -> &'static str {
-    if shift_held { "Delete Permanently…" } else { "Move to Trash" }
+    if shift_held {
+        "Delete Permanently…"
+    } else {
+        "Move to Trash"
+    }
 }
 
 pub fn item_commands(target: &ContextTarget) -> Vec<ContextCommand> {
     match target {
         ContextTarget::File { .. } => vec![
-            ContextCommand::Open, ContextCommand::OpenWith, ContextCommand::Cut,
-            ContextCommand::Copy, ContextCommand::CopyFilename, ContextCommand::CopyFullPath,
-            ContextCommand::CopyTo, ContextCommand::MoveTo, ContextCommand::Rename, ContextCommand::MoveToTrash,
+            ContextCommand::Open,
+            ContextCommand::OpenWith,
+            ContextCommand::Cut,
+            ContextCommand::Copy,
+            ContextCommand::CopyFilename,
+            ContextCommand::CopyFullPath,
+            ContextCommand::CopyTo,
+            ContextCommand::MoveTo,
+            ContextCommand::Rename,
+            ContextCommand::MoveToTrash,
             ContextCommand::Properties,
         ],
         ContextTarget::Folder(_) | ContextTarget::SidebarLocation(_) => vec![
-            ContextCommand::Open, ContextCommand::OpenInNewTab, ContextCommand::OpenInNewWindow,
-            ContextCommand::OpenInTerminal, ContextCommand::Cut, ContextCommand::Copy,
-            ContextCommand::CopyFilename, ContextCommand::CopyFullPath, ContextCommand::CopyTo,
-            ContextCommand::MoveTo, ContextCommand::Rename, ContextCommand::MoveToTrash,
+            ContextCommand::Open,
+            ContextCommand::OpenInNewTab,
+            ContextCommand::OpenInNewWindow,
+            ContextCommand::OpenInTerminal,
+            ContextCommand::Cut,
+            ContextCommand::Copy,
+            ContextCommand::CopyFilename,
+            ContextCommand::CopyFullPath,
+            ContextCommand::CopyTo,
+            ContextCommand::MoveTo,
+            ContextCommand::Rename,
+            ContextCommand::MoveToTrash,
             ContextCommand::Properties,
+            ContextCommand::ToggleQuickAccess,
         ],
         ContextTarget::Background(_) => vec![
-            ContextCommand::NewFolder, ContextCommand::Paste, ContextCommand::Refresh,
+            ContextCommand::NewFolder,
+            ContextCommand::Paste,
+            ContextCommand::Refresh,
+            ContextCommand::ToggleQuickAccess,
         ],
         ContextTarget::Tab => vec![
-            ContextCommand::CloseTab, ContextCommand::CloseOtherTabs, ContextCommand::DuplicateTab,
+            ContextCommand::CloseTab,
+            ContextCommand::CloseOtherTabs,
+            ContextCommand::DuplicateTab,
         ],
     }
 }
@@ -83,6 +113,14 @@ mod tests {
         assert!(commands.contains(&ContextCommand::OpenInTerminal));
         assert!(commands.contains(&ContextCommand::OpenInNewTab));
         assert!(commands.contains(&ContextCommand::OpenInNewWindow));
+        assert!(commands.contains(&ContextCommand::ToggleQuickAccess));
+    }
+
+    #[test]
+    fn current_folder_menu_can_toggle_quick_access() {
+        let commands = item_commands(&ContextTarget::Background(PathBuf::from("/tmp")));
+
+        assert!(commands.contains(&ContextCommand::ToggleQuickAccess));
     }
 
     #[test]
@@ -102,6 +140,9 @@ mod tests {
     fn shift_changes_the_delete_action_label() {
         assert_eq!(super::delete_label(false), "Move to Trash");
         assert_eq!(super::delete_label(true), "Delete Permanently…");
-        assert_eq!(super::delete_command(true), ContextCommand::DeletePermanently);
+        assert_eq!(
+            super::delete_command(true),
+            ContextCommand::DeletePermanently
+        );
     }
 }

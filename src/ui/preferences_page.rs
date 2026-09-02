@@ -1,12 +1,12 @@
 use adw::prelude::*;
 use std::cell::RefCell;
 use std::rc::Rc;
-use gtk::{Adjustment, Box as GtkBox, Button, CheckButton, Label, Orientation, ScrolledWindow, SpinButton, Stack, StackSwitcher};
+use gtk::{Adjustment, Box as GtkBox, Button, CheckButton, Image, Label, Orientation, ScrolledWindow, SpinButton, Stack, StackSwitcher};
 use crate::core::application_preferences::default_new_tab_location;
 use crate::core::{ApplicationPreferences, ConflictDefault, GridSize, GroupField, OperationManager, SearchHistory, SidebarModel, SortDirection, SortField, ViewMode, ViewOptions, ViewPreferencesStore};
 use crate::ui::sidebar::Sidebar;
 
-pub fn category_names() -> [&'static str; 5] { ["General", "Views", "File operations", "Search & privacy", "Sidebar"] }
+pub fn category_names() -> [&'static str; 6] { ["General", "Views", "File operations", "Search & privacy", "Sidebar", "About"] }
 fn conflict_default_labels() -> [&'static str; 4] { ["Ask", "Replace", "Keep Both", "Skip"] }
 fn view_default_groups() -> [&'static str; 6] { ["Layout", "Icon size", "Sort", "Sort direction", "Grouping", "Content"] }
 
@@ -23,12 +23,63 @@ pub fn build(preferences: Rc<RefCell<ApplicationPreferences>>, operations: Opera
             "General" => general_page(preferences.clone(), sidebar_model.clone()),
             "Search & privacy" => search_privacy_page(preferences.clone(), search_history.clone()),
             "Sidebar" => sidebar_page(preferences.clone(), sidebar_model.clone(), sidebar_holder.clone()),
+            "About" => about_page(),
             _ => views_page(views.clone()),
         };
         stack.add_titled(&page, Some(&category.to_lowercase().replace(' ', "-")), category);
     }
     content.append(&stack);
     let scroll = ScrolledWindow::new(); scroll.set_child(Some(&content)); scroll
+}
+
+fn about_details() -> (&'static str, &'static str, &'static str) {
+    ("Zorin Explorer", env!("CARGO_PKG_VERSION"), env!("CARGO_PKG_LICENSE"))
+}
+
+fn about_page() -> GtkBox {
+    let page = GtkBox::new(Orientation::Vertical, 12);
+    page.set_margin_top(18);
+    let details = about_details();
+
+    let identity = GtkBox::new(Orientation::Horizontal, 14);
+    let icon = Image::from_icon_name("com.zorin.Explorer");
+    icon.set_pixel_size(64);
+    icon.set_valign(gtk::Align::Start);
+    identity.append(&icon);
+    let text = GtkBox::new(Orientation::Vertical, 4);
+    let name = Label::new(Some(details.0));
+    name.add_css_class("title-2");
+    name.set_xalign(0.0);
+    text.append(&name);
+    let version = Label::new(Some(&format!("Version {}", details.1)));
+    version.add_css_class("dim-label");
+    version.set_xalign(0.0);
+    text.append(&version);
+    identity.append(&text);
+    page.append(&identity);
+
+    let description = Label::new(Some("A native Explorer-style file manager for Linux, designed for Zorin OS and GNOME."));
+    description.set_wrap(true);
+    description.set_xalign(0.0);
+    description.set_margin_top(8);
+    page.append(&description);
+
+    let details_heading = Label::new(Some("Product information"));
+    details_heading.add_css_class("heading");
+    details_heading.set_xalign(0.0);
+    details_heading.set_margin_top(12);
+    page.append(&details_heading);
+    for text in [
+        format!("Application ID: com.zorin.Explorer"),
+        format!("License: {}", details.2),
+        "Built with GTK 4 and libadwaita".into(),
+    ] {
+        let row = Label::new(Some(&text));
+        row.set_xalign(0.0);
+        row.set_selectable(true);
+        page.append(&row);
+    }
+    page
 }
 
 fn general_page(preferences: Rc<RefCell<ApplicationPreferences>>, sidebar_model: Rc<RefCell<SidebarModel>>) -> GtkBox {
@@ -232,7 +283,12 @@ fn confirm_clear_all_folder_views(button: &Button, views: Rc<RefCell<ViewPrefere
 mod tests {
     #[test]
     fn categories_cover_current_and_planned_preference_areas() {
-        assert_eq!(super::category_names(), ["General", "Views", "File operations", "Search & privacy", "Sidebar"]);
+        assert_eq!(super::category_names(), ["General", "Views", "File operations", "Search & privacy", "Sidebar", "About"]);
+    }
+
+    #[test]
+    fn about_details_use_the_package_metadata() {
+        assert_eq!(super::about_details(), ("Zorin Explorer", env!("CARGO_PKG_VERSION"), env!("CARGO_PKG_LICENSE")));
     }
 
     #[test]

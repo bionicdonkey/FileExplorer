@@ -2,15 +2,24 @@ app-id: com.zorin.Explorer
 runtime: org.gnome.Platform
 runtime-version: '47'
 sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
 command: zorin-explorer
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  build-args:
+    - --share=network
 finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
   - --filesystem=host
   - --talk-name=org.freedesktop.FileManager1
 modules:
   - name: zorin-explorer
     buildsystem: simple
     build-commands:
-      - cargo build --release --offline
+      - cargo build --release
       - install -Dm755 target/release/zorin-explorer /app/bin/zorin-explorer
       - install -Dm644 resources/com.zorin.Explorer.desktop /app/share/applications/com.zorin.Explorer.desktop
       - install -Dm644 resources/icons/hicolor/scalable/apps/com.zorin.Explorer.svg /app/share/icons/hicolor/scalable/apps/com.zorin.Explorer.svg

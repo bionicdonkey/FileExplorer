@@ -2,6 +2,9 @@
   <id>com.zorin.Explorer</id>
   <name>Zorin Explorer</name>
   <summary>Explorer-style file manager for Linux</summary>
+  <description>
+    <p>Zorin Explorer is a native Explorer-style file manager for Linux, designed for Zorin OS and GNOME.</p>
+  </description>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>GPL-3.0-or-later</project_license>
   <launchable type="desktop-id">com.zorin.Explorer.desktop</launchable>

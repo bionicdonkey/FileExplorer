@@ -4,11 +4,15 @@ use std::rc::Rc;
 
 use gio::prelude::*;
 use gtk::prelude::*;
-use gtk::{Box as GtkBox, Button, GestureClick, Image, Label, Orientation, Popover, ScrolledWindow, ToggleButton};
+use gtk::{
+    Box as GtkBox, Button, GestureClick, Image, Label, Orientation, Popover, ScrolledWindow,
+    ToggleButton,
+};
 
-use crate::core::{SidebarLocation, SidebarModel, SidebarNode};
-use crate::ui::operations_page::active_summary;
 use crate::core::OperationManager;
+use crate::core::{SidebarLocation, SidebarModel, SidebarNode};
+use crate::core::sidebar_model::SidebarSection;
+use crate::ui::operations_page::active_summary;
 
 #[derive(Clone, Debug)]
 pub enum SidebarAction {
@@ -38,7 +42,11 @@ pub struct Sidebar {
 }
 
 impl Sidebar {
-    pub fn new<F: Fn(SidebarAction) + 'static>(model: Rc<RefCell<SidebarModel>>, mount_parent: &impl IsA<gtk::Window>, on_action: F) -> Self {
+    pub fn new<F: Fn(SidebarAction) + 'static>(
+        model: Rc<RefCell<SidebarModel>>,
+        mount_parent: &impl IsA<gtk::Window>,
+        on_action: F,
+    ) -> Self {
         let content = GtkBox::new(Orientation::Vertical, 12);
         content.add_css_class("explorer-sidebar");
         content.set_margin_top(8);
@@ -67,11 +75,16 @@ impl Sidebar {
         sidebar
     }
 
-    pub fn model(&self) -> Rc<RefCell<SidebarModel>> { self.model.clone() }
+    pub fn model(&self) -> Rc<RefCell<SidebarModel>> {
+        self.model.clone()
+    }
 
     pub fn refresh(&self) {
-        while let Some(child) = self.content.first_child() { self.content.remove(&child); }
-        for section in self.model.borrow().sections() {
+        while let Some(child) = self.content.first_child() {
+            self.content.remove(&child);
+        }
+        let sections = sidebar_sections(&self.model);
+        for section in sections {
             let section_is_empty = section.nodes.is_empty();
             let rows = GtkBox::new(Orientation::Vertical, 0);
             rows.add_css_class("sidebar-tree");
@@ -86,14 +99,22 @@ impl Sidebar {
                     devices_toggle.add_css_class("sidebar-subsection-toggle");
                     let devices_expanded = self.model.borrow().preferences().devices_expanded();
                     devices_toggle.set_active(devices_expanded);
-                    devices_toggle.set_child(Some(&Image::from_icon_name(if devices_expanded { "pan-down-symbolic" } else { "pan-end-symbolic" })));
+                    devices_toggle.set_child(Some(&Image::from_icon_name(if devices_expanded {
+                        "pan-down-symbolic"
+                    } else {
+                        "pan-end-symbolic"
+                    })));
                     device_rows.set_visible(devices_expanded);
                     let device_rows_for_toggle = device_rows.clone();
                     let preferences = self.model.clone();
                     devices_toggle.connect_toggled(move |toggle| {
                         let expanded = toggle.is_active();
                         device_rows_for_toggle.set_visible(expanded);
-                        toggle.set_child(Some(&Image::from_icon_name(if expanded { "pan-down-symbolic" } else { "pan-end-symbolic" })));
+                        toggle.set_child(Some(&Image::from_icon_name(if expanded {
+                            "pan-down-symbolic"
+                        } else {
+                            "pan-end-symbolic"
+                        })));
                         let mut model = preferences.borrow_mut();
                         model.preferences_mut().set_devices_expanded(expanded);
                         let _ = model.preferences().save();
@@ -115,8 +136,11 @@ impl Sidebar {
                     rows.append(&device_heading);
                     rows.append(&device_rows);
                 }
-                if has_devices && index > 0 { self.append_node(&device_rows, node, 1); }
-                else { self.append_node(&rows, node, 0); }
+                if has_devices && index > 0 {
+                    self.append_node(&device_rows, node, 1);
+                } else {
+                    self.append_node(&rows, node, 0);
+                }
             }
 
             let heading_row = GtkBox::new(Orientation::Horizontal, 0);
@@ -124,18 +148,32 @@ impl Sidebar {
             toggle.add_css_class("flat");
             toggle.add_css_class("sidebar-section-toggle");
             let section_title = section.title.to_owned();
-            let expanded = self.model.borrow().preferences().section_expanded(&section_title);
+            let expanded = self
+                .model
+                .borrow()
+                .preferences()
+                .section_expanded(&section_title);
             toggle.set_active(expanded);
             rows.set_visible(expanded);
-            toggle.set_child(Some(&Image::from_icon_name(if expanded { "pan-down-symbolic" } else { "pan-end-symbolic" })));
+            toggle.set_child(Some(&Image::from_icon_name(if expanded {
+                "pan-down-symbolic"
+            } else {
+                "pan-end-symbolic"
+            })));
             let rows_for_toggle = rows.clone();
             let preferences = self.model.clone();
             toggle.connect_toggled(move |toggle| {
                 let expanded = toggle.is_active();
                 rows_for_toggle.set_visible(expanded);
-                toggle.set_child(Some(&Image::from_icon_name(if expanded { "pan-down-symbolic" } else { "pan-end-symbolic" })));
+                toggle.set_child(Some(&Image::from_icon_name(if expanded {
+                    "pan-down-symbolic"
+                } else {
+                    "pan-end-symbolic"
+                })));
                 let mut model = preferences.borrow_mut();
-                model.preferences_mut().set_section_expanded(section_title.clone(), expanded);
+                model
+                    .preferences_mut()
+                    .set_section_expanded(section_title.clone(), expanded);
                 let _ = model.preferences().save();
             });
             heading_row.append(&toggle);
@@ -170,8 +208,13 @@ impl Sidebar {
         }
         if let Some(manager) = self.operation_manager.borrow().as_ref() {
             if let Some(summary) = active_summary(&manager.records()) {
-                let button = Button::with_label(&summary); button.add_css_class("flat"); button.add_css_class("sidebar-operation-summary"); button.set_halign(gtk::Align::Fill);
-                let action = self.on_action.clone(); button.connect_clicked(move |_| action(SidebarAction::OpenOperations)); self.content.append(&button);
+                let button = Button::with_label(&summary);
+                button.add_css_class("flat");
+                button.add_css_class("sidebar-operation-summary");
+                button.set_halign(gtk::Align::Fill);
+                let action = self.on_action.clone();
+                button.connect_clicked(move |_| action(SidebarAction::OpenOperations));
+                self.content.append(&button);
             }
         }
     }
@@ -180,7 +223,11 @@ impl Sidebar {
         *self.operation_manager.borrow_mut() = Some(manager.clone());
         let sidebar = self.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
-            let next = sidebar.operation_manager.borrow().as_ref().and_then(|manager| active_summary(&manager.records()));
+            let next = sidebar
+                .operation_manager
+                .borrow()
+                .as_ref()
+                .and_then(|manager| active_summary(&manager.records()));
             if operation_summary_changed(&sidebar.operation_summary.borrow(), &next) {
                 *sidebar.operation_summary.borrow_mut() = next;
                 sidebar.refresh();
@@ -199,11 +246,39 @@ impl Sidebar {
         self.refresh();
     }
 
-    fn append_node(&self, parent: &GtkBox, node: SidebarNode, depth: i32) {
-        Self::append_node_inner(parent, node, depth, self.model.clone(), self.on_action.clone(), self.active_path.clone(), self.mount_parent.clone());
+    pub fn toggle_quick_access(&self, path: PathBuf) {
+        let mut model = self.model.borrow_mut();
+        if model.preferences().is_pinned(&path) {
+            model.preferences_mut().unpin(&path);
+        } else {
+            model.preferences_mut().pin(path);
+        }
+        let _ = model.preferences().save();
+        drop(model);
+        self.refresh();
     }
 
-    fn append_node_inner(parent: &GtkBox, node: SidebarNode, depth: i32, model: Rc<RefCell<SidebarModel>>, on_action: Rc<dyn Fn(SidebarAction)>, active_path: Rc<RefCell<Option<PathBuf>>>, mount_parent: gtk::Window) {
+    fn append_node(&self, parent: &GtkBox, node: SidebarNode, depth: i32) {
+        Self::append_node_inner(
+            parent,
+            node,
+            depth,
+            self.model.clone(),
+            self.on_action.clone(),
+            self.active_path.clone(),
+            self.mount_parent.clone(),
+        );
+    }
+
+    fn append_node_inner(
+        parent: &GtkBox,
+        node: SidebarNode,
+        depth: i32,
+        model: Rc<RefCell<SidebarModel>>,
+        on_action: Rc<dyn Fn(SidebarAction)>,
+        active_path: Rc<RefCell<Option<PathBuf>>>,
+        mount_parent: gtk::Window,
+    ) {
         let row = GtkBox::new(Orientation::Vertical, 0);
         let header = GtkBox::new(Orientation::Horizontal, 0);
         header.set_margin_start(depth * 16);
@@ -215,7 +290,15 @@ impl Sidebar {
             let expander = ToggleButton::new();
             expander.add_css_class("flat");
             expander.add_css_class("sidebar-expander");
-            let chevron = Image::from_icon_name("pan-end-symbolic");
+            let initially_expanded = model
+                .borrow()
+                .preferences()
+                .location_expanded(&node.location);
+            let chevron = Image::from_icon_name(if initially_expanded {
+                "pan-down-symbolic"
+            } else {
+                "pan-end-symbolic"
+            });
             chevron.set_pixel_size(14);
             expander.set_child(Some(&chevron));
             let children_model = model.clone();
@@ -227,16 +310,41 @@ impl Sidebar {
             expander.connect_toggled(move |button| {
                 let expanded = button.is_active();
                 children_for_toggle.set_visible(expanded);
-                let icon = if expanded { "pan-down-symbolic" } else { "pan-end-symbolic" };
+                let icon = if expanded {
+                    "pan-down-symbolic"
+                } else {
+                    "pan-end-symbolic"
+                };
                 button.set_child(Some(&Image::from_icon_name(icon)));
+                {
+                    let mut sidebar_model = children_model.borrow_mut();
+                    sidebar_model
+                        .preferences_mut()
+                        .set_location_expanded(&child_location, expanded);
+                    let _ = sidebar_model.preferences().save();
+                }
                 if expanded && children_for_toggle.first_child().is_none() {
-                    let initial_children = children_model.borrow().children_for_location(&child_location);
+                    let initial_children = children_model
+                        .borrow()
+                        .children_for_location(&child_location);
                     if !initial_children.is_empty() || child_location.local_path().is_some() {
-                        Self::append_children(&children_for_toggle, initial_children, depth, children_model.clone(), children_action.clone(), children_active_path.clone(), children_mount_parent.clone());
+                        Self::append_children(
+                            &children_for_toggle,
+                            initial_children,
+                            depth,
+                            children_model.clone(),
+                            children_action.clone(),
+                            children_active_path.clone(),
+                            children_mount_parent.clone(),
+                        );
                     } else {
                         let location_file = gio::File::for_uri(&child_location.uri());
                         let is_mountable = location_file
-                            .query_info("standard::type", gio::FileQueryInfoFlags::NONE, gio::Cancellable::NONE)
+                            .query_info(
+                                "standard::type",
+                                gio::FileQueryInfoFlags::NONE,
+                                gio::Cancellable::NONE,
+                            )
                             .map(|info| info.file_type() == gio::FileType::Mountable)
                             .unwrap_or(false);
                         let operation = gtk::MountOperation::new(Some(&children_mount_parent));
@@ -248,22 +356,62 @@ impl Sidebar {
                         let parent_after_mount = children_mount_parent.clone();
                         let location_after_mount = child_location.clone();
                         if is_mountable {
-                            location_file.mount_mountable(gio::MountMountFlags::NONE, Some(&operation), gio::Cancellable::NONE, move |result| {
-                                let _keep_operation_alive = &keep_operation;
-                                let location = result.map(|root| SidebarLocation::from_uri(root.uri().to_string(), location_after_mount.label(), location_after_mount.icon_name())).unwrap_or(location_after_mount);
-                                let loaded = model_after_mount.borrow().children_for_location(&location);
-                                Self::append_children(&children_after_mount, loaded, depth, model_after_mount.clone(), action_after_mount.clone(), active_after_mount.clone(), parent_after_mount.clone());
-                            });
+                            location_file.mount_mountable(
+                                gio::MountMountFlags::NONE,
+                                Some(&operation),
+                                gio::Cancellable::NONE,
+                                move |result| {
+                                    let _keep_operation_alive = &keep_operation;
+                                    let location = result
+                                        .map(|root| {
+                                            SidebarLocation::from_uri(
+                                                root.uri().to_string(),
+                                                location_after_mount.label(),
+                                                location_after_mount.icon_name(),
+                                            )
+                                        })
+                                        .unwrap_or(location_after_mount);
+                                    let loaded =
+                                        model_after_mount.borrow().children_for_location(&location);
+                                    Self::append_children(
+                                        &children_after_mount,
+                                        loaded,
+                                        depth,
+                                        model_after_mount.clone(),
+                                        action_after_mount.clone(),
+                                        active_after_mount.clone(),
+                                        parent_after_mount.clone(),
+                                    );
+                                },
+                            );
                         } else {
-                            location_file.mount_enclosing_volume(gio::MountMountFlags::NONE, Some(&operation), gio::Cancellable::NONE, move |_| {
-                                let _keep_operation_alive = &keep_operation;
-                                let loaded = model_after_mount.borrow().children_for_location(&location_after_mount);
-                                Self::append_children(&children_after_mount, loaded, depth, model_after_mount.clone(), action_after_mount.clone(), active_after_mount.clone(), parent_after_mount.clone());
-                            });
+                            location_file.mount_enclosing_volume(
+                                gio::MountMountFlags::NONE,
+                                Some(&operation),
+                                gio::Cancellable::NONE,
+                                move |_| {
+                                    let _keep_operation_alive = &keep_operation;
+                                    let loaded = model_after_mount
+                                        .borrow()
+                                        .children_for_location(&location_after_mount);
+                                    Self::append_children(
+                                        &children_after_mount,
+                                        loaded,
+                                        depth,
+                                        model_after_mount.clone(),
+                                        action_after_mount.clone(),
+                                        active_after_mount.clone(),
+                                        parent_after_mount.clone(),
+                                    );
+                                },
+                            );
                         }
                     }
                 }
             });
+            if initially_expanded {
+                expander.set_active(true);
+            }
             header.append(&expander);
         } else {
             let spacer = GtkBox::new(Orientation::Horizontal, 0);
@@ -276,7 +424,11 @@ impl Sidebar {
         button.set_halign(gtk::Align::Fill);
         button.add_css_class("flat");
         button.add_css_class("sidebar-location");
-        if node.location.local_path().is_some_and(|path| active_path.borrow().as_deref() == Some(path)) {
+        if node
+            .location
+            .local_path()
+            .is_some_and(|path| active_path.borrow().as_deref() == Some(path))
+        {
             button.add_css_class("selected");
         }
         let button_content = GtkBox::new(Orientation::Horizontal, 8);
@@ -305,13 +457,34 @@ impl Sidebar {
         parent.append(&row);
     }
 
-    fn append_children(parent: &GtkBox, children: Vec<SidebarNode>, depth: i32, model: Rc<RefCell<SidebarModel>>, on_action: Rc<dyn Fn(SidebarAction)>, active_path: Rc<RefCell<Option<PathBuf>>>, mount_parent: gtk::Window) {
+    fn append_children(
+        parent: &GtkBox,
+        children: Vec<SidebarNode>,
+        depth: i32,
+        model: Rc<RefCell<SidebarModel>>,
+        on_action: Rc<dyn Fn(SidebarAction)>,
+        active_path: Rc<RefCell<Option<PathBuf>>>,
+        mount_parent: gtk::Window,
+    ) {
         for child in children {
-            Self::append_node_inner(parent, child, depth + 1, model.clone(), on_action.clone(), active_path.clone(), mount_parent.clone());
+            Self::append_node_inner(
+                parent,
+                child,
+                depth + 1,
+                model.clone(),
+                on_action.clone(),
+                active_path.clone(),
+                mount_parent.clone(),
+            );
         }
     }
 
-    fn add_context_menu(button: &Button, location: &SidebarLocation, model: Rc<RefCell<SidebarModel>>, action: Rc<dyn Fn(SidebarAction)>) {
+    fn add_context_menu(
+        button: &Button,
+        location: &SidebarLocation,
+        model: Rc<RefCell<SidebarModel>>,
+        action: Rc<dyn Fn(SidebarAction)>,
+    ) {
         let context_button = button.clone();
         let location = location.clone();
         let gesture = GestureClick::new();
@@ -330,39 +503,66 @@ impl Sidebar {
                 let open_action = action.clone();
                 let popover_for_open = popover.clone();
                 let uri = location.uri();
-                open.connect_clicked(move |_| { popover_for_open.popdown(); open_action(SidebarAction::OpenUri(uri.clone())); });
+                open.connect_clicked(move |_| {
+                    popover_for_open.popdown();
+                    open_action(SidebarAction::OpenUri(uri.clone()));
+                });
                 menu.append(&open);
                 if model.borrow().mount_for_location(&location).is_some() {
                     let unmount = Button::with_label("Unmount");
                     let action = action.clone();
                     let popover_for_unmount = popover.clone();
                     let uri = location.uri();
-                    unmount.connect_clicked(move |_| { popover_for_unmount.popdown(); action(SidebarAction::Unmount(uri.clone())); });
+                    unmount.connect_clicked(move |_| {
+                        popover_for_unmount.popdown();
+                        action(SidebarAction::Unmount(uri.clone()));
+                    });
                     menu.append(&unmount);
                 }
-                if model.borrow().preferences().remote_pins().iter().any(|pinned| pinned == &location.uri()) {
+                if model
+                    .borrow()
+                    .preferences()
+                    .remote_pins()
+                    .iter()
+                    .any(|pinned| pinned == &location.uri())
+                {
                     let unpin = Button::with_label("Unpin from Network & online");
                     let action = action.clone();
                     let popover_for_unpin = popover.clone();
                     let uri = location.uri();
-                    unpin.connect_clicked(move |_| { popover_for_unpin.popdown(); action(SidebarAction::UnpinRemote(uri.clone())); });
+                    unpin.connect_clicked(move |_| {
+                        popover_for_unpin.popdown();
+                        action(SidebarAction::UnpinRemote(uri.clone()));
+                    });
                     menu.append(&unpin);
                 }
                 popover.set_child(Some(&menu));
                 popover.popup();
                 return;
             }
-            let path = location.local_path().expect("local location was checked").to_path_buf();
+            let path = location
+                .local_path()
+                .expect("local location was checked")
+                .to_path_buf();
             for (label, sidebar_action) in [
                 ("Open", SidebarAction::Open(path.clone())),
                 ("Open in New Tab", SidebarAction::OpenInNewTab(path.clone())),
-                ("Open in New Window", SidebarAction::OpenInNewWindow(path.clone())),
-                ("Open in Terminal", SidebarAction::OpenInTerminal(path.clone())),
+                (
+                    "Open in New Window",
+                    SidebarAction::OpenInNewWindow(path.clone()),
+                ),
+                (
+                    "Open in Terminal",
+                    SidebarAction::OpenInTerminal(path.clone()),
+                ),
             ] {
                 let item = Button::with_label(label);
                 let action = action.clone();
                 let popover = popover.clone();
-                item.connect_clicked(move |_| { popover.popdown(); action(sidebar_action.clone()); });
+                item.connect_clicked(move |_| {
+                    popover.popdown();
+                    action(sidebar_action.clone());
+                });
                 menu.append(&item);
             }
             let separator = gtk::Separator::new(Orientation::Horizontal);
@@ -374,15 +574,29 @@ impl Sidebar {
                 let action = action.clone();
                 let popover_for_unmount = popover.clone();
                 let uri = location.uri();
-                unmount.connect_clicked(move |_| { popover_for_unmount.popdown(); action(SidebarAction::Unmount(uri.clone())); });
+                unmount.connect_clicked(move |_| {
+                    popover_for_unmount.popdown();
+                    action(SidebarAction::Unmount(uri.clone()));
+                });
                 menu.append(&unmount);
             }
             let is_pinned = model.borrow().preferences().is_pinned(&path);
-            let pin_item = Button::with_label(if is_pinned { "Unpin from Quick access" } else { "Pin to Quick access" });
+            let pin_item = Button::with_label(if is_pinned {
+                "Unpin from Quick access"
+            } else {
+                "Pin to Quick access"
+            });
             let action = action.clone();
             let popover_for_pin = popover.clone();
-            let pin_action = if is_pinned { SidebarAction::Unpin(path.clone()) } else { SidebarAction::Pin(path.clone()) };
-            pin_item.connect_clicked(move |_| { popover_for_pin.popdown(); action(pin_action.clone()); });
+            let pin_action = if is_pinned {
+                SidebarAction::Unpin(path.clone())
+            } else {
+                SidebarAction::Pin(path.clone())
+            };
+            pin_item.connect_clicked(move |_| {
+                popover_for_pin.popdown();
+                action(pin_action.clone());
+            });
             menu.append(&pin_item);
             popover.set_child(Some(&menu));
             popover.popup();
@@ -391,7 +605,13 @@ impl Sidebar {
     }
 }
 
-fn operation_summary_changed(previous: &Option<String>, next: &Option<String>) -> bool { previous != next }
+fn sidebar_sections(model: &Rc<RefCell<SidebarModel>>) -> Vec<SidebarSection> {
+    model.borrow().sections()
+}
+
+fn operation_summary_changed(previous: &Option<String>, next: &Option<String>) -> bool {
+    previous != next
+}
 
 fn should_show_devices_heading(section_title: &str, node_index: usize) -> bool {
     section_title == "This PC" && node_index == 1
@@ -399,6 +619,11 @@ fn should_show_devices_heading(section_title: &str, node_index: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use crate::core::{SidebarModel, SidebarPreferences};
+
     use super::should_show_devices_heading;
 
     #[test]
@@ -418,6 +643,21 @@ mod tests {
     #[test]
     fn operation_summary_only_requires_a_render_when_it_changes() {
         assert!(!super::operation_summary_changed(&None, &None));
-        assert!(super::operation_summary_changed(&None, &Some("1 file operation in progress".into())));
+        assert!(super::operation_summary_changed(
+            &None,
+            &Some("1 file operation in progress".into())
+        ));
+    }
+
+    #[test]
+    fn section_snapshot_releases_the_sidebar_model_before_rendering() {
+        let model = Rc::new(RefCell::new(SidebarModel::new(
+            SidebarPreferences::in_memory(),
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+        )));
+
+        let _sections = super::sidebar_sections(&model);
+
+        assert!(model.try_borrow_mut().is_ok());
     }
 }
