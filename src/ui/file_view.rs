@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use gio::prelude::*;
+use glib::prelude::ToValue;
 use gtk::prelude::*;
 use gtk::{
     Box as GtkBox, Button, ColumnView, ColumnViewColumn, CustomSorter, FlowBox, GestureClick,
@@ -434,6 +435,7 @@ impl FileView {
             icon.set_pixel_size(options.grid_size.icon_size());
             tile.append(&icon);
             tile.append(&grid_tile_label(item.name(), layout.label_width_chars));
+            attach_drag_source(&tile, item.clone());
             let target = file_target(item);
             let view = self.clone();
             let grid_context = grid.clone();
@@ -915,6 +917,18 @@ fn column_factory(column: ListColumn, thumbnails: bool, view: FileView) -> Signa
                 );
             });
             line.add_controller(gesture);
+            let drag_item = list_item.clone();
+            let drag_source = gtk::DragSource::new();
+            drag_source.set_actions(gtk::gdk::DragAction::COPY);
+            drag_source.connect_prepare(move |_, _, _| {
+                let object = drag_item.item().and_downcast::<glib::BoxedAnyObject>()?;
+                let row = object.borrow::<ListRow>();
+                let ListRow::File(item) = &*row else {
+                    return None;
+                };
+                drag_content_provider(item)
+            });
+            line.add_controller(drag_source);
             list_item.set_child(Some(&line));
         } else {
             let label = Label::new(None);
@@ -961,17 +975,7 @@ fn column_factory(column: ListColumn, thumbnails: bool, view: FileView) -> Signa
                     .first_child()
                     .and_downcast::<Image>()
                     .expect("name cells include an icon");
-                let item_icon = file_icon(item);
-                if let Some(gicon) = item_icon.gicon() {
-                    icon.set_from_gicon(&gicon);
-                } else {
-                    icon.set_from_icon_name(item_icon.icon_name().as_deref());
-                }
-                if thumbnails && item.content_type().starts_with("image/") {
-                    let icon = icon.clone();
-                    let path = item.path().to_path_buf();
-                    glib::idle_add_local_once(move || icon.set_from_file(Some(path)));
-                }
+                set_item_image(&icon, item, thumbnails);
                 let label = line
                     .last_child()
                     .and_downcast::<Label>()
@@ -1050,12 +1054,19 @@ fn file_target_from_row(row: &ListRow) -> Option<ContextTarget> {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::fs;
     use std::path::PathBuf;
     use std::rc::Rc;
 
+    use gio::prelude::FileExt;
     use gtk::prelude::{ListModelExt, WidgetExt};
 
-    use super::{grid_tile_label, is_mountable_file_type, uses_native_row_sorting, FileView};
+    use super::{
+        cached_thumbnail_file_for, drag_uri_for, grid_tile_label, is_mountable_file_type,
+        local_image_thumbnail_file, thumbnail_cache_paths,
+        thumbnail_cache_homes_from,
+        uses_native_row_sorting, FileView,
+    };
     use crate::core::{GroupField, ViewMode, ViewOptions};
 
     #[test]
@@ -1070,6 +1081,64 @@ mod tests {
     fn gvfs_mountable_locations_use_the_mountable_operation() {
         assert!(is_mountable_file_type(gio::FileType::Mountable));
         assert!(!is_mountable_file_type(gio::FileType::Directory));
+    }
+
+    #[test]
+    fn thumbnail_uses_the_gnome_cache_before_the_original_image() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let image_path = directory.path().join("photo.svg");
+        fs::write(&image_path, br#"<svg xmlns="http://www.w3.org/2000/svg"/>"#).unwrap();
+        let item = crate::core::file_item::FileItem::from_path(&image_path).unwrap();
+        let cached = thumbnail_cache_paths(cache.path(), &gio::File::for_path(&image_path).uri())
+            .pop()
+            .unwrap();
+        fs::create_dir_all(cached.parent().unwrap()).unwrap();
+        fs::write(&cached, b"cached thumbnail").unwrap();
+
+        assert_eq!(cached_thumbnail_file_for(&item, cache.path()), Some(cached));
+    }
+
+    #[test]
+    fn thumbnail_cache_candidates_prefer_large_before_normal() {
+        let cache = tempfile::tempdir().unwrap();
+        let uri = "file:///home/tester/Downloads/photo.jpeg";
+        let paths = thumbnail_cache_paths(cache.path(), uri);
+
+        assert_eq!(paths.len(), 2);
+        assert_eq!(paths[0].parent().unwrap().file_name().unwrap(), "large");
+        assert_eq!(paths[1].parent().unwrap().file_name().unwrap(), "normal");
+    }
+
+    #[test]
+    fn thumbnail_falls_back_to_the_original_local_image() {
+        let directory = tempfile::tempdir().unwrap();
+        let image_path = directory.path().join("photo.svg");
+        fs::write(&image_path, br#"<svg xmlns="http://www.w3.org/2000/svg"/>"#).unwrap();
+        let item = crate::core::file_item::FileItem::from_path(&image_path).unwrap();
+
+        assert_eq!(local_image_thumbnail_file(&item), Some(image_path));
+    }
+
+    #[test]
+    fn thumbnail_lookup_checks_the_shared_home_cache_before_the_sandbox_cache() {
+        let home = PathBuf::from("/home/tester");
+        let sandbox_cache = PathBuf::from("/home/tester/.var/app/com.zorin.Explorer/cache");
+
+        assert_eq!(
+            thumbnail_cache_homes_from(Some(&home), Some(&sandbox_cache)),
+            vec![home.join(".cache"), sandbox_cache]
+        );
+    }
+
+    #[test]
+    fn drag_export_uses_a_file_uri_for_local_items() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("report.txt");
+        fs::write(&path, "contents").unwrap();
+        let item = crate::core::file_item::FileItem::from_path(&path).unwrap();
+
+        assert_eq!(drag_uri_for(&item), Some(gio::File::for_path(path).uri().to_string()));
     }
 
     #[test]
@@ -1157,12 +1226,102 @@ fn file_icon(item: &FileItem) -> Image {
 
 fn item_image(item: &FileItem, thumbnails: bool) -> Image {
     let image = file_icon(item);
-    if thumbnails && item.content_type().starts_with("image/") {
-        let image = image.clone();
-        let path = item.path().to_path_buf();
-        glib::idle_add_local_once(move || image.set_from_file(Some(path)));
-    }
+    apply_thumbnail(&image, item, thumbnails);
     image
+}
+
+fn set_item_image(image: &Image, item: &FileItem, thumbnails: bool) {
+    let fallback = file_icon(item);
+    if let Some(gicon) = fallback.gicon() {
+        image.set_from_gicon(&gicon);
+    } else {
+        image.set_from_icon_name(fallback.icon_name().as_deref());
+    }
+    apply_thumbnail(image, item, thumbnails);
+}
+
+fn apply_thumbnail(image: &Image, item: &FileItem, thumbnails: bool) {
+    if !thumbnails {
+        return;
+    }
+    let path = thumbnail_cache_homes()
+        .into_iter()
+        .find_map(|cache_home| cached_thumbnail_file_for(item, &cache_home))
+        .or_else(|| local_image_thumbnail_file(item));
+    let Some(path) = path else {
+        return;
+    };
+    if let Ok(texture) = gtk::gdk::Texture::from_filename(path) {
+        image.set_from_paintable(Some(&texture));
+    }
+}
+
+fn cached_thumbnail_file_for(item: &FileItem, cache_home: &Path) -> Option<PathBuf> {
+    let uri = thumbnail_uri(item)?;
+    thumbnail_cache_paths(cache_home, &uri)
+        .into_iter()
+        .find(|cached| cached.is_file())
+}
+
+fn local_image_thumbnail_file(item: &FileItem) -> Option<PathBuf> {
+    (item.content_type().starts_with("image/") && item.path().is_file())
+        .then(|| item.path().to_path_buf())
+}
+
+fn thumbnail_uri(item: &FileItem) -> Option<String> {
+    item.uri().map(str::to_owned).or_else(|| {
+        (!item.path().as_os_str().is_empty()).then(|| gio::File::for_path(item.path()).uri().to_string())
+    })
+}
+
+fn thumbnail_cache_homes() -> Vec<PathBuf> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let xdg_cache = std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from);
+    thumbnail_cache_homes_from(home.as_deref(), xdg_cache.as_deref())
+}
+
+fn thumbnail_cache_homes_from(home: Option<&Path>, xdg_cache: Option<&Path>) -> Vec<PathBuf> {
+    let mut homes = Vec::new();
+    if let Some(home) = home {
+        homes.push(home.join(".cache"));
+    }
+    if let Some(xdg_cache) = xdg_cache {
+        let cache = xdg_cache.to_path_buf();
+        if !homes.contains(&cache) {
+            homes.push(cache);
+        }
+    }
+    homes
+}
+
+fn thumbnail_cache_paths(cache_home: &Path, uri: &str) -> Vec<PathBuf> {
+    let mut checksum = glib::Checksum::new(glib::ChecksumType::Md5)
+        .expect("MD5 is available in GLib");
+    checksum.update(uri.as_bytes());
+    let filename = format!("{}.png", checksum.string().expect("checksum has a value"));
+    ["large", "normal"]
+        .into_iter()
+        .map(|size| cache_home.join("thumbnails").join(size).join(&filename))
+        .collect()
+}
+
+fn attach_drag_source(widget: &impl IsA<gtk::Widget>, item: FileItem) {
+    let drag_source = gtk::DragSource::new();
+    drag_source.set_actions(gtk::gdk::DragAction::COPY);
+    drag_source.connect_prepare(move |_, _, _| drag_content_provider(&item));
+    widget.add_controller(drag_source);
+}
+
+fn drag_content_provider(item: &FileItem) -> Option<gtk::gdk::ContentProvider> {
+    let file = gio::File::for_uri(&drag_uri_for(item)?);
+    let files = gtk::gdk::FileList::from_array(&[file]);
+    Some(gtk::gdk::ContentProvider::for_value(&files.to_value()))
+}
+
+fn drag_uri_for(item: &FileItem) -> Option<String> {
+    item.uri().map(str::to_owned).or_else(|| {
+        (!item.path().as_os_str().is_empty()).then(|| gio::File::for_path(item.path()).uri().to_string())
+    })
 }
 
 fn format_modified(modified: std::time::SystemTime) -> String {
