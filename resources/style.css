@@ -86,10 +86,17 @@
   min-width: 220px;
 }
 
-.sidebar-section-heading {
+button.sidebar-section-heading {
   margin-top: 4px;
   margin-bottom: 3px;
   padding-left: 4px;
+  border-radius: 6px;
+  text-align: left;
+}
+
+button.sidebar-section-heading:hover,
+button.sidebar-section-heading.selected {
+  background-color: alpha(@accent_bg_color, 0.14);
 }
 
 .sidebar-subheading {
@@ -127,6 +134,19 @@ button.sidebar-tree-child:hover {
 button.sidebar-location.selected {
   background-color: alpha(@accent_bg_color, 0.14);
   color: @window_fg_color;
+}
+
+.section-overview-entry {
+  border-radius: 8px;
+  background-color: alpha(@window_fg_color, 0.045);
+}
+
+.section-overview-entry:hover {
+  background-color: alpha(@accent_bg_color, 0.12);
+}
+
+.section-overview-entry progressbar {
+  min-height: 6px;
 }
 
 /* Location glyphs support their labels rather than competing with the active

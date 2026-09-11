@@ -182,6 +182,25 @@ impl ExplorerWindow {
         let sidebar_model_actions = sidebar_model.clone();
         let sidebar_holder_actions = sidebar_holder.clone();
         let sidebar = Sidebar::new(sidebar_model.clone(), &window, move |action| match action {
+            SidebarAction::OpenSection(title) => {
+                let section = sidebar_model_actions
+                    .borrow()
+                    .sections()
+                    .into_iter()
+                    .find(|section| section.title == title);
+                let sidebar = sidebar_holder_actions.borrow().clone();
+                if let (Some(index), Some(section), Some(sidebar)) = (
+                    selected_index(&sidebar_context_tabs, &sidebar_context_data),
+                    section,
+                    sidebar,
+                ) {
+                    let tab = &sidebar_context_data.borrow()[index];
+                    tab.view.show_section_overview(section.clone());
+                    tab.page.set_title(&section.title);
+                    sidebar_context_header.set_section(&section.title);
+                    sidebar.set_active_section(section.title);
+                }
+            }
             SidebarAction::Open(path) => {
                 let sidebar = sidebar_holder_actions.borrow().clone();
                 if let (Some(index), Some(sidebar)) = (
@@ -559,16 +578,21 @@ impl ExplorerWindow {
         tabs.view.connect_selected_page_notify(move |view| {
             if let Some(index) = selected_index(view, &select_data) {
                 let tab = &select_data.borrow()[index];
-                if let Some(uri) = tab.view.uri() {
+                if let Some(title) = tab.view.section_title() {
+                    select_header.set_section(&title);
+                    select_sidebar.set_active_section(title);
+                } else if let Some(uri) = tab.view.uri() {
                     select_header.set_uri(&uri);
                 } else {
                     select_header.set_location(&tab.location.borrow());
                 }
-                sync_sidebar_for_tab(
-                    &select_sidebar,
-                    &tab.location.borrow(),
-                    tab.view.uri().is_some(),
-                );
+                if tab.view.section_title().is_none() {
+                    sync_sidebar_for_tab(
+                        &select_sidebar,
+                        &tab.location.borrow(),
+                        tab.view.uri().is_some(),
+                    );
+                }
             }
         });
 

@@ -14,8 +14,10 @@ use gtk::{
 use crate::core::directory_model::DirectoryModel;
 use crate::core::file_item::FileItem;
 use crate::core::{
-    GroupField, ListColumn, ListColumnLayout, SortDirection, SortField, ViewMode, ViewOptions,
+    GroupField, ListColumn, ListColumnLayout, SidebarLocation, SidebarNode, SortDirection,
+    SortField, ViewMode, ViewOptions,
 };
+use crate::core::sidebar_model::SidebarSection;
 use crate::ui::context_menu::{
     delete_command, item_commands, open_with_apps, ContextCommand, ContextTarget,
 };
@@ -24,6 +26,20 @@ use crate::ui::context_menu::{
 enum ListRow {
     Group(String),
     File(FileItem),
+}
+
+fn filesystem_space(path: &Path) -> Option<(u64, u64)> {
+    gio::File::for_path(path)
+        .query_filesystem_info(
+            "filesystem::size,filesystem::free",
+            gio::Cancellable::NONE,
+        )
+        .ok()
+        .map(|info| (
+            info.attribute_uint64("filesystem::size"),
+            info.attribute_uint64("filesystem::free"),
+        ))
+        .filter(|(total, _)| *total > 0)
 }
 
 #[derive(Clone)]
@@ -39,6 +55,7 @@ pub struct FileView {
     selected_target: Rc<RefCell<Option<ContextTarget>>>,
     pending_cut: Rc<RefCell<Option<PathBuf>>>,
     search_results: Rc<RefCell<Option<Vec<FileItem>>>>,
+    section_overview: Rc<RefCell<Option<SidebarSection>>>,
     is_quick_access_location: Rc<RefCell<Option<Rc<dyn Fn(&Path) -> bool>>>>,
 }
 
@@ -59,6 +76,7 @@ impl FileView {
             selected_target: Rc::new(RefCell::new(None)),
             pending_cut: Rc::new(RefCell::new(None)),
             search_results: Rc::new(RefCell::new(None)),
+            section_overview: Rc::new(RefCell::new(None)),
             is_quick_access_location: Rc::new(RefCell::new(None)),
         };
         let background_view = view.clone();
@@ -66,16 +84,18 @@ impl FileView {
         background.set_button(3);
         let background_parent = view.widget.clone();
         background.connect_pressed(move |gesture, _, x, y| {
-            show_item_context_menu(
-                &background_parent,
-                x,
-                y,
-                ContextTarget::Background(background_view.location()),
-                &background_view,
-                gesture
-                    .current_event_state()
-                    .contains(gtk::gdk::ModifierType::SHIFT_MASK),
-            )
+            if background_view.section_title().is_none() {
+                show_item_context_menu(
+                    &background_parent,
+                    x,
+                    y,
+                    ContextTarget::Background(background_view.location()),
+                    &background_view,
+                    gesture
+                        .current_event_state()
+                        .contains(gtk::gdk::ModifierType::SHIFT_MASK),
+                )
+            }
         });
         view.widget.add_controller(background);
         view.reload();
@@ -83,6 +103,7 @@ impl FileView {
     }
 
     pub fn set_location(&self, path: PathBuf) {
+        *self.section_overview.borrow_mut() = None;
         *self.remote_uri.borrow_mut() = None;
         *self.location.borrow_mut() = path;
         *self.selected_target.borrow_mut() = None;
@@ -91,6 +112,7 @@ impl FileView {
     }
 
     pub fn set_uri(&self, uri: String) {
+        *self.section_overview.borrow_mut() = None;
         *self.remote_uri.borrow_mut() = Some(uri.clone());
         *self.selected_target.borrow_mut() = None;
         *self.search_results.borrow_mut() = None;
@@ -218,7 +240,29 @@ impl FileView {
         self.search_results.borrow().is_some()
     }
 
+    /// Displays the immediate entries belonging to a sidebar section. Sections
+    /// are virtual locations, so they intentionally do not alter the tab's
+    /// filesystem location or navigation history.
+    pub fn show_section_overview(&self, section: SidebarSection) {
+        *self.remote_uri.borrow_mut() = None;
+        *self.selected_target.borrow_mut() = None;
+        *self.search_results.borrow_mut() = None;
+        *self.section_overview.borrow_mut() = Some(section);
+        self.reload();
+    }
+
+    pub fn section_title(&self) -> Option<String> {
+        self.section_overview
+            .borrow()
+            .as_ref()
+            .map(|section| section.title.clone())
+    }
+
     fn reload(&self) {
+        if let Some(section) = self.section_overview.borrow().clone() {
+            self.render_section_overview(&section);
+            return;
+        }
         let options = self.options();
         if let Some(items) = self.search_results.borrow().clone() {
             self.render(items, &options);
@@ -238,6 +282,112 @@ impl FileView {
                 self.widget.set_child(Some(&Label::new(Some(&format!(
                     "Unable to open folder: {error}"
                 )))));
+            }
+        }
+    }
+
+    fn render_section_overview(&self, section: &SidebarSection) {
+        let page = GtkBox::new(Orientation::Vertical, 18);
+        page.add_css_class("section-overview");
+        page.set_margin_top(24);
+        page.set_margin_bottom(24);
+        page.set_margin_start(28);
+        page.set_margin_end(28);
+
+        let title = Label::new(Some(&section.title));
+        title.add_css_class("title-1");
+        title.set_xalign(0.0);
+        page.append(&title);
+
+        if section.title == "This PC" {
+            let description = Label::new(Some("Storage and locations on this computer"));
+            description.add_css_class("dim-label");
+            description.set_xalign(0.0);
+            page.append(&description);
+        }
+
+        let entries_heading = Label::new(Some(if section.title == "This PC" {
+            "Drives"
+        } else {
+            "Locations"
+        }));
+        entries_heading.add_css_class("heading");
+        entries_heading.set_xalign(0.0);
+        page.append(&entries_heading);
+
+        let entries = GtkBox::new(Orientation::Vertical, 6);
+        entries.add_css_class("section-overview-entries");
+        if section.nodes.is_empty() {
+            let empty = Label::new(Some("No locations are available here yet."));
+            empty.add_css_class("dim-label");
+            empty.set_xalign(0.0);
+            entries.append(&empty);
+        } else {
+            for node in &section.nodes {
+                entries.append(&self.section_entry(node, section.title == "This PC"));
+            }
+        }
+        page.append(&entries);
+
+        self.widget.set_child(Some(&page));
+    }
+
+    fn section_entry(&self, node: &SidebarNode, show_storage: bool) -> Button {
+        let button = Button::new();
+        button.add_css_class("flat");
+        button.add_css_class("section-overview-entry");
+        button.set_halign(gtk::Align::Fill);
+        let content = GtkBox::new(Orientation::Horizontal, 12);
+        content.set_margin_top(10);
+        content.set_margin_bottom(10);
+        content.set_margin_start(12);
+        content.set_margin_end(12);
+        let icon = Image::from_icon_name(node.location.icon_name());
+        icon.set_pixel_size(24);
+        content.append(&icon);
+
+        let text = GtkBox::new(Orientation::Vertical, 3);
+        text.set_hexpand(true);
+        let label = Label::new(Some(node.location.label()));
+        label.set_xalign(0.0);
+        text.append(&label);
+        if show_storage {
+            if let Some(path) = node.location.local_path() {
+                if let Some((total, free)) = filesystem_space(path) {
+                    let detail = Label::new(Some(&format!(
+                        "{} free of {}",
+                        crate::core::file_item::format_size(free),
+                        crate::core::file_item::format_size(total)
+                    )));
+                    detail.add_css_class("dim-label");
+                    detail.set_xalign(0.0);
+                    text.append(&detail);
+                    let progress = gtk::ProgressBar::new();
+                    progress.set_fraction((1.0 - free as f64 / total.max(1) as f64).clamp(0.0, 1.0));
+                    progress.set_show_text(false);
+                    text.append(&progress);
+                }
+            }
+        }
+        content.append(&text);
+        button.set_child(Some(&content));
+        let view = self.clone();
+        let location = node.location.clone();
+        button.connect_clicked(move |_| view.open_sidebar_location(&location));
+        button
+    }
+
+    fn open_sidebar_location(&self, location: &SidebarLocation) {
+        match location.local_path() {
+            Some(path) => {
+                if let Some(callback) = self.on_navigate.borrow().as_ref() {
+                    callback(path.to_path_buf());
+                }
+            }
+            None => {
+                if let Some(callback) = self.on_uri_navigate.borrow().as_ref() {
+                    callback(location.uri());
+                }
             }
         }
     }
