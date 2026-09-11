@@ -254,7 +254,7 @@ impl Sidebar {
     }
 
     pub fn clear_active_path(&self) {
-        *self.active_path.borrow_mut() = None;
+        clear_navigation_selection(&self.active_path, &self.active_section);
         self.refresh();
     }
 
@@ -627,6 +627,14 @@ fn sidebar_sections(model: &Rc<RefCell<SidebarModel>>) -> Vec<SidebarSection> {
     model.borrow().sections()
 }
 
+fn clear_navigation_selection(
+    active_path: &RefCell<Option<PathBuf>>,
+    active_section: &RefCell<Option<String>>,
+) {
+    *active_path.borrow_mut() = None;
+    *active_section.borrow_mut() = None;
+}
+
 fn operation_summary_changed(previous: &Option<String>, next: &Option<String>) -> bool {
     previous != next
 }
@@ -638,6 +646,7 @@ fn should_show_devices_heading(section_title: &str, node_index: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::path::PathBuf;
     use std::rc::Rc;
 
     use crate::core::{SidebarModel, SidebarPreferences};
@@ -665,6 +674,17 @@ mod tests {
             &None,
             &Some("1 file operation in progress".into())
         ));
+    }
+
+    #[test]
+    fn clearing_navigation_selection_also_clears_the_active_section() {
+        let active_path = RefCell::new(Some(PathBuf::from("/tmp/example")));
+        let active_section = RefCell::new(Some("Network & online".to_string()));
+
+        super::clear_navigation_selection(&active_path, &active_section);
+
+        assert!(active_path.borrow().is_none());
+        assert!(active_section.borrow().is_none());
     }
 
     #[test]
