@@ -28,6 +28,27 @@ enum ListRow {
     File(FileItem),
 }
 
+#[derive(Clone, Default)]
+struct ViewNavigationState {
+    remote_uri: Option<String>,
+    section_overview: Option<SidebarSection>,
+}
+
+impl ViewNavigationState {
+    fn set_uri(&mut self, uri: String) {
+        self.remote_uri = Some(uri);
+        self.section_overview = None;
+    }
+
+    fn show_section(&mut self, section: SidebarSection) {
+        self.section_overview = Some(section);
+    }
+
+    fn clear_section(&mut self) -> bool {
+        self.section_overview.take().is_some()
+    }
+}
+
 fn filesystem_space(path: &Path) -> Option<(u64, u64)> {
     gio::File::for_path(path)
         .query_filesystem_info(
@@ -46,7 +67,7 @@ fn filesystem_space(path: &Path) -> Option<(u64, u64)> {
 pub struct FileView {
     pub widget: ScrolledWindow,
     location: Rc<RefCell<PathBuf>>,
-    remote_uri: Rc<RefCell<Option<String>>>,
+    navigation_state: Rc<RefCell<ViewNavigationState>>,
     on_navigate: Rc<RefCell<Option<Box<dyn Fn(PathBuf)>>>>,
     on_uri_navigate: Rc<RefCell<Option<Box<dyn Fn(String)>>>>,
     on_context_command: Rc<RefCell<Option<Box<dyn Fn(ContextTarget, ContextCommand)>>>>,
@@ -55,7 +76,6 @@ pub struct FileView {
     selected_target: Rc<RefCell<Option<ContextTarget>>>,
     pending_cut: Rc<RefCell<Option<PathBuf>>>,
     search_results: Rc<RefCell<Option<Vec<FileItem>>>>,
-    section_overview: Rc<RefCell<Option<SidebarSection>>>,
     is_quick_access_location: Rc<RefCell<Option<Rc<dyn Fn(&Path) -> bool>>>>,
 }
 
@@ -67,7 +87,7 @@ impl FileView {
         let view = Self {
             widget: scroll,
             location,
-            remote_uri: Rc::new(RefCell::new(None)),
+            navigation_state: Rc::new(RefCell::new(ViewNavigationState::default())),
             on_navigate,
             on_uri_navigate: Rc::new(RefCell::new(None)),
             on_context_command: Rc::new(RefCell::new(None)),
@@ -76,7 +96,6 @@ impl FileView {
             selected_target: Rc::new(RefCell::new(None)),
             pending_cut: Rc::new(RefCell::new(None)),
             search_results: Rc::new(RefCell::new(None)),
-            section_overview: Rc::new(RefCell::new(None)),
             is_quick_access_location: Rc::new(RefCell::new(None)),
         };
         let background_view = view.clone();
@@ -103,8 +122,7 @@ impl FileView {
     }
 
     pub fn set_location(&self, path: PathBuf) {
-        *self.section_overview.borrow_mut() = None;
-        *self.remote_uri.borrow_mut() = None;
+        *self.navigation_state.borrow_mut() = ViewNavigationState::default();
         *self.location.borrow_mut() = path;
         *self.selected_target.borrow_mut() = None;
         *self.search_results.borrow_mut() = None;
@@ -112,8 +130,7 @@ impl FileView {
     }
 
     pub fn set_uri(&self, uri: String) {
-        *self.section_overview.borrow_mut() = None;
-        *self.remote_uri.borrow_mut() = Some(uri.clone());
+        self.navigation_state.borrow_mut().set_uri(uri.clone());
         *self.selected_target.borrow_mut() = None;
         *self.search_results.borrow_mut() = None;
         self.widget
@@ -141,7 +158,8 @@ impl FileView {
                 move |result| {
                     let _keep_operation_alive = &keep_operation;
                     if let Ok(mounted_root) = result {
-                        *view.remote_uri.borrow_mut() = Some(mounted_root.uri().to_string());
+                        view.navigation_state.borrow_mut().remote_uri =
+                            Some(mounted_root.uri().to_string());
                     }
                     view.reload();
                 },
@@ -217,7 +235,7 @@ impl FileView {
     }
 
     pub fn uri(&self) -> Option<String> {
-        self.remote_uri.borrow().clone()
+        self.navigation_state.borrow().remote_uri.clone()
     }
 
     /// Replaces the current listing with search results, which may include
@@ -244,22 +262,31 @@ impl FileView {
     /// are virtual locations, so they intentionally do not alter the tab's
     /// filesystem location or navigation history.
     pub fn show_section_overview(&self, section: SidebarSection) {
-        *self.remote_uri.borrow_mut() = None;
         *self.selected_target.borrow_mut() = None;
         *self.search_results.borrow_mut() = None;
-        *self.section_overview.borrow_mut() = Some(section);
+        self.navigation_state.borrow_mut().show_section(section);
         self.reload();
     }
 
+    /// Leaves the virtual overview and restores the tab's underlying location.
+    pub fn clear_section_overview(&self) -> bool {
+        let was_showing = self.navigation_state.borrow_mut().clear_section();
+        if was_showing {
+            self.reload();
+        }
+        was_showing
+    }
+
     pub fn section_title(&self) -> Option<String> {
-        self.section_overview
+        self.navigation_state
             .borrow()
+            .section_overview
             .as_ref()
             .map(|section| section.title.clone())
     }
 
     fn reload(&self) {
-        if let Some(section) = self.section_overview.borrow().clone() {
+        if let Some(section) = self.navigation_state.borrow().section_overview.clone() {
             self.render_section_overview(&section);
             return;
         }
@@ -269,8 +296,9 @@ impl FileView {
             return;
         }
         let result = self
-            .remote_uri
+            .navigation_state
             .borrow()
+            .remote_uri
             .as_deref()
             .map(|uri| DirectoryModel::load_uri_with_options(uri, &options))
             .unwrap_or_else(|| {
@@ -1215,9 +1243,45 @@ mod tests {
         cached_thumbnail_file_for, drag_uri_for, grid_tile_label, is_mountable_file_type,
         local_image_thumbnail_file, thumbnail_cache_paths,
         thumbnail_cache_homes_from,
-        uses_native_row_sorting, FileView,
+        uses_native_row_sorting, FileView, ViewNavigationState,
     };
+    use crate::core::sidebar_model::SidebarSection;
     use crate::core::{GroupField, ViewMode, ViewOptions};
+
+    #[test]
+    fn section_overview_preserves_and_restores_a_remote_location() {
+        let mut state = ViewNavigationState::default();
+        state.set_uri("smb://server/share".into());
+        state.show_section(SidebarSection {
+            title: "This PC".into(),
+            nodes: Vec::new(),
+        });
+
+        assert_eq!(state.remote_uri.as_deref(), Some("smb://server/share"));
+        assert!(state.clear_section());
+        assert_eq!(state.remote_uri.as_deref(), Some("smb://server/share"));
+        assert!(state.section_overview.is_none());
+    }
+
+    #[test]
+    fn refreshing_a_section_overview_keeps_its_remote_backing_location() {
+        let mut state = ViewNavigationState::default();
+        state.set_uri("smb://server/share".into());
+        state.show_section(SidebarSection {
+            title: "Network & online".into(),
+            nodes: Vec::new(),
+        });
+        state.show_section(SidebarSection {
+            title: "Network & online".into(),
+            nodes: Vec::new(),
+        });
+
+        assert_eq!(state.remote_uri.as_deref(), Some("smb://server/share"));
+        assert_eq!(
+            state.section_overview.as_ref().map(|section| section.title.as_str()),
+            Some("Network & online")
+        );
+    }
 
     #[test]
     fn grouped_lists_do_not_apply_a_second_native_row_sort() {

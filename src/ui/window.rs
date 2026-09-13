@@ -605,6 +605,42 @@ impl ExplorerWindow {
             let Some(index) = selected_index(&navigation_tabs, &navigation_data) else {
                 return;
             };
+            let view = navigation_data.borrow()[index].view.clone();
+            if let Some(section_title) = view.section_title() {
+                match action {
+                    NavigationAction::Back => {
+                        if view.clear_section_overview() {
+                            restore_underlying_location(
+                                index,
+                                &navigation_data,
+                                &navigation_tabs,
+                                &navigation_header,
+                                &navigation_sidebar,
+                            );
+                        }
+                        return;
+                    }
+                    NavigationAction::Refresh => {
+                        if let Some(section) = navigation_sidebar
+                            .model()
+                            .borrow()
+                            .sections()
+                            .into_iter()
+                            .find(|section| section.title == section_title)
+                        {
+                            view.show_section_overview(section);
+                        }
+                        return;
+                    }
+                    NavigationAction::Forward | NavigationAction::Up => {}
+                }
+            }
+            if matches!(action, NavigationAction::Refresh) {
+                if let Some(uri) = view.uri() {
+                    view.set_uri(uri);
+                    return;
+                }
+            }
             let next = {
                 let data = navigation_data.borrow_mut();
                 match action {
@@ -1605,6 +1641,44 @@ fn navigate_uri_tab(
     {
         header.set_uri(&uri);
         sidebar.clear_active_path();
+    }
+}
+
+/// Reinstates the location hidden behind a virtual sidebar overview. A remote
+/// location has no local history entry, so it must be restored from FileView's
+/// retained URI rather than the tab's last local path.
+fn restore_underlying_location(
+    index: usize,
+    data: &Rc<RefCell<Vec<TabData>>>,
+    tabs: &TabView,
+    header: &HeaderControls,
+    sidebar: &Sidebar,
+) {
+    let data_ref = data.borrow();
+    let Some(tab) = data_ref.get(index) else {
+        return;
+    };
+    if let Some(uri) = tab.view.uri() {
+        tab.page.set_title(&uri_title(&uri));
+        if tabs
+            .selected_page()
+            .as_ref()
+            .is_some_and(|page| *page == tab.page)
+        {
+            header.set_uri(&uri);
+            sidebar.clear_active_path();
+        }
+    } else {
+        let path = tab.location.borrow();
+        tab.page.set_title(&tab_title(&path));
+        if tabs
+            .selected_page()
+            .as_ref()
+            .is_some_and(|page| *page == tab.page)
+        {
+            header.set_location(&path);
+            sidebar.set_active_path(&path);
+        }
     }
 }
 
