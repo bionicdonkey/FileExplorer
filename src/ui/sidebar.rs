@@ -264,6 +264,11 @@ impl Sidebar {
         self.refresh();
     }
 
+    #[cfg(test)]
+    pub(crate) fn active_navigation_selection(&self) -> (Option<PathBuf>, Option<String>) {
+        (self.active_path.borrow().clone(), self.active_section.borrow().clone())
+    }
+
     pub fn toggle_quick_access(&self, path: PathBuf) {
         let mut model = self.model.borrow_mut();
         if model.preferences().is_pinned(&path) {

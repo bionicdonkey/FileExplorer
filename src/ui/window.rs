@@ -605,80 +605,15 @@ impl ExplorerWindow {
             let Some(index) = selected_index(&navigation_tabs, &navigation_data) else {
                 return;
             };
-            let view = navigation_data.borrow()[index].view.clone();
-            if let Some(section_title) = view.section_title() {
-                match action {
-                    NavigationAction::Back => {
-                        if view.clear_section_overview() {
-                            restore_underlying_location(
-                                index,
-                                &navigation_data,
-                                &navigation_tabs,
-                                &navigation_header,
-                                &navigation_sidebar,
-                            );
-                        }
-                        return;
-                    }
-                    NavigationAction::Refresh => {
-                        if let Some(section) = navigation_sidebar
-                            .model()
-                            .borrow()
-                            .sections()
-                            .into_iter()
-                            .find(|section| section.title == section_title)
-                        {
-                            view.show_section_overview(section);
-                        }
-                        return;
-                    }
-                    NavigationAction::Forward | NavigationAction::Up => {}
-                }
-            }
-            if matches!(action, NavigationAction::Refresh) {
-                if let Some(uri) = view.uri() {
-                    view.set_uri(uri);
-                    return;
-                }
-            }
-            let next = {
-                let data = navigation_data.borrow_mut();
-                match action {
-                    NavigationAction::Back => data[index]
-                        .history
-                        .borrow_mut()
-                        .back()
-                        .map(ToOwned::to_owned),
-                    NavigationAction::Forward => data[index]
-                        .history
-                        .borrow_mut()
-                        .forward()
-                        .map(ToOwned::to_owned),
-                    NavigationAction::Up => data[index]
-                        .location
-                        .borrow()
-                        .parent()
-                        .map(ToOwned::to_owned),
-                    NavigationAction::Refresh => Some(data[index].location.borrow().clone()),
-                }
-            };
-            if let Some(path) = next {
-                navigate_tab(
-                    index,
-                    path,
-                    &navigation_data,
-                    &navigation_tabs,
-                    &navigation_header,
-                    &navigation_preferences,
-                    &navigation_sidebar,
-                    !matches!(
-                        action,
-                        NavigationAction::Back
-                            | NavigationAction::Forward
-                            | NavigationAction::Refresh
-                    ),
-                );
-            }
+            handle_navigation_action(
+                index,
+                action,
+                &navigation_data,
+                &navigation_tabs,
+                &navigation_header,
+                &navigation_preferences,
+                &navigation_sidebar,
+            );
         });
 
         let breadcrumb_data = tabs_data.clone();
@@ -752,6 +687,83 @@ fn history_with(path: PathBuf) -> Rc<RefCell<NavigationHistory>> {
     let history = Rc::new(RefCell::new(NavigationHistory::new()));
     history.borrow_mut().push(path);
     history
+}
+
+fn handle_navigation_action(
+    index: usize,
+    action: NavigationAction,
+    data: &Rc<RefCell<Vec<TabData>>>,
+    tabs: &TabView,
+    header: &HeaderControls,
+    preferences: &Rc<RefCell<ViewPreferencesStore>>,
+    sidebar: &Sidebar,
+) {
+    let view = data.borrow()[index].view.clone();
+    if let Some(section_title) = view.section_title() {
+        match action {
+            NavigationAction::Back => {
+                if view.clear_section_overview() {
+                    restore_underlying_location(index, data, tabs, header, sidebar);
+                }
+                return;
+            }
+            NavigationAction::Refresh => {
+                if let Some(section) = sidebar
+                    .model()
+                    .borrow()
+                    .sections()
+                    .into_iter()
+                    .find(|section| section.title == section_title)
+                {
+                    view.show_section_overview(section);
+                }
+                return;
+            }
+            NavigationAction::Forward | NavigationAction::Up => {}
+        }
+    }
+    if matches!(action, NavigationAction::Refresh) {
+        if let Some(uri) = view.uri() {
+            view.set_uri(uri);
+            return;
+        }
+    }
+    let next = {
+        let data = data.borrow_mut();
+        match action {
+            NavigationAction::Back => data[index]
+                .history
+                .borrow_mut()
+                .back()
+                .map(ToOwned::to_owned),
+            NavigationAction::Forward => data[index]
+                .history
+                .borrow_mut()
+                .forward()
+                .map(ToOwned::to_owned),
+            NavigationAction::Up => data[index]
+                .location
+                .borrow()
+                .parent()
+                .map(ToOwned::to_owned),
+            NavigationAction::Refresh => Some(data[index].location.borrow().clone()),
+        }
+    };
+    if let Some(path) = next {
+        navigate_tab(
+            index,
+            path,
+            data,
+            tabs,
+            header,
+            preferences,
+            sidebar,
+            !matches!(
+                action,
+                NavigationAction::Back | NavigationAction::Forward | NavigationAction::Refresh
+            ),
+        );
+    }
 }
 
 fn new_tab_location(preferences: &ApplicationPreferences) -> PathBuf {
@@ -2091,16 +2103,173 @@ fn persist_options(store: &mut ViewPreferencesStore, path: &Path, options: ViewO
 mod tests {
     use std::cell::RefCell;
     use std::path::PathBuf;
+    use std::rc::Rc;
 
     use gtk::prelude::{OrientableExt, PopoverExt, WidgetExt};
-    use gtk::{Box as GtkBox, Label, Orientation, SearchEntry};
+    use gtk::{Box as GtkBox, Label, Orientation, SearchEntry, Window};
 
     use super::{
-        content_right_inset, file_toolbar, matching_index, menu_button, persist_options,
-        remove_matching, shortcut_command, should_protect_last_file_tab, sidebar_path_for_tab,
+        content_right_inset, file_toolbar, handle_navigation_action, history_with, matching_index,
+        menu_button, persist_options, remove_matching, shortcut_command,
+        should_protect_last_file_tab, sidebar_path_for_tab, TabData,
     };
-    use crate::core::{SortField, ViewOptions, ViewPreferencesStore};
+    use crate::core::sidebar_model::SidebarSection;
+    use crate::core::{
+        SidebarModel, SidebarPreferences, SortField, ViewOptions, ViewPreferencesStore,
+    };
     use crate::ui::context_menu::ContextCommand;
+    use crate::ui::file_view::FileView;
+    use crate::ui::header::{HeaderControls, NavigationAction};
+    use crate::ui::sidebar::Sidebar;
+
+    #[test]
+    #[ignore = "requires a GTK desktop session"]
+    fn back_from_a_remote_section_restores_the_header_tab_and_sidebar() {
+        gtk::init().expect("GTK should initialize for widget tests");
+        let path = PathBuf::from("/tmp");
+        let location = Rc::new(RefCell::new(path.clone()));
+        let view = FileView::new(location.clone());
+        view.set_uri("smb://server/share".into());
+        view.show_section_overview(SidebarSection {
+            title: "Network & online".into(),
+            nodes: vec![],
+        });
+        let tabs = adw::TabView::new();
+        let page = tabs.append(&view.widget);
+        tabs.set_selected_page(&page);
+        page.set_title("Network & online");
+        let data = Rc::new(RefCell::new(vec![TabData {
+            view: view.clone(),
+            location,
+            history: history_with(path),
+            page: page.clone(),
+        }]));
+        let header = HeaderControls::new(Rc::new(RefCell::new(PathBuf::from("/tmp"))));
+        header.set_section("Network & online");
+        let window = Window::new();
+        let sidebar = Sidebar::new(
+            Rc::new(RefCell::new(SidebarModel::new(
+                SidebarPreferences::in_memory(),
+                PathBuf::from("/tmp"),
+            ))),
+            &window,
+            |_| {},
+        );
+        sidebar.set_active_section("Network & online");
+
+        handle_navigation_action(
+            0,
+            NavigationAction::Back,
+            &data,
+            &tabs,
+            &header,
+            &Rc::new(RefCell::new(ViewPreferencesStore::in_memory())),
+            &sidebar,
+        );
+
+        assert_eq!(view.section_title(), None);
+        assert_eq!(view.uri().as_deref(), Some("smb://server/share"));
+        assert_eq!(page.title(), "share");
+        assert_eq!(header.displayed_location_text(), "smb://server/share");
+        assert_eq!(sidebar.active_navigation_selection(), (None, None));
+    }
+
+    #[test]
+    #[ignore = "requires a GTK desktop session"]
+    fn refresh_section_rereads_the_sidebar_model_without_losing_remote_state() {
+        gtk::init().expect("GTK should initialize for widget tests");
+        let path = PathBuf::from("/tmp");
+        let location = Rc::new(RefCell::new(path.clone()));
+        let view = FileView::new(location.clone());
+        view.set_uri("smb://server/share".into());
+        let model = Rc::new(RefCell::new(SidebarModel::new(
+            SidebarPreferences::in_memory(),
+            path.clone(),
+        )));
+        let initial_section = model
+            .borrow()
+            .sections()
+            .into_iter()
+            .find(|section| section.title == "Network & online")
+            .unwrap();
+        let initial_count = initial_section.nodes.len();
+        view.show_section_overview(initial_section);
+        model
+            .borrow_mut()
+            .preferences_mut()
+            .pin_remote("smb://server/updated".into())
+            .unwrap();
+        let tabs = adw::TabView::new();
+        let page = tabs.append(&view.widget);
+        tabs.set_selected_page(&page);
+        let data = Rc::new(RefCell::new(vec![TabData {
+            view: view.clone(),
+            location,
+            history: history_with(path),
+            page,
+        }]));
+        let header = HeaderControls::new(Rc::new(RefCell::new(PathBuf::from("/tmp"))));
+        let window = Window::new();
+        let sidebar = Sidebar::new(model, &window, |_| {});
+
+        handle_navigation_action(
+            0,
+            NavigationAction::Refresh,
+            &data,
+            &tabs,
+            &header,
+            &Rc::new(RefCell::new(ViewPreferencesStore::in_memory())),
+            &sidebar,
+        );
+
+        assert_eq!(view.uri().as_deref(), Some("smb://server/share"));
+        assert_eq!(view.section_title().as_deref(), Some("Network & online"));
+        assert_eq!(view.section_overview_node_count(), initial_count + 1);
+    }
+
+    #[test]
+    #[ignore = "requires a GTK desktop session"]
+    fn refresh_remote_location_reloads_it_without_a_section_view() {
+        gtk::init().expect("GTK should initialize for widget tests");
+        let path = PathBuf::from("/tmp");
+        let location = Rc::new(RefCell::new(path.clone()));
+        let view = FileView::new(location.clone());
+        view.set_uri("smb://server/share".into());
+        view.show_search_results(vec![]);
+        let tabs = adw::TabView::new();
+        let page = tabs.append(&view.widget);
+        tabs.set_selected_page(&page);
+        let data = Rc::new(RefCell::new(vec![TabData {
+            view: view.clone(),
+            location,
+            history: history_with(path),
+            page,
+        }]));
+        let header = HeaderControls::new(Rc::new(RefCell::new(PathBuf::from("/tmp"))));
+        let window = Window::new();
+        let sidebar = Sidebar::new(
+            Rc::new(RefCell::new(SidebarModel::new(
+                SidebarPreferences::in_memory(),
+                PathBuf::from("/tmp"),
+            ))),
+            &window,
+            |_| {},
+        );
+
+        handle_navigation_action(
+            0,
+            NavigationAction::Refresh,
+            &data,
+            &tabs,
+            &header,
+            &Rc::new(RefCell::new(ViewPreferencesStore::in_memory())),
+            &sidebar,
+        );
+
+        assert_eq!(view.section_title(), None);
+        assert_eq!(view.uri().as_deref(), Some("smb://server/share"));
+        assert!(!view.is_showing_search_results());
+    }
 
     #[test]
     fn remove_matching_releases_the_read_borrow_before_removing_the_middle_item() {

@@ -320,4 +320,9 @@ impl HeaderControls {
     pub fn set_section(&self, title: &str) {
         self.location_bar.set_section(title);
     }
+
+    #[cfg(test)]
+    pub(crate) fn displayed_location_text(&self) -> String {
+        self.location_bar.entry.text().to_string()
+    }
 }

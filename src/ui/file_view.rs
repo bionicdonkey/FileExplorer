@@ -285,6 +285,15 @@ impl FileView {
             .map(|section| section.title.clone())
     }
 
+    #[cfg(test)]
+    pub(crate) fn section_overview_node_count(&self) -> usize {
+        self.navigation_state
+            .borrow()
+            .section_overview
+            .as_ref()
+            .map_or(0, |section| section.nodes.len())
+    }
+
     fn reload(&self) {
         if let Some(section) = self.navigation_state.borrow().section_overview.clone() {
             self.render_section_overview(&section);
