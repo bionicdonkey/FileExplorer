@@ -4,7 +4,10 @@ use std::rc::Rc;
 
 use adw::prelude::*;
 use adw::{HeaderBar, ToolbarView};
-use gtk::{Box as GtkBox, Button, Image, Label, ListBox, ListBoxRow, Orientation, Paned, ScrolledWindow, SelectionMode, Separator};
+use gtk::{
+    Box as GtkBox, Button, Image, Label, ListBox, ListBoxRow, Orientation, Paned, ScrolledWindow,
+    SelectionMode, Separator,
+};
 
 use crate::core::location::Location;
 use crate::core::navigation::NavigationHistory;
@@ -22,7 +25,14 @@ use crate::ui::header::LocationBar;
 /// main window uses), not the deprecated `gtk::Dialog` action-area, so the
 /// chrome (header bar, rounded corners, bottom action bar) matches the rest
 /// of the app instead of looking like an unstyled GTK3-era dialog.
-pub fn pick_folder<F: Fn(PathBuf) + 'static>(parent: &impl IsA<gtk::Widget>, title: &str, action_label: &str, initial: PathBuf, sidebar_model: Rc<RefCell<SidebarModel>>, on_selected: F) {
+pub fn pick_folder<F: Fn(PathBuf) + 'static>(
+    parent: &impl IsA<gtk::Widget>,
+    title: &str,
+    action_label: &str,
+    initial: PathBuf,
+    sidebar_model: Rc<RefCell<SidebarModel>>,
+    on_selected: F,
+) {
     let dialog = adw::Dialog::new();
     dialog.set_title(title);
     dialog.set_content_width(760);
@@ -35,7 +45,11 @@ pub fn pick_folder<F: Fn(PathBuf) + 'static>(parent: &impl IsA<gtk::Widget>, tit
     titlebar.set_title_widget(Some(&Label::new(Some(title))));
     toolbar_view.add_top_bar(&titlebar);
 
-    let start = if initial.is_dir() { initial } else { Location::home().path().to_path_buf() };
+    let start = if initial.is_dir() {
+        initial
+    } else {
+        Location::home().local_path().expect("home is local")
+    };
     let location = Rc::new(RefCell::new(start.clone()));
     let selected: Rc<RefCell<Option<PathBuf>>> = Rc::new(RefCell::new(None));
     let history = Rc::new(RefCell::new(NavigationHistory::new()));
@@ -45,18 +59,31 @@ pub fn pick_folder<F: Fn(PathBuf) + 'static>(parent: &impl IsA<gtk::Widget>, tit
     let content = GtkBox::new(Orientation::Vertical, 0);
 
     let toolbar = GtkBox::new(Orientation::Horizontal, 6);
-    toolbar.set_margin_top(8); toolbar.set_margin_bottom(8); toolbar.set_margin_start(8); toolbar.set_margin_end(8);
-    let back = Button::from_icon_name("go-previous-symbolic"); back.add_css_class("flat"); back.set_tooltip_text(Some("Go back"));
-    let forward = Button::from_icon_name("go-next-symbolic"); forward.add_css_class("flat"); forward.set_tooltip_text(Some("Go forward"));
-    let up = Button::from_icon_name("go-up-symbolic"); up.add_css_class("flat"); up.set_tooltip_text(Some("Go up"));
+    toolbar.set_margin_top(8);
+    toolbar.set_margin_bottom(8);
+    toolbar.set_margin_start(8);
+    toolbar.set_margin_end(8);
+    let back = Button::from_icon_name("go-previous-symbolic");
+    back.add_css_class("flat");
+    back.set_tooltip_text(Some("Go back"));
+    let forward = Button::from_icon_name("go-next-symbolic");
+    forward.add_css_class("flat");
+    forward.set_tooltip_text(Some("Go forward"));
+    let up = Button::from_icon_name("go-up-symbolic");
+    up.add_css_class("flat");
+    up.set_tooltip_text(Some("Go up"));
 
     // Shares HeaderControls' breadcrumb/location-entry implementation (same
     // CSS classes, same double-click-to-edit interaction) instead of a second
     // copy, so a fix to one applies to both.
     let location_bar = LocationBar::new(&location.borrow());
 
-    let new_folder = Button::from_icon_name("folder-new-symbolic"); new_folder.add_css_class("flat"); new_folder.set_tooltip_text(Some("New Folder"));
-    for button in [&back, &forward, &up] { toolbar.append(button); }
+    let new_folder = Button::from_icon_name("folder-new-symbolic");
+    new_folder.add_css_class("flat");
+    new_folder.set_tooltip_text(Some("New Folder"));
+    for button in [&back, &forward, &up] {
+        toolbar.append(button);
+    }
     toolbar.append(&location_bar.widget);
     toolbar.append(&new_folder);
     content.append(&toolbar);
@@ -77,7 +104,10 @@ pub fn pick_folder<F: Fn(PathBuf) + 'static>(parent: &impl IsA<gtk::Widget>, tit
     // override `set_position(160)` above by forcing this pane no narrower
     // than 220px.
     let shortcuts = GtkBox::new(Orientation::Vertical, 2);
-    shortcuts.set_margin_top(4); shortcuts.set_margin_bottom(4); shortcuts.set_margin_start(4); shortcuts.set_margin_end(4);
+    shortcuts.set_margin_top(4);
+    shortcuts.set_margin_bottom(4);
+    shortcuts.set_margin_start(4);
+    shortcuts.set_margin_end(4);
     let shortcuts_scroll = ScrolledWindow::new();
     shortcuts_scroll.set_child(Some(&shortcuts));
     shortcuts_scroll.set_width_request(120);
@@ -113,18 +143,26 @@ pub fn pick_folder<F: Fn(PathBuf) + 'static>(parent: &impl IsA<gtk::Widget>, tit
         let listed_folders = listed_folders.clone();
         let destination_label = destination_label.clone();
         Rc::new(move |path: PathBuf, record_history: bool| {
-            if !path.is_dir() { return; }
+            if !path.is_dir() {
+                return;
+            }
             *location.borrow_mut() = path.clone();
             *selected.borrow_mut() = None;
-            if record_history { history.borrow_mut().push(path.clone()); }
+            if record_history {
+                history.borrow_mut().push(path.clone());
+            }
             location_bar.set_location(&path);
             back.set_sensitive(history.borrow().can_go_back());
             forward.set_sensitive(history.borrow().can_go_forward());
             up.set_sensitive(path.parent().is_some());
-            while let Some(row) = folder_list.row_at_index(0) { folder_list.remove(&row); }
+            while let Some(row) = folder_list.row_at_index(0) {
+                folder_list.remove(&row);
+            }
             let mut folders = listed_folders.borrow_mut();
             *folders = subfolders(&path);
-            for folder in folders.iter() { folder_list.append(&folder_row(folder)); }
+            for folder in folders.iter() {
+                folder_list.append(&folder_row(folder));
+            }
             destination_label.set_text(&format!("Destination: {}", path.display()));
         })
     };
@@ -145,8 +183,13 @@ pub fn pick_folder<F: Fn(PathBuf) + 'static>(parent: &impl IsA<gtk::Widget>, tit
         let location = location.clone();
         let destination_label = destination_label.clone();
         move |_, row| {
-            *selected.borrow_mut() = row.map(|row| row.index()).and_then(|index| listed_folders.borrow().get(index as usize).cloned());
-            let target = selected.borrow().clone().unwrap_or_else(|| location.borrow().clone());
+            *selected.borrow_mut() = row
+                .map(|row| row.index())
+                .and_then(|index| listed_folders.borrow().get(index as usize).cloned());
+            let target = selected
+                .borrow()
+                .clone()
+                .unwrap_or_else(|| location.borrow().clone());
             destination_label.set_text(&format!("Destination: {}", target.display()));
         }
     });
@@ -159,12 +202,16 @@ pub fn pick_folder<F: Fn(PathBuf) + 'static>(parent: &impl IsA<gtk::Widget>, tit
         // Bind the owned value first so the borrow ends before `navigate` runs.
         move |_, row| {
             let path = listed_folders.borrow().get(row.index() as usize).cloned();
-            if let Some(path) = path { navigate(path, true); }
+            if let Some(path) = path {
+                navigate(path, true);
+            }
         }
     });
 
     for section in sidebar_model.borrow().sections() {
-        if section.nodes.is_empty() { continue; }
+        if section.nodes.is_empty() {
+            continue;
+        }
         let heading = Label::new(Some(&section.title));
         heading.add_css_class("heading");
         heading.add_css_class("dim-label");
@@ -184,7 +231,9 @@ pub fn pick_folder<F: Fn(PathBuf) + 'static>(parent: &impl IsA<gtk::Widget>, tit
         let navigate = navigate.clone();
         move |_| {
             let path = history.borrow_mut().back().map(Path::to_path_buf);
-            if let Some(path) = path { navigate(path, false); }
+            if let Some(path) = path {
+                navigate(path, false);
+            }
         }
     });
     forward.connect_clicked({
@@ -192,7 +241,9 @@ pub fn pick_folder<F: Fn(PathBuf) + 'static>(parent: &impl IsA<gtk::Widget>, tit
         let navigate = navigate.clone();
         move |_| {
             let path = history.borrow_mut().forward().map(Path::to_path_buf);
-            if let Some(path) = path { navigate(path, false); }
+            if let Some(path) = path {
+                navigate(path, false);
+            }
         }
     });
     up.connect_clicked({
@@ -200,7 +251,9 @@ pub fn pick_folder<F: Fn(PathBuf) + 'static>(parent: &impl IsA<gtk::Widget>, tit
         let navigate = navigate.clone();
         move |_| {
             let parent = location.borrow().parent().map(Path::to_path_buf);
-            if let Some(parent) = parent { navigate(parent, true); }
+            if let Some(parent) = parent {
+                navigate(parent, true);
+            }
         }
     });
     new_folder.connect_clicked({
@@ -208,7 +261,9 @@ pub fn pick_folder<F: Fn(PathBuf) + 'static>(parent: &impl IsA<gtk::Widget>, tit
         let navigate = navigate.clone();
         move |_| {
             let created = FileOperations::create_folder(&location.borrow(), "New Folder").ok();
-            if let Some(path) = created { navigate(path, true); }
+            if let Some(path) = created {
+                navigate(path, true);
+            }
         }
     });
 
@@ -221,7 +276,10 @@ pub fn pick_folder<F: Fn(PathBuf) + 'static>(parent: &impl IsA<gtk::Widget>, tit
 
     toolbar_view.set_bottom_bar_style(adw::ToolbarStyle::RaisedBorder);
     let footer = GtkBox::new(Orientation::Horizontal, 12);
-    footer.set_margin_top(8); footer.set_margin_bottom(8); footer.set_margin_start(12); footer.set_margin_end(12);
+    footer.set_margin_top(8);
+    footer.set_margin_bottom(8);
+    footer.set_margin_start(12);
+    footer.set_margin_end(12);
     footer.append(&destination_label);
     let actions = GtkBox::new(Orientation::Horizontal, 8);
     let cancel_button = Button::with_label("Cancel");
@@ -236,12 +294,17 @@ pub fn pick_folder<F: Fn(PathBuf) + 'static>(parent: &impl IsA<gtk::Widget>, tit
 
     cancel_button.connect_clicked({
         let dialog = dialog.clone();
-        move |_| { dialog.close(); }
+        move |_| {
+            dialog.close();
+        }
     });
     select_button.connect_clicked({
         let dialog = dialog.clone();
         move |_| {
-            let chosen = selected.borrow().clone().unwrap_or_else(|| location.borrow().clone());
+            let chosen = selected
+                .borrow()
+                .clone()
+                .unwrap_or_else(|| location.borrow().clone());
             on_selected(chosen);
             dialog.close();
         }
@@ -254,15 +317,27 @@ fn folder_row(path: &Path) -> ListBoxRow {
     let row = ListBoxRow::new();
     row.add_css_class("picker-folder-row");
     let content = GtkBox::new(Orientation::Horizontal, 8);
-    content.set_margin_top(6); content.set_margin_bottom(6); content.set_margin_start(8); content.set_margin_end(8);
+    content.set_margin_top(6);
+    content.set_margin_bottom(6);
+    content.set_margin_start(8);
+    content.set_margin_end(8);
     // A plain folder glyph, not the curated Documents/Downloads/etc. icon
     // table -- these are arbitrary subfolders being browsed, not the
     // sidebar's pinned locations, so a folder named "Downloads" here isn't
     // necessarily *the* Downloads folder. Matches sidebar_model's
     // local_children(), which draws the same distinction.
-    let icon = Image::from_icon_name("folder-symbolic"); icon.set_pixel_size(18); icon.add_css_class("sidebar-location-icon");
-    let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("").to_owned();
-    let label = Label::new(Some(&name)); label.set_xalign(0.0); label.set_hexpand(true); label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    let icon = Image::from_icon_name("folder-symbolic");
+    icon.set_pixel_size(18);
+    icon.add_css_class("sidebar-location-icon");
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("")
+        .to_owned();
+    let label = Label::new(Some(&name));
+    label.set_xalign(0.0);
+    label.set_hexpand(true);
+    label.set_ellipsize(gtk::pango::EllipsizeMode::End);
     content.append(&icon);
     content.append(&label);
     row.set_child(Some(&content));
@@ -277,9 +352,17 @@ fn shortcut_button(location: &SidebarLocation, navigate: &Rc<dyn Fn(PathBuf, boo
     button.add_css_class("flat");
     button.add_css_class("sidebar-location");
     let content = GtkBox::new(Orientation::Horizontal, 8);
-    content.set_margin_top(4); content.set_margin_bottom(4); content.set_margin_start(4); content.set_margin_end(4);
-    let icon = Image::from_icon_name(location.icon_name()); icon.set_pixel_size(18); icon.add_css_class("sidebar-location-icon");
-    let label = Label::new(Some(location.label())); label.set_xalign(0.0); label.set_hexpand(true); label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    content.set_margin_top(4);
+    content.set_margin_bottom(4);
+    content.set_margin_start(4);
+    content.set_margin_end(4);
+    let icon = Image::from_icon_name(location.icon_name());
+    icon.set_pixel_size(18);
+    icon.add_css_class("sidebar-location-icon");
+    let label = Label::new(Some(location.label()));
+    label.set_xalign(0.0);
+    label.set_hexpand(true);
+    label.set_ellipsize(gtk::pango::EllipsizeMode::End);
     content.append(&icon);
     content.append(&label);
     button.set_child(Some(&content));
@@ -291,20 +374,25 @@ fn shortcut_button(location: &SidebarLocation, navigate: &Rc<dyn Fn(PathBuf, boo
         }
         None => {
             button.set_sensitive(false);
-            button.set_tooltip_text(Some("Remote locations aren't supported as a destination yet"));
+            button.set_tooltip_text(Some(
+                "Remote locations aren't supported as a destination yet",
+            ));
         }
     }
     button
 }
 
 fn subfolders(path: &Path) -> Vec<PathBuf> {
-    let mut folders = std::fs::read_dir(path).map(|entries| {
-        entries.flatten()
-            .filter(|entry| entry.path().is_dir())
-            .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
-            .map(|entry| entry.path())
-            .collect::<Vec<_>>()
-    }).unwrap_or_default();
+    let mut folders = std::fs::read_dir(path)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|entry| entry.path().is_dir())
+                .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
+                .map(|entry| entry.path())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     folders.sort_by(|left, right| left.file_name().cmp(&right.file_name()));
     folders
 }
@@ -323,6 +411,9 @@ mod tests {
 
         let found = subfolders(temporary.path());
 
-        assert_eq!(found, vec![temporary.path().join("a"), temporary.path().join("b")]);
+        assert_eq!(
+            found,
+            vec![temporary.path().join("a"), temporary.path().join("b")]
+        );
     }
 }

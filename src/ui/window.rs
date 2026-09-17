@@ -55,7 +55,11 @@ pub struct ExplorerWindow {
 
 impl ExplorerWindow {
     pub fn new(app: &Application) -> Self {
-        Self::new_at(app, Location::home().path().to_path_buf(), true)
+        Self::new_at(
+            app,
+            Location::home().local_path().expect("home is local"),
+            true,
+        )
     }
 
     fn new_at(app: &Application, initial: PathBuf, restore_session: bool) -> Self {
@@ -168,7 +172,7 @@ impl ExplorerWindow {
 
         let sidebar_model = Rc::new(RefCell::new(SidebarModel::new(
             SidebarPreferences::load_default().unwrap_or_else(|_| SidebarPreferences::in_memory()),
-            Location::home().path().to_path_buf(),
+            Location::home().local_path().expect("home is local"),
         )));
         let sidebar_holder: Rc<RefCell<Option<Sidebar>>> = Rc::new(RefCell::new(None));
         let sidebar_context_data = tabs_data.clone();
@@ -770,7 +774,7 @@ fn new_tab_location(preferences: &ApplicationPreferences) -> PathBuf {
     gio::File::for_uri(&preferences.new_tab_location)
         .path()
         .filter(|path| path.is_dir())
-        .unwrap_or_else(|| Location::home().path().to_path_buf())
+        .unwrap_or_else(|| Location::home().local_path().expect("home is local"))
 }
 
 fn wire_tab(

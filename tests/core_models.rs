@@ -9,7 +9,7 @@ fn home_location_uses_home_directory_and_has_display_name() {
     let location = Location::home();
 
     let home = PathBuf::from(std::env::var_os("HOME").expect("HOME is set for this test"));
-    assert_eq!(location.path(), home.as_path());
+    assert_eq!(location.local_path().as_deref(), Some(home.as_path()));
     assert!(!location.display_name().is_empty());
 }
 

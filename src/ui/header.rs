@@ -3,7 +3,9 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use gtk::prelude::*;
-use gtk::{Box as GtkBox, Button, Entry, GestureClick, Image, Label, Orientation, Separator, Stack};
+use gtk::{
+    Box as GtkBox, Button, Entry, GestureClick, Image, Label, Orientation, Separator, Stack,
+};
 
 use crate::core::location::Location;
 
@@ -66,7 +68,13 @@ impl LocationBar {
         breadcrumbs.add_controller(click);
 
         let on_navigate = Rc::new(RefCell::new(None));
-        let bar = Self { widget: stack.clone(), entry, breadcrumbs, stack, on_navigate };
+        let bar = Self {
+            widget: stack.clone(),
+            entry,
+            breadcrumbs,
+            stack,
+            on_navigate,
+        };
         bar.render_breadcrumbs(initial);
         bar
     }
@@ -120,9 +128,13 @@ impl LocationBar {
         while let Some(child) = self.breadcrumbs.first_child() {
             self.breadcrumbs.remove(&child);
         }
-        let home = Location::home().path().to_path_buf();
+        let home = Location::home().local_path().expect("home is local");
         let under_home = path.starts_with(&home);
-        let mut accumulated = if under_home { home.clone() } else { PathBuf::from("/") };
+        let mut accumulated = if under_home {
+            home.clone()
+        } else {
+            PathBuf::from("/")
+        };
         let base = Button::new();
         base.add_css_class("flat");
         base.add_css_class("breadcrumb-segment");
@@ -136,7 +148,11 @@ impl LocationBar {
         } else {
             base.set_label("/");
         }
-        let remaining = if under_home { path.strip_prefix(&home).unwrap_or(path) } else { path };
+        let remaining = if under_home {
+            path.strip_prefix(&home).unwrap_or(path)
+        } else {
+            path
+        };
         let components = remaining
             .components()
             .filter_map(|component| match component {
@@ -180,11 +196,16 @@ impl LocationBar {
             Some((scheme, rest)) => (format!("{scheme}://"), rest),
             None => (String::new(), uri),
         };
-        let segments = remaining.split('/').filter(|segment| !segment.is_empty()).collect::<Vec<_>>();
+        let segments = remaining
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .collect::<Vec<_>>();
         let root = Button::with_label(if base.is_empty() { "/" } else { &base });
         root.add_css_class("flat");
         root.add_css_class("breadcrumb-segment");
-        if segments.is_empty() { root.add_css_class("breadcrumb-current"); }
+        if segments.is_empty() {
+            root.add_css_class("breadcrumb-current");
+        }
         self.breadcrumbs.append(&root);
 
         for (index, segment) in segments.iter().enumerate() {
@@ -194,7 +215,9 @@ impl LocationBar {
             let button = Button::with_label(segment);
             button.add_css_class("flat");
             button.add_css_class("breadcrumb-segment");
-            if index + 1 == segments.len() { button.add_css_class("breadcrumb-current"); }
+            if index + 1 == segments.len() {
+                button.add_css_class("breadcrumb-current");
+            }
             self.breadcrumbs.append(&button);
         }
         let trailing = Label::new(None);
@@ -258,14 +281,19 @@ impl HeaderControls {
         let location_bar = LocationBar::new(&location.borrow());
         widget.append(&location_bar.widget);
 
-        let on_file_action: Rc<RefCell<Option<Box<dyn Fn(FileAction)>>>> = Rc::new(RefCell::new(None));
+        let on_file_action: Rc<RefCell<Option<Box<dyn Fn(FileAction)>>>> =
+            Rc::new(RefCell::new(None));
         let actions = GtkBox::new(Orientation::Horizontal, 0);
         actions.add_css_class("linked");
         for (action, label, icon) in [
             (FileAction::Cut, "Cut", "edit-cut-symbolic"),
             (FileAction::Copy, "Copy", "edit-copy-symbolic"),
             (FileAction::Paste, "Paste", "edit-paste-symbolic"),
-            (FileAction::MoveToTrash, "Move to Trash", "user-trash-symbolic"),
+            (
+                FileAction::MoveToTrash,
+                "Move to Trash",
+                "user-trash-symbolic",
+            ),
         ] {
             let button = Button::from_icon_name(icon);
             button.set_tooltip_text(Some(label));
@@ -281,7 +309,15 @@ impl HeaderControls {
         }
         widget.append(&actions);
 
-        Self { widget, location_bar, back, forward, up, refresh, on_file_action }
+        Self {
+            widget,
+            location_bar,
+            back,
+            forward,
+            up,
+            refresh,
+            on_file_action,
+        }
     }
 
     pub fn connect_location_changed<F: Fn(PathBuf) + 'static>(&self, callback: F) {
