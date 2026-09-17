@@ -83,12 +83,13 @@ fn session_codec_round_trips_remote_locations_and_skips_bad_records() {
 
 #[test]
 fn v1_persisted_json_migrates_and_a_subsequent_write_is_v2() {
-    let v1 = br#"{"locations":["/tmp/legacy"]}"#;
+    let v1 = br#"{"locations":["file:///tmp/legacy","/tmp/bare"]}"#;
     let migrated = decode_session(v1).unwrap();
     assert_eq!(migrated[0].uri(), "file:///tmp/legacy");
+    assert_eq!(migrated[1].uri(), "file:///tmp/bare");
     let v2: UriStateV2 = serde_json::from_slice(&encode_session(&migrated).unwrap()).unwrap();
     assert_eq!(v2.schema_version, 2);
-    assert_eq!(v2.locations, vec!["file:///tmp/legacy"]);
+    assert_eq!(v2.locations, vec!["file:///tmp/legacy", "file:///tmp/bare"]);
 }
 
 #[test]

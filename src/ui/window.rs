@@ -125,14 +125,23 @@ impl ExplorerWindow {
 
         let startup_paths =
             if restore_session && application_preferences.borrow().restore_previous_tabs {
-                application_preferences
-                    .borrow()
-                    .load_session()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .filter_map(|uri| gio::File::for_uri(&uri).path())
-                    .filter(|path| path.is_dir())
-                    .collect::<Vec<_>>()
+                match application_preferences.borrow().load_session() {
+                    Ok(session) => {
+                        for notice in session.notices {
+                            eprintln!("Saved tabs recovery notice: {notice:?}");
+                        }
+                        session
+                            .locations
+                            .into_iter()
+                            .filter_map(|location| location.local_path())
+                            .filter(|path| path.is_dir())
+                            .collect::<Vec<_>>()
+                    }
+                    Err(error) => {
+                        eprintln!("Saved tabs could not be recovered: {error}");
+                        Vec::new()
+                    }
+                }
             } else {
                 Vec::new()
             };

@@ -152,19 +152,23 @@ impl ApplicationPreferences {
         fs::write(path, bytes)
     }
 
-    pub fn load_session(&self) -> io::Result<Vec<String>> {
+    /// Loads saved tabs without discarding recovery notices. The application
+    /// boundary can keep startup safe while making skipped records observable.
+    pub fn load_session(&self) -> io::Result<DecodedUriState> {
         let Some(path) = self.session_path() else {
-            return Ok(Vec::new());
+            return Ok(DecodedUriState {
+                locations: Vec::new(),
+                notices: Vec::new(),
+            });
         };
         if !path.exists() {
-            return Ok(Vec::new());
+            return Ok(DecodedUriState {
+                locations: Vec::new(),
+                notices: Vec::new(),
+            });
         }
-        Ok(decode_session_state(&fs::read(path)?)
-            .map(|state| state.locations)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|location| location.uri().to_owned())
-            .collect())
+        decode_session_state(&fs::read(path)?)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
     }
 
     pub fn clear_session(&self) -> io::Result<()> {
@@ -225,19 +229,21 @@ pub fn decode_session_state(bytes: &[u8]) -> Result<DecodedUriState, Recoverable
     {
         Some(version) if version == URI_STATE_VERSION as u64 => decode_uri_records(locations),
         None | Some(1) => {
+            let mut decoded = Vec::new();
             let mut notices = Vec::new();
-            let paths = locations
-                .iter()
-                .filter_map(|value| match value.as_str() {
-                    Some(path) => Some(PathBuf::from(path)),
-                    None => {
-                        notices.push(RecoverableStateNotice::MalformedRecord);
-                        None
-                    }
-                })
-                .collect::<Vec<_>>();
+            for value in locations {
+                let Some(value) = value.as_str() else {
+                    notices.push(RecoverableStateNotice::MalformedRecord);
+                    continue;
+                };
+                match Location::from_uri(value) {
+                    Ok(location) if location.uri().starts_with("file:") => decoded.push(location),
+                    Ok(_) => notices.push(RecoverableStateNotice::MalformedRecord),
+                    _ => decoded.push(Location::from_local_path(&PathBuf::from(value))),
+                }
+            }
             Ok(DecodedUriState {
-                locations: import_legacy_local_paths(&paths),
+                locations: decoded,
                 notices,
             })
         }
@@ -300,6 +306,25 @@ mod tests {
             decode_session(&encode_session(&locations).unwrap()).unwrap(),
             locations
         );
+    }
+
+    #[test]
+    fn load_session_exposes_skipped_record_notices_to_the_application_boundary() {
+        let temporary = tempfile::tempdir().unwrap();
+        let preferences = ApplicationPreferences {
+            path: Some(temporary.path().join("preferences.json")),
+            ..ApplicationPreferences::default()
+        };
+        std::fs::write(
+            preferences.session_path().unwrap(),
+            br#"{"schema_version":2,"locations":["file:///tmp/ok","smb://user@host/no"]}"#,
+        )
+        .unwrap();
+
+        let state = preferences.load_session().unwrap();
+
+        assert_eq!(state.locations[0].uri(), "file:///tmp/ok");
+        assert_eq!(state.notices, [RecoverableStateNotice::MalformedRecord]);
     }
 
     #[test]

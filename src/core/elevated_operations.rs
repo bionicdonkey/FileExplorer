@@ -104,7 +104,7 @@ mod tests {
     use super::*;
 
     fn failed_record(sources: Vec<PathBuf>, destination: Option<PathBuf>, message: &str) -> OperationRecord {
-        OperationRecord { id: 1, kind: OperationKind::Copy, sources, destination, completed: 0, total: 1, state: OperationState::Failed(message.into()), finished_at: None }
+        OperationRecord { id: 1, kind: OperationKind::Copy, source_uris: Vec::new(), sources, destination_uri: None, destination, completed: 0, total: 1, state: OperationState::Failed(message.into()), finished_at: None }
     }
 
     #[test]
@@ -157,7 +157,7 @@ mod tests {
 
     #[test]
     fn a_successful_record_is_not_eligible() {
-        let record = OperationRecord { id: 1, kind: OperationKind::Copy, sources: vec![PathBuf::from("/etc/hosts")], destination: None, completed: 1, total: 1, state: OperationState::Completed, finished_at: None };
+        let record = OperationRecord { id: 1, kind: OperationKind::Copy, source_uris: Vec::new(), sources: vec![PathBuf::from("/etc/hosts")], destination_uri: None, destination: None, completed: 1, total: 1, state: OperationState::Completed, finished_at: None };
         assert!(!is_eligible_for_retry(&record));
     }
 }

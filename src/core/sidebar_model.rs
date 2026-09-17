@@ -121,11 +121,11 @@ struct StoredPreferences {
     #[serde(default)]
     schema_version: Option<u32>,
     #[serde(default)]
-    locations: Vec<String>,
+    locations: Vec<serde_json::Value>,
     #[serde(default)]
-    pins: Vec<PathBuf>,
+    pins: Vec<serde_json::Value>,
     #[serde(default)]
-    remote_pins: Vec<String>,
+    remote_pins: Vec<serde_json::Value>,
     #[serde(default)]
     section_expanded: BTreeMap<String, bool>,
     #[serde(default)]
@@ -195,12 +195,28 @@ impl SidebarPreferences {
             recoverable_notices: Vec::new(),
         };
         if stored.schema_version == Some(2) {
-            for uri in stored.locations {
-                match Location::from_uri(&uri) {
+            for value in stored.locations {
+                let Some(uri) = value.as_str() else {
+                    preferences
+                        .recoverable_notices
+                        .push(RecoverableStateNotice::MalformedRecord);
+                    continue;
+                };
+                match Location::from_uri(uri) {
                     Ok(location) => match location.local_path() {
-                        Some(path) => preferences.pin(path),
+                        // A V2 file URI is already canonical identity. Do not
+                        // canonicalize the path on disk: that would collapse a
+                        // symlink and change the user's saved pin.
+                        Some(path) if !preferences.pins.contains(&path) => {
+                            preferences.pins.push(path)
+                        }
+                        Some(_) => {}
                         None => {
-                            let _ = preferences.pin_remote(location.uri().to_owned());
+                            if preferences.pin_remote(location.uri().to_owned()).is_err() {
+                                preferences
+                                    .recoverable_notices
+                                    .push(RecoverableStateNotice::MalformedRecord);
+                            }
                         }
                     },
                     Err(_) => preferences
@@ -209,11 +225,22 @@ impl SidebarPreferences {
                 }
             }
         } else {
-            for pin in stored.pins {
-                preferences.pin(pin);
+            for value in stored.pins {
+                match value.as_str() {
+                    Some(pin) => preferences.pin(PathBuf::from(pin)),
+                    None => preferences
+                        .recoverable_notices
+                        .push(RecoverableStateNotice::MalformedRecord),
+                }
             }
-            for uri in stored.remote_pins {
-                if preferences.pin_remote(uri).is_err() {
+            for value in stored.remote_pins {
+                let Some(uri) = value.as_str() else {
+                    preferences
+                        .recoverable_notices
+                        .push(RecoverableStateNotice::MalformedRecord);
+                    continue;
+                };
+                if preferences.pin_remote(uri.to_owned()).is_err() {
                     preferences
                         .recoverable_notices
                         .push(RecoverableStateNotice::MalformedRecord);
@@ -323,6 +350,7 @@ impl SidebarPreferences {
                         .filter_map(|uri| Location::from_uri(uri).ok())
                         .map(|location| location.uri().to_owned()),
                 )
+                .map(serde_json::Value::String)
                 .collect(),
             pins: Vec::new(),
             remote_pins: Vec::new(),
@@ -653,15 +681,13 @@ fn themed_icon_name(icon: gio::Icon) -> Option<String> {
 }
 
 fn normalized_remote_uri(uri: &str) -> Result<String, String> {
-    let uri = uri.trim().trim_end_matches('/');
-    let scheme = uri
-        .split_once("://")
-        .map(|(scheme, _)| scheme.to_ascii_lowercase())
-        .ok_or_else(|| "Enter a full network address, such as smb://nas.local/share".to_owned())?;
-    if !matches!(scheme.as_str(), "smb" | "sftp" | "ftp" | "dav" | "davs") {
-        return Err("Use an SMB, SFTP, FTP, WebDAV, or secure WebDAV address".into());
+    let location = Location::from_uri(uri.trim()).map_err(|_| {
+        "Enter a valid provider address without credentials or query data".to_owned()
+    })?;
+    if location.local_path().is_some() {
+        return Err("Choose a provider address rather than a local file".into());
     }
-    Ok(uri.to_owned())
+    Ok(location.uri().to_owned())
 }
 
 fn remote_label(uri: &str) -> String {
@@ -684,6 +710,8 @@ fn canonical_child_uri(parent_uri: &str, name: &Path) -> String {
 mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
+
+    use gio::prelude::*;
 
     use super::{
         device_kind_rank, is_local_mount_uri, user_section_title, SidebarLocation, SidebarModel,
@@ -851,6 +879,43 @@ mod tests {
             serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
         assert_eq!(saved["schema_version"], 2);
         assert_eq!(saved["locations"], serde_json::json!(["smb://host/share"]));
+    }
+
+    #[test]
+    fn v2_pin_loading_preserves_symlink_identity_and_other_valid_providers() {
+        let temporary = tempfile::tempdir().unwrap();
+        let target = temporary.path().join("target");
+        let link = temporary.path().join("link");
+        fs::create_dir(&target).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let path = temporary.path().join("sidebar.json");
+        let link_uri = gio::File::for_path(&link).uri().to_string();
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "schema_version": 2,
+                "locations": [link_uri, "google-drive://account/root", 9]
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let preferences = SidebarPreferences::load_from(path.clone()).unwrap();
+        assert_eq!(preferences.pins(), [link]);
+        assert_eq!(preferences.remote_pins(), ["google-drive://account/root"]);
+        assert_eq!(
+            preferences.recoverable_notices(),
+            [crate::core::RecoverableStateNotice::MalformedRecord]
+        );
+        preferences.save().unwrap();
+        let saved: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        assert_eq!(
+            saved["locations"][0],
+            gio::File::for_path(temporary.path().join("link"))
+                .uri()
+                .as_str()
+        );
+        assert_eq!(saved["locations"][1], "google-drive://account/root");
     }
 
     #[test]

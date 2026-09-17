@@ -48,7 +48,13 @@ pub enum OperationState {
 pub struct OperationRecord {
     pub id: u64,
     pub kind: OperationKind,
+    /// Canonical identities retained for history, including nonlocal sources.
+    #[serde(default, skip_serializing)]
+    pub source_uris: Vec<String>,
     pub sources: Vec<PathBuf>,
+    /// Canonical identity retained for a nonlocal destination.
+    #[serde(default, skip_serializing)]
+    pub destination_uri: Option<String>,
     pub destination: Option<PathBuf>,
     pub completed: usize,
     pub total: usize,
@@ -151,7 +157,14 @@ impl OperationManager {
         self.records.lock().unwrap().push(OperationRecord {
             id,
             kind,
+            source_uris: sources
+                .iter()
+                .map(|path| Location::from_local_path(path).uri().to_owned())
+                .collect(),
             sources: sources.clone(),
+            destination_uri: destination
+                .as_ref()
+                .map(|path| Location::from_local_path(path).uri().to_owned()),
             destination: destination.clone(),
             completed: 0,
             total,
@@ -383,15 +396,21 @@ fn stored_record(record: &OperationRecord) -> StoredOperationRecordV2 {
     StoredOperationRecordV2 {
         id: record.id,
         kind: record.kind,
-        sources: record
-            .sources
-            .iter()
-            .map(|path| Location::from_local_path(path).uri().to_owned())
-            .collect(),
-        destination: record
-            .destination
-            .as_ref()
-            .map(|path| Location::from_local_path(path).uri().to_owned()),
+        sources: if record.source_uris.is_empty() {
+            record
+                .sources
+                .iter()
+                .map(|path| Location::from_local_path(path).uri().to_owned())
+                .collect()
+        } else {
+            record.source_uris.clone()
+        },
+        destination: record.destination_uri.clone().or_else(|| {
+            record
+                .destination
+                .as_ref()
+                .map(|path| Location::from_local_path(path).uri().to_owned())
+        }),
         completed: record.completed,
         total: record.total,
         state: record.state.clone(),
@@ -400,41 +419,85 @@ fn stored_record(record: &OperationRecord) -> StoredOperationRecordV2 {
 }
 
 fn decode_history(bytes: &[u8]) -> (Vec<OperationRecord>, Vec<RecoverableStateNotice>) {
-    if let Ok(records) = serde_json::from_slice::<Vec<OperationRecord>>(bytes) {
+    if let Ok(mut records) = serde_json::from_slice::<Vec<OperationRecord>>(bytes) {
+        for record in &mut records {
+            if record.source_uris.is_empty() {
+                record.source_uris = record
+                    .sources
+                    .iter()
+                    .map(|path| Location::from_local_path(path).uri().to_owned())
+                    .collect();
+            }
+            if record.destination_uri.is_none() {
+                record.destination_uri = record
+                    .destination
+                    .as_ref()
+                    .map(|path| Location::from_local_path(path).uri().to_owned());
+            }
+        }
         return (records, Vec::new());
     }
-    let Ok(stored) = serde_json::from_slice::<StoredOperationHistoryV2>(bytes) else {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
         return (Vec::new(), vec![RecoverableStateNotice::MalformedRecord]);
     };
-    if stored.schema_version != 2 {
+    let Some(object) = value.as_object() else {
+        return (Vec::new(), vec![RecoverableStateNotice::MalformedRecord]);
+    };
+    if object
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+        != Some(2)
+    {
         return (Vec::new(), vec![RecoverableStateNotice::UnsupportedSchema]);
     }
+    let Some(stored_records) = object.get("records").and_then(serde_json::Value::as_array) else {
+        return (Vec::new(), vec![RecoverableStateNotice::MalformedRecord]);
+    };
     let mut records = Vec::new();
     let mut notices = Vec::new();
-    for record in stored.records {
-        let sources = record
+    for value in stored_records {
+        let Ok(record) = serde_json::from_value::<StoredOperationRecordV2>(value.clone()) else {
+            notices.push(RecoverableStateNotice::MalformedRecord);
+            continue;
+        };
+        let source_locations = record
             .sources
             .iter()
-            .filter_map(|uri| {
-                Location::from_uri(uri)
-                    .ok()
-                    .and_then(|location| location.local_path())
-            })
-            .collect::<Vec<_>>();
-        let destination = record
-            .destination
-            .as_deref()
-            .and_then(|uri| Location::from_uri(uri).ok())
-            .and_then(|location| location.local_path());
-        if sources.is_empty() || (record.destination.is_some() && destination.is_none()) {
+            .map(|uri| Location::from_uri(uri))
+            .collect::<Result<Vec<_>, _>>();
+        let Ok(source_locations) = source_locations else {
+            notices.push(RecoverableStateNotice::MalformedRecord);
+            continue;
+        };
+        if source_locations.is_empty() {
             notices.push(RecoverableStateNotice::MalformedRecord);
             continue;
         }
+        let destination_location = record
+            .destination
+            .as_deref()
+            .map(Location::from_uri)
+            .transpose();
+        let Ok(destination_location) = destination_location else {
+            notices.push(RecoverableStateNotice::MalformedRecord);
+            continue;
+        };
+        let source_uris = source_locations
+            .iter()
+            .map(|location| location.uri().to_owned())
+            .collect::<Vec<_>>();
         records.push(OperationRecord {
             id: record.id,
             kind: record.kind,
-            sources,
-            destination,
+            source_uris,
+            sources: source_locations
+                .iter()
+                .filter_map(Location::local_path)
+                .collect(),
+            destination_uri: destination_location
+                .as_ref()
+                .map(|location| location.uri().to_owned()),
+            destination: destination_location.and_then(|location| location.local_path()),
             completed: record.completed,
             total: record.total,
             state: record.state,
@@ -507,7 +570,9 @@ mod tests {
         let previous_session = vec![OperationRecord {
             id: 1,
             kind: OperationKind::Copy,
+            source_uris: Vec::new(),
             sources: vec![PathBuf::from("/tmp/old.zip")],
+            destination_uri: None,
             destination: Some(PathBuf::from("/tmp")),
             completed: 10,
             total: 10,
@@ -553,7 +618,9 @@ mod tests {
         manager.records.lock().unwrap().push(OperationRecord {
             id: 1,
             kind: OperationKind::Copy,
+            source_uris: Vec::new(),
             sources: vec![PathBuf::from("/tmp/big.bin")],
+            destination_uri: None,
             destination: Some(PathBuf::from("/tmp/dest")),
             completed: 0,
             total: 100,
@@ -585,7 +652,9 @@ mod tests {
         manager.records.lock().unwrap().push(OperationRecord {
             id: 1,
             kind: OperationKind::Delete,
+            source_uris: Vec::new(),
             sources: vec![PathBuf::from("/tmp/report.txt")],
+            destination_uri: None,
             destination: None,
             completed: 0,
             total: 1,
@@ -602,7 +671,9 @@ mod tests {
         let legacy = vec![OperationRecord {
             id: 3,
             kind: OperationKind::Copy,
+            source_uris: Vec::new(),
             sources: vec![PathBuf::from("/tmp/source")],
+            destination_uri: None,
             destination: Some(PathBuf::from("/tmp/destination")),
             completed: 1,
             total: 1,
@@ -622,6 +693,54 @@ mod tests {
         assert_eq!(
             saved["records"][0]["sources"],
             serde_json::json!(["file:///tmp/source"])
+        );
+    }
+
+    #[test]
+    fn v2_history_keeps_remote_uris_and_skips_only_malformed_records() {
+        let bytes = br#"{
+            "schema_version": 2,
+            "records": [
+                {"id": 7, "kind": "Copy", "sources": ["smb://host/source"], "destination": "sftp://host/destination", "completed": 1, "total": 1, "state": "Completed", "finished_at": 1},
+                {"id": "bad"},
+                {"id": 8, "kind": "Delete", "sources": ["file:///tmp/ok"], "destination": null, "completed": 1, "total": 1, "state": "Completed", "finished_at": 1}
+            ]
+        }"#;
+
+        let (records, notices) = decode_history(bytes);
+
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].source_uris, ["smb://host/source"]);
+        assert_eq!(
+            records[0].destination_uri.as_deref(),
+            Some("sftp://host/destination")
+        );
+        assert_eq!(records[1].source_uris, ["file:///tmp/ok"]);
+        assert_eq!(notices, [RecoverableStateNotice::MalformedRecord]);
+    }
+
+    #[test]
+    fn re_persisting_v2_history_does_not_rewrite_remote_uris_as_local_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("history.json");
+        std::fs::write(
+            &path,
+            br#"{"schema_version":2,"records":[{"id":7,"kind":"Copy","sources":["SMB://HOST/source"],"destination":"sftp://host/destination","completed":1,"total":1,"state":"Completed","finished_at":2000000000}]}"#,
+        )
+        .unwrap();
+
+        let manager = OperationManager::load_history(Some(path.clone()), 7);
+        manager.persist_history();
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+
+        assert_eq!(
+            saved["records"][0]["sources"],
+            serde_json::json!(["smb://host/source"])
+        );
+        assert_eq!(
+            saved["records"][0]["destination"],
+            "sftp://host/destination"
         );
     }
 
