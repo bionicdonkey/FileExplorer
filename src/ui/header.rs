@@ -96,6 +96,21 @@ impl LocationBar {
         self.stack.set_visible_child_name("breadcrumbs");
     }
 
+    pub fn set_section(&self, title: &str) {
+        self.entry.set_text(title);
+        while let Some(child) = self.breadcrumbs.first_child() {
+            self.breadcrumbs.remove(&child);
+        }
+        let label = Label::new(Some(title));
+        label.add_css_class("breadcrumb-current");
+        label.set_xalign(0.0);
+        self.breadcrumbs.append(&label);
+        let trailing = Label::new(None);
+        trailing.set_hexpand(true);
+        self.breadcrumbs.append(&trailing);
+        self.stack.set_visible_child_name("breadcrumbs");
+    }
+
     fn render_breadcrumbs_from_entry(&self) {
         let path = PathBuf::from(self.entry.text().as_str());
         self.render_breadcrumbs(&path);
@@ -300,5 +315,14 @@ impl HeaderControls {
 
     pub fn set_uri(&self, uri: &str) {
         self.location_bar.set_uri(uri);
+    }
+
+    pub fn set_section(&self, title: &str) {
+        self.location_bar.set_section(title);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn displayed_location_text(&self) -> String {
+        self.location_bar.entry.text().to_string()
     }
 }

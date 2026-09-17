@@ -14,8 +14,10 @@ use gtk::{
 use crate::core::directory_model::DirectoryModel;
 use crate::core::file_item::FileItem;
 use crate::core::{
-    GroupField, ListColumn, ListColumnLayout, SortDirection, SortField, ViewMode, ViewOptions,
+    GroupField, ListColumn, ListColumnLayout, SidebarLocation, SidebarNode, SortDirection,
+    SortField, ViewMode, ViewOptions,
 };
+use crate::core::sidebar_model::SidebarSection;
 use crate::ui::context_menu::{
     delete_command, item_commands, open_with_apps, ContextCommand, ContextTarget,
 };
@@ -26,11 +28,46 @@ enum ListRow {
     File(FileItem),
 }
 
+#[derive(Clone, Default)]
+struct ViewNavigationState {
+    remote_uri: Option<String>,
+    section_overview: Option<SidebarSection>,
+}
+
+impl ViewNavigationState {
+    fn set_uri(&mut self, uri: String) {
+        self.remote_uri = Some(uri);
+        self.section_overview = None;
+    }
+
+    fn show_section(&mut self, section: SidebarSection) {
+        self.section_overview = Some(section);
+    }
+
+    fn clear_section(&mut self) -> bool {
+        self.section_overview.take().is_some()
+    }
+}
+
+fn filesystem_space(path: &Path) -> Option<(u64, u64)> {
+    gio::File::for_path(path)
+        .query_filesystem_info(
+            "filesystem::size,filesystem::free",
+            gio::Cancellable::NONE,
+        )
+        .ok()
+        .map(|info| (
+            info.attribute_uint64("filesystem::size"),
+            info.attribute_uint64("filesystem::free"),
+        ))
+        .filter(|(total, _)| *total > 0)
+}
+
 #[derive(Clone)]
 pub struct FileView {
     pub widget: ScrolledWindow,
     location: Rc<RefCell<PathBuf>>,
-    remote_uri: Rc<RefCell<Option<String>>>,
+    navigation_state: Rc<RefCell<ViewNavigationState>>,
     on_navigate: Rc<RefCell<Option<Box<dyn Fn(PathBuf)>>>>,
     on_uri_navigate: Rc<RefCell<Option<Box<dyn Fn(String)>>>>,
     on_context_command: Rc<RefCell<Option<Box<dyn Fn(ContextTarget, ContextCommand)>>>>,
@@ -50,7 +87,7 @@ impl FileView {
         let view = Self {
             widget: scroll,
             location,
-            remote_uri: Rc::new(RefCell::new(None)),
+            navigation_state: Rc::new(RefCell::new(ViewNavigationState::default())),
             on_navigate,
             on_uri_navigate: Rc::new(RefCell::new(None)),
             on_context_command: Rc::new(RefCell::new(None)),
@@ -66,16 +103,18 @@ impl FileView {
         background.set_button(3);
         let background_parent = view.widget.clone();
         background.connect_pressed(move |gesture, _, x, y| {
-            show_item_context_menu(
-                &background_parent,
-                x,
-                y,
-                ContextTarget::Background(background_view.location()),
-                &background_view,
-                gesture
-                    .current_event_state()
-                    .contains(gtk::gdk::ModifierType::SHIFT_MASK),
-            )
+            if background_view.section_title().is_none() {
+                show_item_context_menu(
+                    &background_parent,
+                    x,
+                    y,
+                    ContextTarget::Background(background_view.location()),
+                    &background_view,
+                    gesture
+                        .current_event_state()
+                        .contains(gtk::gdk::ModifierType::SHIFT_MASK),
+                )
+            }
         });
         view.widget.add_controller(background);
         view.reload();
@@ -83,7 +122,7 @@ impl FileView {
     }
 
     pub fn set_location(&self, path: PathBuf) {
-        *self.remote_uri.borrow_mut() = None;
+        *self.navigation_state.borrow_mut() = ViewNavigationState::default();
         *self.location.borrow_mut() = path;
         *self.selected_target.borrow_mut() = None;
         *self.search_results.borrow_mut() = None;
@@ -91,7 +130,7 @@ impl FileView {
     }
 
     pub fn set_uri(&self, uri: String) {
-        *self.remote_uri.borrow_mut() = Some(uri.clone());
+        self.navigation_state.borrow_mut().set_uri(uri.clone());
         *self.selected_target.borrow_mut() = None;
         *self.search_results.borrow_mut() = None;
         self.widget
@@ -119,7 +158,8 @@ impl FileView {
                 move |result| {
                     let _keep_operation_alive = &keep_operation;
                     if let Ok(mounted_root) = result {
-                        *view.remote_uri.borrow_mut() = Some(mounted_root.uri().to_string());
+                        view.navigation_state.borrow_mut().remote_uri =
+                            Some(mounted_root.uri().to_string());
                     }
                     view.reload();
                 },
@@ -195,7 +235,7 @@ impl FileView {
     }
 
     pub fn uri(&self) -> Option<String> {
-        self.remote_uri.borrow().clone()
+        self.navigation_state.borrow().remote_uri.clone()
     }
 
     /// Replaces the current listing with search results, which may include
@@ -218,15 +258,56 @@ impl FileView {
         self.search_results.borrow().is_some()
     }
 
+    /// Displays the immediate entries belonging to a sidebar section. Sections
+    /// are virtual locations, so they intentionally do not alter the tab's
+    /// filesystem location or navigation history.
+    pub fn show_section_overview(&self, section: SidebarSection) {
+        *self.selected_target.borrow_mut() = None;
+        *self.search_results.borrow_mut() = None;
+        self.navigation_state.borrow_mut().show_section(section);
+        self.reload();
+    }
+
+    /// Leaves the virtual overview and restores the tab's underlying location.
+    pub fn clear_section_overview(&self) -> bool {
+        let was_showing = self.navigation_state.borrow_mut().clear_section();
+        if was_showing {
+            self.reload();
+        }
+        was_showing
+    }
+
+    pub fn section_title(&self) -> Option<String> {
+        self.navigation_state
+            .borrow()
+            .section_overview
+            .as_ref()
+            .map(|section| section.title.clone())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn section_overview_node_count(&self) -> usize {
+        self.navigation_state
+            .borrow()
+            .section_overview
+            .as_ref()
+            .map_or(0, |section| section.nodes.len())
+    }
+
     fn reload(&self) {
+        if let Some(section) = self.navigation_state.borrow().section_overview.clone() {
+            self.render_section_overview(&section);
+            return;
+        }
         let options = self.options();
         if let Some(items) = self.search_results.borrow().clone() {
             self.render(items, &options);
             return;
         }
         let result = self
-            .remote_uri
+            .navigation_state
             .borrow()
+            .remote_uri
             .as_deref()
             .map(|uri| DirectoryModel::load_uri_with_options(uri, &options))
             .unwrap_or_else(|| {
@@ -238,6 +319,112 @@ impl FileView {
                 self.widget.set_child(Some(&Label::new(Some(&format!(
                     "Unable to open folder: {error}"
                 )))));
+            }
+        }
+    }
+
+    fn render_section_overview(&self, section: &SidebarSection) {
+        let page = GtkBox::new(Orientation::Vertical, 18);
+        page.add_css_class("section-overview");
+        page.set_margin_top(24);
+        page.set_margin_bottom(24);
+        page.set_margin_start(28);
+        page.set_margin_end(28);
+
+        let title = Label::new(Some(&section.title));
+        title.add_css_class("title-1");
+        title.set_xalign(0.0);
+        page.append(&title);
+
+        if section.title == "This PC" {
+            let description = Label::new(Some("Storage and locations on this computer"));
+            description.add_css_class("dim-label");
+            description.set_xalign(0.0);
+            page.append(&description);
+        }
+
+        let entries_heading = Label::new(Some(if section.title == "This PC" {
+            "Drives"
+        } else {
+            "Locations"
+        }));
+        entries_heading.add_css_class("heading");
+        entries_heading.set_xalign(0.0);
+        page.append(&entries_heading);
+
+        let entries = GtkBox::new(Orientation::Vertical, 6);
+        entries.add_css_class("section-overview-entries");
+        if section.nodes.is_empty() {
+            let empty = Label::new(Some("No locations are available here yet."));
+            empty.add_css_class("dim-label");
+            empty.set_xalign(0.0);
+            entries.append(&empty);
+        } else {
+            for node in &section.nodes {
+                entries.append(&self.section_entry(node, section.title == "This PC"));
+            }
+        }
+        page.append(&entries);
+
+        self.widget.set_child(Some(&page));
+    }
+
+    fn section_entry(&self, node: &SidebarNode, show_storage: bool) -> Button {
+        let button = Button::new();
+        button.add_css_class("flat");
+        button.add_css_class("section-overview-entry");
+        button.set_halign(gtk::Align::Fill);
+        let content = GtkBox::new(Orientation::Horizontal, 12);
+        content.set_margin_top(10);
+        content.set_margin_bottom(10);
+        content.set_margin_start(12);
+        content.set_margin_end(12);
+        let icon = Image::from_icon_name(node.location.icon_name());
+        icon.set_pixel_size(24);
+        content.append(&icon);
+
+        let text = GtkBox::new(Orientation::Vertical, 3);
+        text.set_hexpand(true);
+        let label = Label::new(Some(node.location.label()));
+        label.set_xalign(0.0);
+        text.append(&label);
+        if show_storage {
+            if let Some(path) = node.location.local_path() {
+                if let Some((total, free)) = filesystem_space(path) {
+                    let detail = Label::new(Some(&format!(
+                        "{} free of {}",
+                        crate::core::file_item::format_size(free),
+                        crate::core::file_item::format_size(total)
+                    )));
+                    detail.add_css_class("dim-label");
+                    detail.set_xalign(0.0);
+                    text.append(&detail);
+                    let progress = gtk::ProgressBar::new();
+                    progress.set_fraction((1.0 - free as f64 / total.max(1) as f64).clamp(0.0, 1.0));
+                    progress.set_show_text(false);
+                    text.append(&progress);
+                }
+            }
+        }
+        content.append(&text);
+        button.set_child(Some(&content));
+        let view = self.clone();
+        let location = node.location.clone();
+        button.connect_clicked(move |_| view.open_sidebar_location(&location));
+        button
+    }
+
+    fn open_sidebar_location(&self, location: &SidebarLocation) {
+        match location.local_path() {
+            Some(path) => {
+                if let Some(callback) = self.on_navigate.borrow().as_ref() {
+                    callback(path.to_path_buf());
+                }
+            }
+            None => {
+                if let Some(callback) = self.on_uri_navigate.borrow().as_ref() {
+                    callback(location.uri());
+                }
             }
         }
     }
@@ -1065,9 +1252,45 @@ mod tests {
         cached_thumbnail_file_for, drag_uri_for, grid_tile_label, is_mountable_file_type,
         local_image_thumbnail_file, thumbnail_cache_paths,
         thumbnail_cache_homes_from,
-        uses_native_row_sorting, FileView,
+        uses_native_row_sorting, FileView, ViewNavigationState,
     };
+    use crate::core::sidebar_model::SidebarSection;
     use crate::core::{GroupField, ViewMode, ViewOptions};
+
+    #[test]
+    fn section_overview_preserves_and_restores_a_remote_location() {
+        let mut state = ViewNavigationState::default();
+        state.set_uri("smb://server/share".into());
+        state.show_section(SidebarSection {
+            title: "This PC".into(),
+            nodes: Vec::new(),
+        });
+
+        assert_eq!(state.remote_uri.as_deref(), Some("smb://server/share"));
+        assert!(state.clear_section());
+        assert_eq!(state.remote_uri.as_deref(), Some("smb://server/share"));
+        assert!(state.section_overview.is_none());
+    }
+
+    #[test]
+    fn refreshing_a_section_overview_keeps_its_remote_backing_location() {
+        let mut state = ViewNavigationState::default();
+        state.set_uri("smb://server/share".into());
+        state.show_section(SidebarSection {
+            title: "Network & online".into(),
+            nodes: Vec::new(),
+        });
+        state.show_section(SidebarSection {
+            title: "Network & online".into(),
+            nodes: Vec::new(),
+        });
+
+        assert_eq!(state.remote_uri.as_deref(), Some("smb://server/share"));
+        assert_eq!(
+            state.section_overview.as_ref().map(|section| section.title.as_str()),
+            Some("Network & online")
+        );
+    }
 
     #[test]
     fn grouped_lists_do_not_apply_a_second_native_row_sort() {

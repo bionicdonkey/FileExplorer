@@ -16,6 +16,7 @@ use crate::ui::operations_page::active_summary;
 
 #[derive(Clone, Debug)]
 pub enum SidebarAction {
+    OpenSection(String),
     Open(PathBuf),
     OpenInNewTab(PathBuf),
     OpenInNewWindow(PathBuf),
@@ -36,6 +37,7 @@ pub struct Sidebar {
     model: Rc<RefCell<SidebarModel>>,
     on_action: Rc<dyn Fn(SidebarAction)>,
     active_path: Rc<RefCell<Option<PathBuf>>>,
+    active_section: Rc<RefCell<Option<String>>>,
     mount_parent: gtk::Window,
     operation_manager: Rc<RefCell<Option<OperationManager>>>,
     operation_summary: Rc<RefCell<Option<String>>>,
@@ -62,6 +64,7 @@ impl Sidebar {
             model,
             on_action: Rc::new(on_action),
             active_path: Rc::new(RefCell::new(None)),
+            active_section: Rc::new(RefCell::new(None)),
             mount_parent: mount_parent.clone().upcast(),
             operation_manager: Rc::new(RefCell::new(None)),
             operation_summary: Rc::new(RefCell::new(None)),
@@ -177,10 +180,18 @@ impl Sidebar {
                 let _ = model.preferences().save();
             });
             heading_row.append(&toggle);
-            let heading = Label::new(Some(&section.title));
+            let heading = Button::with_label(&section.title);
+            heading.set_hexpand(true);
+            heading.set_halign(gtk::Align::Fill);
+            heading.add_css_class("flat");
             heading.add_css_class("heading");
             heading.add_css_class("sidebar-section-heading");
-            heading.set_xalign(0.0);
+            if self.active_section.borrow().as_deref() == Some(section.title.as_str()) {
+                heading.add_css_class("selected");
+            }
+            let action = self.on_action.clone();
+            let section_title = section.title.clone();
+            heading.connect_clicked(move |_| action(SidebarAction::OpenSection(section_title.clone())));
             if section.title == "Network & online" {
                 heading.set_hexpand(true);
                 let add = Button::from_icon_name("list-add-symbolic");
@@ -238,12 +249,24 @@ impl Sidebar {
 
     pub fn set_active_path(&self, path: &Path) {
         *self.active_path.borrow_mut() = Some(path.to_path_buf());
+        *self.active_section.borrow_mut() = None;
         self.refresh();
     }
 
     pub fn clear_active_path(&self) {
-        *self.active_path.borrow_mut() = None;
+        clear_navigation_selection(&self.active_path, &self.active_section);
         self.refresh();
+    }
+
+    pub fn set_active_section(&self, section: impl Into<String>) {
+        *self.active_path.borrow_mut() = None;
+        *self.active_section.borrow_mut() = Some(section.into());
+        self.refresh();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn active_navigation_selection(&self) -> (Option<PathBuf>, Option<String>) {
+        (self.active_path.borrow().clone(), self.active_section.borrow().clone())
     }
 
     pub fn toggle_quick_access(&self, path: PathBuf) {
@@ -609,6 +632,14 @@ fn sidebar_sections(model: &Rc<RefCell<SidebarModel>>) -> Vec<SidebarSection> {
     model.borrow().sections()
 }
 
+fn clear_navigation_selection(
+    active_path: &RefCell<Option<PathBuf>>,
+    active_section: &RefCell<Option<String>>,
+) {
+    *active_path.borrow_mut() = None;
+    *active_section.borrow_mut() = None;
+}
+
 fn operation_summary_changed(previous: &Option<String>, next: &Option<String>) -> bool {
     previous != next
 }
@@ -620,6 +651,7 @@ fn should_show_devices_heading(section_title: &str, node_index: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::path::PathBuf;
     use std::rc::Rc;
 
     use crate::core::{SidebarModel, SidebarPreferences};
@@ -647,6 +679,17 @@ mod tests {
             &None,
             &Some("1 file operation in progress".into())
         ));
+    }
+
+    #[test]
+    fn clearing_navigation_selection_also_clears_the_active_section() {
+        let active_path = RefCell::new(Some(PathBuf::from("/tmp/example")));
+        let active_section = RefCell::new(Some("Network & online".to_string()));
+
+        super::clear_navigation_selection(&active_path, &active_section);
+
+        assert!(active_path.borrow().is_none());
+        assert!(active_section.borrow().is_none());
     }
 
     #[test]
