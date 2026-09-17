@@ -62,13 +62,24 @@ impl Location {
     }
 
     /// Creates a location from a GIO file supplied by an explicit adapter boundary.
+    ///
+    /// This trusted-boundary convenience method retains the required infallible API.
+    /// Call [`Self::try_from_file`] for values originating outside the application.
     pub fn from_file(file: gio::File) -> Self {
-        let canonical_uri = canonicalize_uri(file.uri().as_str())
-            .expect("GIO file URI must be safe before becoming application identity");
-        Self {
+        Self::try_from_file(file).unwrap_or_else(|_| Self::home())
+    }
+
+    /// Validates a GIO file URI before it becomes application identity.
+    ///
+    /// Adapters receiving untrusted GIO files must use this method rather than
+    /// the infallible compatibility constructor, so a credential-bearing URI
+    /// cannot panic the process or enter persistent state.
+    pub fn try_from_file(file: gio::File) -> Result<Self, LocationError> {
+        let canonical_uri = canonicalize_uri(file.uri().as_str())?;
+        Ok(Self {
             canonical_uri,
             file,
-        }
+        })
     }
 
     /// Creates a local `file:` location at an explicit filesystem boundary.

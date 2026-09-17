@@ -11,7 +11,9 @@ pub mod search;
 pub mod sidebar_model;
 pub mod view_options;
 
-pub use application_preferences::{ApplicationPreferences, ConflictDefault};
+pub use application_preferences::{
+    ApplicationPreferences, ConflictDefault, RecoverableStateNotice,
+};
 pub use directory_model::DirectoryModel;
 pub use elevated_operations::ElevatedOperations;
 pub use file_item::FileItem;

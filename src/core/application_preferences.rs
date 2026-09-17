@@ -52,6 +52,20 @@ pub enum RecoverableStateError {
     InvalidState,
 }
 
+/// A user-safe explanation that a persisted record was skipped.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RecoverableStateNotice {
+    MalformedRecord,
+    UnsupportedSchema,
+}
+
+/// Successfully decoded state together with recoverable record-level notices.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DecodedUriState {
+    pub locations: Vec<Location>,
+    pub notices: Vec<RecoverableStateNotice>,
+}
+
 impl std::fmt::Display for RecoverableStateError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("saved location state could not be recovered")
@@ -145,7 +159,8 @@ impl ApplicationPreferences {
         if !path.exists() {
             return Ok(Vec::new());
         }
-        Ok(decode_session(&fs::read(path)?)
+        Ok(decode_session_state(&fs::read(path)?)
+            .map(|state| state.locations)
             .unwrap_or_default()
             .into_iter()
             .map(|location| location.uri().to_owned())
@@ -188,6 +203,13 @@ pub fn encode_session(locations: &[Location]) -> Result<Vec<u8>, RecoverableStat
 /// Decodes V2 URI state or performs the one-release, read-only V1 path import.
 /// Invalid records are intentionally skipped so one stale tab cannot block startup.
 pub fn decode_session(bytes: &[u8]) -> Result<Vec<Location>, RecoverableStateError> {
+    Ok(decode_session_state(bytes)?.locations)
+}
+
+/// Decodes session state while retaining user-safe notices for each skipped
+/// record. Callers can show recovery feedback without ever exposing saved URI
+/// contents or credentials.
+pub fn decode_session_state(bytes: &[u8]) -> Result<DecodedUriState, RecoverableStateError> {
     let value: serde_json::Value =
         serde_json::from_slice(bytes).map_err(|_| RecoverableStateError::InvalidState)?;
     let object = value
@@ -201,20 +223,43 @@ pub fn decode_session(bytes: &[u8]) -> Result<Vec<Location>, RecoverableStateErr
         .get("schema_version")
         .and_then(serde_json::Value::as_u64)
     {
-        Some(version) if version == URI_STATE_VERSION as u64 => Ok(locations
-            .iter()
-            .filter_map(serde_json::Value::as_str)
-            .filter_map(|uri| Location::from_uri(uri).ok())
-            .collect()),
-        None | Some(1) => Ok(import_legacy_local_paths(
-            &locations
+        Some(version) if version == URI_STATE_VERSION as u64 => decode_uri_records(locations),
+        None | Some(1) => {
+            let mut notices = Vec::new();
+            let paths = locations
                 .iter()
-                .filter_map(serde_json::Value::as_str)
-                .map(PathBuf::from)
-                .collect::<Vec<_>>(),
-        )),
+                .filter_map(|value| match value.as_str() {
+                    Some(path) => Some(PathBuf::from(path)),
+                    None => {
+                        notices.push(RecoverableStateNotice::MalformedRecord);
+                        None
+                    }
+                })
+                .collect::<Vec<_>>();
+            Ok(DecodedUriState {
+                locations: import_legacy_local_paths(&paths),
+                notices,
+            })
+        }
         _ => Err(RecoverableStateError::InvalidState),
     }
+}
+
+fn decode_uri_records(
+    locations: &[serde_json::Value],
+) -> Result<DecodedUriState, RecoverableStateError> {
+    let mut decoded = Vec::new();
+    let mut notices = Vec::new();
+    for value in locations {
+        match value.as_str().and_then(|uri| Location::from_uri(uri).ok()) {
+            Some(location) => decoded.push(location),
+            None => notices.push(RecoverableStateNotice::MalformedRecord),
+        }
+    }
+    Ok(DecodedUriState {
+        locations: decoded,
+        notices,
+    })
 }
 
 /// Read-only V1 migration boundary. It does not mutate input or write state.

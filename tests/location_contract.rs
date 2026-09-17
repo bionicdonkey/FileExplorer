@@ -2,7 +2,8 @@ use std::path::PathBuf;
 
 use zorin_explorer::core::{
     application_preferences::{
-        decode_session, encode_session, import_legacy_local_paths, UriStateV2,
+        decode_session, decode_session_state, encode_session, import_legacy_local_paths,
+        RecoverableStateNotice, UriStateV2,
     },
     Location,
 };
@@ -52,6 +53,15 @@ fn redacts_remote_path_details() {
 }
 
 #[test]
+fn untrusted_gio_file_input_is_fallible_without_panicking() {
+    let untrusted = gio::File::for_uri("smb://user@host/share");
+    assert_eq!(
+        Location::try_from_file(untrusted),
+        Err(zorin_explorer::core::LocationError::UnsafeLocation)
+    );
+}
+
+#[test]
 fn session_codec_round_trips_remote_locations_and_skips_bad_records() {
     let remote = Location::from_uri("smb://host/share").unwrap();
     let bytes = encode_session(&[remote.clone()]).unwrap();
@@ -62,9 +72,23 @@ fn session_codec_round_trips_remote_locations_and_skips_bad_records() {
         locations: vec!["sftp://host/ok".into(), "smb://user@host/no".into()],
     })
     .unwrap();
-    let decoded = decode_session(&bytes).unwrap();
-    assert_eq!(decoded.len(), 1);
-    assert_eq!(decoded[0].uri(), "sftp://host/ok");
+    let decoded = decode_session_state(&bytes).unwrap();
+    assert_eq!(decoded.locations.len(), 1);
+    assert_eq!(decoded.locations[0].uri(), "sftp://host/ok");
+    assert_eq!(
+        decoded.notices,
+        vec![RecoverableStateNotice::MalformedRecord]
+    );
+}
+
+#[test]
+fn v1_persisted_json_migrates_and_a_subsequent_write_is_v2() {
+    let v1 = br#"{"locations":["/tmp/legacy"]}"#;
+    let migrated = decode_session(v1).unwrap();
+    assert_eq!(migrated[0].uri(), "file:///tmp/legacy");
+    let v2: UriStateV2 = serde_json::from_slice(&encode_session(&migrated).unwrap()).unwrap();
+    assert_eq!(v2.schema_version, 2);
+    assert_eq!(v2.locations, vec!["file:///tmp/legacy"]);
 }
 
 #[test]

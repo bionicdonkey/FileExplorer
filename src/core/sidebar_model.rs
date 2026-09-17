@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 use gio::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::core::{Location, RecoverableStateNotice};
+
 fn default_expanded_section() -> String {
     "Quick access".into()
 }
@@ -117,6 +119,10 @@ pub struct SidebarSection {
 #[derive(Default, Serialize, Deserialize)]
 struct StoredPreferences {
     #[serde(default)]
+    schema_version: Option<u32>,
+    #[serde(default)]
+    locations: Vec<String>,
+    #[serde(default)]
     pins: Vec<PathBuf>,
     #[serde(default)]
     remote_pins: Vec<String>,
@@ -136,6 +142,7 @@ pub struct SidebarPreferences {
     expanded_locations: BTreeMap<String, bool>,
     default_expanded_section: String,
     needs_defaults: bool,
+    recoverable_notices: Vec<RecoverableStateNotice>,
 }
 
 impl SidebarPreferences {
@@ -148,6 +155,7 @@ impl SidebarPreferences {
             expanded_locations: BTreeMap::new(),
             default_expanded_section: default_expanded_section(),
             needs_defaults: false,
+            recoverable_notices: Vec::new(),
         }
     }
 
@@ -171,6 +179,7 @@ impl SidebarPreferences {
                 expanded_locations: BTreeMap::new(),
                 default_expanded_section: default_expanded_section(),
                 needs_defaults: true,
+                recoverable_notices: Vec::new(),
             });
         }
         let stored = serde_json::from_slice::<StoredPreferences>(&fs::read(&path)?)
@@ -183,12 +192,33 @@ impl SidebarPreferences {
             expanded_locations: stored.expanded_locations,
             default_expanded_section: stored.default_expanded_section,
             needs_defaults: false,
+            recoverable_notices: Vec::new(),
         };
-        for pin in stored.pins {
-            preferences.pin(pin);
-        }
-        for uri in stored.remote_pins {
-            let _ = preferences.pin_remote(uri);
+        if stored.schema_version == Some(2) {
+            for uri in stored.locations {
+                match Location::from_uri(&uri) {
+                    Ok(location) => match location.local_path() {
+                        Some(path) => preferences.pin(path),
+                        None => {
+                            let _ = preferences.pin_remote(location.uri().to_owned());
+                        }
+                    },
+                    Err(_) => preferences
+                        .recoverable_notices
+                        .push(RecoverableStateNotice::MalformedRecord),
+                }
+            }
+        } else {
+            for pin in stored.pins {
+                preferences.pin(pin);
+            }
+            for uri in stored.remote_pins {
+                if preferences.pin_remote(uri).is_err() {
+                    preferences
+                        .recoverable_notices
+                        .push(RecoverableStateNotice::MalformedRecord);
+                }
+            }
         }
         Ok(preferences)
     }
@@ -198,6 +228,9 @@ impl SidebarPreferences {
     }
     pub fn remote_pins(&self) -> &[String] {
         &self.remote_pins
+    }
+    pub fn recoverable_notices(&self) -> &[RecoverableStateNotice] {
+        &self.recoverable_notices
     }
     pub fn section_expanded(&self, section: &str) -> bool {
         self.section_expanded
@@ -279,8 +312,20 @@ impl SidebarPreferences {
         })?;
         fs::create_dir_all(parent)?;
         let bytes = serde_json::to_vec_pretty(&StoredPreferences {
-            pins: self.pins.clone(),
-            remote_pins: self.remote_pins.clone(),
+            schema_version: Some(2),
+            locations: self
+                .pins
+                .iter()
+                .map(|path| Location::from_local_path(path).uri().to_owned())
+                .chain(
+                    self.remote_pins
+                        .iter()
+                        .filter_map(|uri| Location::from_uri(uri).ok())
+                        .map(|location| location.uri().to_owned()),
+                )
+                .collect(),
+            pins: Vec::new(),
+            remote_pins: Vec::new(),
             section_expanded: self.section_expanded.clone(),
             expanded_locations: self.expanded_locations.clone(),
             default_expanded_section: self.default_expanded_section.clone(),
@@ -784,6 +829,28 @@ mod tests {
         assert_eq!(preferences.remote_pins(), ["smb://nas.local/media"]);
         preferences.unpin_remote("smb://nas.local/media");
         assert!(preferences.remote_pins().is_empty());
+    }
+
+    #[test]
+    fn v2_sidebar_pins_persist_canonical_uris_and_report_bad_records() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("sidebar.json");
+        std::fs::write(
+            &path,
+            r#"{"schema_version":2,"locations":["SMB://HOST/share","smb://user@host/no"]}"#,
+        )
+        .unwrap();
+        let preferences = SidebarPreferences::load_from(path.clone()).unwrap();
+        assert_eq!(preferences.remote_pins(), ["smb://host/share"]);
+        assert_eq!(
+            preferences.recoverable_notices(),
+            [crate::core::RecoverableStateNotice::MalformedRecord]
+        );
+        preferences.save().unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(saved["schema_version"], 2);
+        assert_eq!(saved["locations"], serde_json::json!(["smb://host/share"]));
     }
 
     #[test]
