@@ -1,4 +1,5 @@
 pub mod application_preferences;
+pub mod contracts;
 pub mod directory_model;
 pub mod elevated_operations;
 pub mod file_item;
@@ -6,6 +7,7 @@ pub mod location;
 pub mod navigation;
 pub mod operation_manager;
 pub mod operations;
+pub mod ports;
 pub mod properties;
 pub mod search;
 pub mod sidebar_model;
