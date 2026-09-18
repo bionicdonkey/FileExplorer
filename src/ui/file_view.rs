@@ -63,6 +63,20 @@ fn filesystem_space(path: &Path) -> Option<(u64, u64)> {
         .filter(|(total, _)| *total > 0)
 }
 
+/// Produces the one availability snapshot used by the toolbar while retaining
+/// the displayed location as the Paste destination even when an item is
+/// selected.
+fn command_availability_for_target(
+    selected_target: Option<&ContextTarget>,
+    destination: &Location,
+) -> CommandAvailability {
+    let selection = match selected_target {
+        Some(ContextTarget::File(item) | ContextTarget::Folder(item)) => vec![item.clone()],
+        _ => Vec::new(),
+    };
+    CommandAvailability::for_selection(&selection, Some(destination))
+}
+
 #[derive(Clone)]
 pub struct FileView {
     pub widget: ScrolledWindow,
@@ -231,11 +245,8 @@ impl FileView {
     }
 
     pub fn command_availability(&self) -> CommandAvailability {
-        self.selected_target()
-            .map(|target| CommandAvailability::for_target(&target))
-            .unwrap_or_else(|| {
-                CommandAvailability::for_selection(&[], Some(&self.current_location()))
-            })
+        let selected_target = self.selected_target();
+        command_availability_for_target(selected_target.as_ref(), &self.current_location())
     }
 
     pub fn set_command_availability_handler<F: Fn(CommandAvailability) + 'static>(
@@ -1347,12 +1358,13 @@ mod tests {
     use gtk::prelude::{ListModelExt, WidgetExt};
 
     use super::{
-        cached_thumbnail_file_for, drag_uri_for, grid_tile_label, is_mountable_file_type,
-        local_image_thumbnail_file, thumbnail_cache_homes_from, thumbnail_cache_paths,
-        uses_native_row_sorting, FileView, ViewNavigationState,
+        cached_thumbnail_file_for, command_availability_for_target, drag_uri_for, grid_tile_label,
+        is_mountable_file_type, local_image_thumbnail_file, thumbnail_cache_homes_from,
+        thumbnail_cache_paths, uses_native_row_sorting, FileView, ViewNavigationState,
     };
     use crate::core::sidebar_model::SidebarSection;
-    use crate::core::{GroupField, ViewMode, ViewOptions};
+    use crate::core::{FileItem, GroupField, Location, ViewMode, ViewOptions};
+    use crate::ui::context_menu::{CommandAvailability, ContextCommand, ContextTarget};
 
     #[test]
     fn section_overview_preserves_and_restores_a_remote_location() {
@@ -1404,6 +1416,22 @@ mod tests {
         assert_eq!(view.current_location().uri(), "smb://host/share");
         assert_eq!(view.location(), local);
         assert_eq!(view.command_availability().can_paste, false);
+    }
+
+    #[test]
+    fn selected_local_item_keeps_toolbar_and_shortcut_paste_available() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("selected.txt");
+        fs::write(&path, "contents").unwrap();
+        let selected = FileItem::from_path(&path).unwrap();
+        let destination = Location::from_local_path(directory.path());
+
+        let toolbar =
+            command_availability_for_target(Some(&ContextTarget::File(selected)), &destination);
+        let shortcut = CommandAvailability::for_target(&ContextTarget::Background(destination));
+
+        assert!(toolbar.allows(ContextCommand::Paste));
+        assert!(shortcut.allows(ContextCommand::Paste));
     }
 
     #[test]
