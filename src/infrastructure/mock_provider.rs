@@ -1,8 +1,9 @@
 //! Network-free contract adapter driven by an explicit virtual clock.
 //!
 //! `advance` makes due work ready; iterate the supplied GLib main context to
-//! deliver it. Each operation stage consumes at least one tick, so cancellation
-//! between stages has deterministic acknowledgement and no wall-clock sleeps.
+//! deliver it. Each operation/search stage consumes at least one tick, so
+//! cancellation between stages has deterministic acknowledgement and no sleeps.
+//! Search accepts at most one entry per stage and yields at directory boundaries.
 //! Fixtures model provider results, not an actual mutable filesystem. Clones
 //! share fixtures and scheduled work; keep one alive while driving requests.
 
@@ -347,120 +348,175 @@ impl MockProvider {
         }));
     }
 
-    fn search_outcome(&self, request: &SearchRequest) -> SearchOutcome {
-        let incomplete = |matches, reason, error| SearchOutcome::Incomplete {
-            matches,
-            reason,
-            declared_scope: request.scope.clone(),
-            retry: RetryClass::AfterRefresh,
-            error,
-        };
-        if request.cancellable.is_cancelled() {
-            return incomplete(Vec::new(), SearchIncompleteReason::Cancelled, None);
+    fn run_search_stage(&self, mut search: PendingSearch) {
+        if let Some(outcome) = self.search_step(&mut search) {
+            // The one-shot callback is moved into the terminal path. All
+            // provider borrows have ended before application code runs.
+            (search.done)(SearchCompletion {
+                id: search.request.id,
+                outcome,
+            });
+        } else {
+            self.schedule(Box::new(move |provider| provider.run_search_stage(search)));
         }
-        let resolved = match self.resolve(&request.scope.root) {
-            Ok(location) => location,
-            Err(error) => {
-                return incomplete(
-                    Vec::new(),
+    }
+
+    fn search_step(&self, search: &mut PendingSearch) -> Option<SearchOutcome> {
+        // Every entry/directory boundary returns through here, including the
+        // final completion boundary. Check the real token before more work.
+        if search.request.cancellable.is_cancelled() {
+            return Some(search.incomplete(SearchIncompleteReason::Cancelled, None));
+        }
+        if !search.initialized {
+            let resolved = match self.resolve(&search.request.scope.root) {
+                Ok(location) => location,
+                Err(error) => {
+                    return Some(
+                        search.incomplete(SearchIncompleteReason::ProviderFailure, Some(error)),
+                    )
+                }
+            };
+            let state = self.state.borrow();
+            let Some(root) = state.directories.get(&resolved) else {
+                return Some(search.incomplete(
                     SearchIncompleteReason::ProviderFailure,
-                    Some(error),
-                )
+                    Some(OperationError::new(
+                        OperationErrorKind::NotFound,
+                        Some(&search.request.scope.root),
+                        None,
+                    )),
+                ));
+            };
+            // This mock supports filename search only, never content reads.
+            if search.request.mode != SearchMode::Filename
+                || !root.capabilities.supports(Capability::SearchFilename)
+                || !root.capabilities.stable_order
+            {
+                return Some(SearchOutcome::Unsupported {
+                    declared_scope: search.request.scope.clone(),
+                    error: OperationError::new(
+                        OperationErrorKind::Unsupported,
+                        Some(&search.request.scope.root),
+                        None,
+                    ),
+                });
             }
-        };
-        let state = self.state.borrow();
-        let unsupported = || SearchOutcome::Unsupported {
-            declared_scope: request.scope.clone(),
-            error: OperationError::new(
-                OperationErrorKind::Unsupported,
-                Some(&request.scope.root),
-                None,
-            ),
-        };
-        let Some(root) = state.directories.get(&resolved) else {
-            return incomplete(
-                Vec::new(),
-                SearchIncompleteReason::ProviderFailure,
-                Some(OperationError::new(
-                    OperationErrorKind::NotFound,
-                    Some(&request.scope.root),
-                    None,
-                )),
-            );
-        };
-        // This mock implements bounded filename search only; content is never
-        // inferred from filenames or simulated by reading file contents.
-        if request.mode != SearchMode::Filename
-            || !root.capabilities.supports(Capability::SearchFilename)
-            || !root.capabilities.stable_order
-        {
-            return unsupported();
+            search.queue.push_back((resolved, 0));
+            search.initialized = true;
         }
-        let mut matches = Vec::new();
-        let mut accepted = BTreeSet::new();
-        let mut visited = BTreeSet::new();
-        let mut queue = VecDeque::from([(resolved, 0)]);
-        let mut elapsed = Duration::ZERO;
-        let mut limits = vec![SearchLimit::Depth];
-        while let Some((directory, depth)) = queue.pop_front() {
-            if !visited.insert(directory.uri().to_owned()) || depth >= request.scope.max_depth {
-                continue;
+        if search.current.is_none() {
+            let Some((directory, depth)) = search.queue.pop_front() else {
+                return Some(search.completed());
+            };
+            if !search.visited.insert(directory.uri().to_owned())
+                || depth >= search.request.scope.max_depth
+            {
+                return None;
             }
+            let state = self.state.borrow();
             let Some(fixture) = state.directories.get(&directory) else {
-                return incomplete(
-                    matches,
+                return Some(search.incomplete(
                     SearchIncompleteReason::ProviderFailure,
                     Some(OperationError::new(
                         OperationErrorKind::NotFound,
                         Some(&directory),
                         None,
                     )),
-                );
+                ));
             };
             if !fixture.capabilities.stable_order {
-                return incomplete(matches, SearchIncompleteReason::MalformedPage, None);
+                return Some(search.incomplete(SearchIncompleteReason::MalformedPage, None));
             }
             if !fixture.capabilities.supports(Capability::List) {
-                return incomplete(
-                    matches,
+                return Some(search.incomplete(
                     SearchIncompleteReason::AccessLost,
                     Some(OperationError::new(
                         OperationErrorKind::PermissionDenied,
                         Some(&directory),
                         None,
                     )),
-                );
+                ));
             }
-            for entry in &fixture.entries {
-                if let MockSearchBehavior::FailAfter {
-                    matches: count,
-                    reason,
-                } = state.search_behavior
-                {
-                    if matches.len() == count {
-                        return incomplete(matches, reason, None);
-                    }
-                }
-                if matches.len() >= request.scope.max_results {
-                    limits.push(SearchLimit::ResultCount);
-                    return search_completed(request, matches, limits);
-                }
-                elapsed = elapsed.saturating_add(state.config.search_entry_time);
-                if elapsed >= request.scope.timeout {
-                    limits.push(SearchLimit::Time);
-                    return search_completed(request, matches, limits);
-                }
-                if entry.display_name.contains(&request.query)
-                    && accepted.insert(entry.location.uri().to_owned())
-                {
-                    matches.push(entry.clone());
-                }
-                if entry.kind == EntryKind::Directory {
-                    queue.push_back((entry.location.clone(), depth + 1));
-                }
+            search.current = Some((fixture.entries.clone().into_iter(), depth));
+        }
+        let (entries, depth) = search
+            .current
+            .as_mut()
+            .expect("directory stage initialized");
+        let Some(entry) = entries.next() else {
+            search.current = None;
+            return None;
+        };
+        let child_depth = *depth + 1;
+        let state = self.state.borrow();
+        if let MockSearchBehavior::FailAfter {
+            matches: count,
+            reason,
+        } = state.search_behavior
+        {
+            if search.matches.len() == count {
+                return Some(search.incomplete(reason, None));
             }
         }
-        search_completed(request, matches, limits)
+        if search.matches.len() >= search.request.scope.max_results {
+            search.limits.push(SearchLimit::ResultCount);
+            return Some(search.completed());
+        }
+        search.elapsed = search
+            .elapsed
+            .saturating_add(state.config.search_entry_time);
+        if search.elapsed >= search.request.scope.timeout {
+            search.limits.push(SearchLimit::Time);
+            return Some(search.completed());
+        }
+        if entry.kind == EntryKind::Directory {
+            search
+                .queue
+                .push_back((entry.location.clone(), child_depth));
+        }
+        if entry.display_name.contains(&search.request.query)
+            && search.accepted.insert(entry.location.uri().to_owned())
+        {
+            search.matches.push(entry);
+        }
+        None
+    }
+}
+
+struct PendingSearch {
+    request: SearchRequest,
+    done: SearchCallback,
+    initialized: bool,
+    matches: Vec<EntrySnapshot>,
+    accepted: BTreeSet<String>,
+    visited: BTreeSet<String>,
+    queue: VecDeque<(Location, u32)>,
+    current: Option<(std::vec::IntoIter<EntrySnapshot>, u32)>,
+    elapsed: Duration,
+    limits: Vec<SearchLimit>,
+}
+
+impl PendingSearch {
+    fn incomplete(
+        &mut self,
+        reason: SearchIncompleteReason,
+        error: Option<OperationError>,
+    ) -> SearchOutcome {
+        SearchOutcome::Incomplete {
+            matches: std::mem::take(&mut self.matches),
+            reason,
+            declared_scope: self.request.scope.clone(),
+            retry: RetryClass::AfterRefresh,
+            error,
+        }
+    }
+
+    fn completed(&mut self) -> SearchOutcome {
+        search_completed(
+            &self.request,
+            std::mem::take(&mut self.matches),
+            std::mem::take(&mut self.limits),
+        )
     }
 }
 
@@ -595,11 +651,18 @@ impl FileOperations for MockProvider {
 
 impl SearchRepository for MockProvider {
     fn search(&self, request: SearchRequest, done: SearchCallback) {
-        self.schedule(Box::new(move |provider| {
-            done(SearchCompletion {
-                id: request.id,
-                outcome: provider.search_outcome(&request),
-            })
-        }));
+        let search = PendingSearch {
+            request,
+            done,
+            initialized: false,
+            matches: Vec::new(),
+            accepted: BTreeSet::new(),
+            visited: BTreeSet::new(),
+            queue: VecDeque::new(),
+            current: None,
+            elapsed: Duration::ZERO,
+            limits: vec![SearchLimit::Depth],
+        };
+        self.schedule(Box::new(move |provider| provider.run_search_stage(search)));
     }
 }

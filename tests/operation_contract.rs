@@ -56,6 +56,21 @@ fn pump(context: &glib::MainContext) {
     }
 }
 
+fn finish_search(
+    mock: &MockProvider,
+    context: &glib::MainContext,
+    results: &RefCell<Vec<SearchCompletion>>,
+) {
+    for _ in 0..32 {
+        mock.advance(2);
+        pump(context);
+        if !results.borrow().is_empty() {
+            return;
+        }
+    }
+    panic!("small search fixture did not reach a terminal outcome");
+}
+
 fn operation(id: u64, count: usize) -> OperationRequest {
     OperationRequest {
         id: OperationId(id),
@@ -151,6 +166,82 @@ fn structured_gio_error_preserves_code_and_redacts_backend_message_and_paths() {
 use glib::translate::IntoGlib;
 
 #[test]
+fn active_search_cancellation_retains_first_accepted_match_and_completes_once() {
+    let context = glib::MainContext::new();
+    let _guard = context.acquire().unwrap();
+    let mock = provider(&context);
+    mock.set_directory(
+        location("root"),
+        vec![entry("a.txt"), entry("b.txt"), entry("c.txt")],
+        capabilities(1),
+    );
+    let scope = SearchScope {
+        root: location("root"),
+        max_depth: 1,
+        max_results: 100,
+        timeout: Duration::from_secs(2),
+    };
+    let cancel = gio::Cancellable::new();
+    let results = Rc::new(RefCell::new(Vec::new()));
+    let received = results.clone();
+    let owner = context.clone();
+    mock.search(
+        SearchRequest {
+            id: RequestId(42),
+            scope: scope.clone(),
+            query: "txt".into(),
+            mode: SearchMode::Filename,
+            cancellable: cancel.clone(),
+        },
+        Box::new(move |result| {
+            assert!(owner.is_owner());
+            received.borrow_mut().push(result);
+        }),
+    );
+    // The first virtual stage accepts a.txt and yields before inspecting b.txt.
+    mock.advance(2);
+    pump(&context);
+    assert!(
+        results.borrow().is_empty(),
+        "active search must yield before terminal completion"
+    );
+    cancel.cancel();
+    mock.advance(2);
+    assert!(
+        results.borrow().is_empty(),
+        "acknowledgement must be dispatched on the main context"
+    );
+    pump(&context);
+    for _ in 0..5 {
+        mock.advance(2);
+        pump(&context);
+    }
+    let results = results.borrow();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].id, RequestId(42));
+    let SearchOutcome::Incomplete {
+        matches,
+        reason,
+        declared_scope,
+        retry,
+        ..
+    } = &results[0].outcome
+    else {
+        panic!("expected acknowledged active cancellation");
+    };
+    assert_eq!(*reason, SearchIncompleteReason::Cancelled);
+    assert_eq!(*declared_scope, scope);
+    assert_eq!(*retry, RetryClass::AfterRefresh);
+    assert_eq!(
+        matches
+            .iter()
+            .map(|entry| entry.location.clone())
+            .collect::<Vec<_>>(),
+        [location("a.txt")]
+    );
+}
+
+#[test]
 fn search_time_bound_keeps_only_items_accepted_before_the_deadline() {
     let context = glib::MainContext::new();
     let _guard = context.acquire().unwrap();
@@ -177,8 +268,7 @@ fn search_time_bound_keeps_only_items_accepted_before_the_deadline() {
         },
         Box::new(move |result| received.borrow_mut().push(result)),
     );
-    mock.advance(2);
-    pump(&context);
+    finish_search(&mock, &context, &outcomes);
     let SearchOutcome::Completed {
         matches, limits, ..
     } = outcomes.borrow_mut().pop().unwrap().outcome
@@ -227,8 +317,7 @@ fn losing_stable_pages_during_search_retains_previously_accepted_matches() {
         },
         Box::new(move |result| received.borrow_mut().push(result)),
     );
-    mock.advance(2);
-    pump(&context);
+    finish_search(&mock, &context, &outcomes);
     let SearchOutcome::Incomplete {
         matches, reason, ..
     } = outcomes.borrow_mut().pop().unwrap().outcome
@@ -578,8 +667,7 @@ fn search_port_returns_uri_matches_and_declared_scope_or_unsupported() {
         },
         Box::new(move |result| received.borrow_mut().push(result)),
     );
-    mock.advance(2);
-    pump(&context);
+    finish_search(&mock, &context, &results);
     let result = results.borrow_mut().pop().unwrap();
     assert_eq!(result.id, RequestId(9));
     let SearchOutcome::Completed {
@@ -706,8 +794,7 @@ fn search_failure_and_cancellation_retain_the_scope_and_accepted_results() {
         },
         Box::new(move |result| received.borrow_mut().push(result)),
     );
-    mock.advance(2);
-    pump(&context);
+    finish_search(&mock, &context, &outcomes);
     let SearchOutcome::Incomplete {
         matches,
         reason,
