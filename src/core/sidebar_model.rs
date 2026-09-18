@@ -227,7 +227,9 @@ impl SidebarPreferences {
         } else {
             for value in stored.pins {
                 match value.as_str() {
-                    Some(pin) => preferences.pin(PathBuf::from(pin)),
+                    // Legacy paths predate URI identity. Preserve their old
+                    // canonicalization rule only at this migration boundary.
+                    Some(pin) => preferences.pin(normalized_path(PathBuf::from(pin))),
                     None => preferences
                         .recoverable_notices
                         .push(RecoverableStateNotice::MalformedRecord),
@@ -298,21 +300,27 @@ impl SidebarPreferences {
     }
 
     pub fn pin(&mut self, path: PathBuf) {
-        let path = normalized_path(path);
-        if !self.pins.iter().any(|pinned| pinned == &path) {
+        let identity = local_pin_identity(&path);
+        if !self
+            .pins
+            .iter()
+            .any(|pinned| local_pin_identity(pinned) == identity)
+        {
             self.pins.push(path);
         }
     }
 
     pub fn unpin(&mut self, path: &Path) {
-        let path = normalized_path(path.to_path_buf());
-        self.pins.retain(|pinned| pinned != &path);
+        let identity = local_pin_identity(path);
+        self.pins
+            .retain(|pinned| local_pin_identity(pinned) != identity);
     }
 
     pub fn is_pinned(&self, path: &Path) -> bool {
+        let identity = local_pin_identity(path);
         self.pins
             .iter()
-            .any(|pinned| pinned == &normalized_path(path.to_path_buf()))
+            .any(|pinned| local_pin_identity(pinned) == identity)
     }
 
     pub fn pin_remote(&mut self, uri: String) -> Result<(), String> {
@@ -626,6 +634,10 @@ fn normalized_path(path: PathBuf) -> PathBuf {
     fs::canonicalize(&path).unwrap_or(path)
 }
 
+fn local_pin_identity(path: &Path) -> String {
+    Location::from_local_path(path).uri().to_owned()
+}
+
 fn display_name(path: &Path) -> String {
     path.file_name()
         .and_then(|name| name.to_str())
@@ -900,8 +912,11 @@ mod tests {
         )
         .unwrap();
 
-        let preferences = SidebarPreferences::load_from(path.clone()).unwrap();
-        assert_eq!(preferences.pins(), [link]);
+        let mut preferences = SidebarPreferences::load_from(path.clone()).unwrap();
+        assert_eq!(preferences.pins(), [link.clone()]);
+        assert!(preferences.is_pinned(&link));
+        preferences.unpin(&link);
+        assert!(preferences.pins().is_empty());
         assert_eq!(preferences.remote_pins(), ["google-drive://account/root"]);
         assert_eq!(
             preferences.recoverable_notices(),
@@ -909,13 +924,7 @@ mod tests {
         );
         preferences.save().unwrap();
         let saved: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
-        assert_eq!(
-            saved["locations"][0],
-            gio::File::for_path(temporary.path().join("link"))
-                .uri()
-                .as_str()
-        );
-        assert_eq!(saved["locations"][1], "google-drive://account/root");
+        assert_eq!(saved["locations"], serde_json::json!(["google-drive://account/root"]));
     }
 
     #[test]
