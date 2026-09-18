@@ -1,5 +1,6 @@
 //! Compatibility local-path boundary. Mutation implementations live in GIO.
 use crate::core::contracts::MutationKind;
+use crate::core::{OperationKind, OperationManager};
 use crate::infrastructure::gio_operations;
 use gio::prelude::*;
 use std::io;
@@ -8,24 +9,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 pub struct FileOperations;
 impl FileOperations {
-    pub fn create_folder(parent: &Path, name: &str) -> io::Result<PathBuf> {
+    /// Local path entry boundary: enqueue on the application's shared coordinator.
+    pub fn create_folder(manager: &OperationManager, parent: &Path, name: &str) -> io::Result<u64> {
+        validate_name(name)?;
         let path = parent.join(name);
-        perform(
-            MutationKind::Create,
-            &path,
-            None,
-            &AtomicBool::new(false),
-            &mut |_| {},
-        )?;
-        Ok(path)
+        Ok(manager.submit(OperationKind::Create, vec![path], None))
     }
-    pub fn rename(source: &Path, name: &str) -> io::Result<PathBuf> {
+    pub fn rename(manager: &OperationManager, source: &Path, name: &str) -> io::Result<u64> {
+        validate_name(name)?;
         let target = source
             .parent()
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "source has no parent"))?
             .join(name);
-        Self::move_to_target(source, &target)?;
-        Ok(target)
+        Ok(manager.submit_to_target(OperationKind::Rename, source.to_path_buf(), target))
     }
     pub fn copy(sources: &[PathBuf], destination: &Path) -> io::Result<()> {
         Self::copy_with_progress(sources, destination, &AtomicBool::new(false), &mut |_| {})
@@ -130,6 +126,19 @@ impl FileOperations {
         }
         unreachable!()
     }
+}
+
+fn validate_name(name: &str) -> io::Result<()> {
+    let mut components = Path::new(name).components();
+    if !matches!(components.next(), Some(std::path::Component::Normal(_)))
+        || components.next().is_some()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "name must be a single file name",
+        ));
+    }
+    Ok(())
 }
 
 fn split_copy_suffix(stem: &str) -> (&str, u32) {

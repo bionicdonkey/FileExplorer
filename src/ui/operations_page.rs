@@ -168,6 +168,8 @@ fn update_row(widgets: &RowWidgets, record: &OperationRecord, manager: &Operatio
     let action = match record.kind {
         OperationKind::Copy => "Copying",
         OperationKind::Move => "Moving",
+        OperationKind::Create => "Creating folder",
+        OperationKind::Rename => "Renaming",
         OperationKind::Trash => "Moving to Trash",
         OperationKind::Delete => "Deleting",
     };

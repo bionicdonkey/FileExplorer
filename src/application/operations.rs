@@ -114,6 +114,13 @@ pub fn lock_keys(
         if request.destination.is_none() && request.explicit_target.is_none() {
             return Err(invalid(request));
         }
+        for target in request
+            .destination
+            .iter()
+            .chain(request.explicit_target.iter())
+        {
+            validate_provider_target(request, target, capabilities)?;
+        }
         for source in &request.sources {
             if let Some(destination) = &request.destination {
                 if source.uri().starts_with("file:") && destination.uri().starts_with("file:") {
@@ -165,6 +172,34 @@ pub fn lock_keys(
         keys.extend(ancestors.iter().map(|l| l.uri().to_owned()));
     }
     Ok(keys.into_iter().collect())
+}
+
+fn validate_provider_target(
+    request: &OperationRequest,
+    target: &Location,
+    capabilities: &CapabilitySnapshot,
+) -> Result<(), OperationError> {
+    if request
+        .sources
+        .iter()
+        .all(|source| source.uri().starts_with("file:"))
+        && target.uri().starts_with("file:")
+    {
+        return Ok(());
+    }
+    // Without a trusted, complete ancestry snapshot, absence of a URI prefix
+    // proves nothing: aliases and opaque provider identifiers may be descendants.
+    match &capabilities.containment {
+        Containment::KnownAncestors(ancestors)
+            if request
+                .sources
+                .iter()
+                .all(|source| source != target && !ancestors.contains(source)) =>
+        {
+            Ok(())
+        }
+        _ => Err(invalid(request)),
+    }
 }
 
 impl OperationCoordinator {
@@ -399,7 +434,12 @@ impl OperationCoordinator {
                 .find(|r| r.projection.id == request.id)
                 .unwrap()
                 .decision;
-            let sink = Box::new(move |event| owner.accept(event, true));
+            let expected_id = request.id;
+            let sink = Box::new(move |event: OperationEvent| {
+                if event.id() == expected_id {
+                    owner.accept(event, true);
+                }
+            });
             if let Some(decision) = decision {
                 self.backend.submit_with_decision(request, decision, sink);
             } else {
@@ -414,58 +454,94 @@ impl OperationCoordinator {
             .iter()
             .find(|r| r.projection.id == request.id)
             .is_some_and(|r| r.projection.retry_of.is_some());
-        self.backend.inspect_capabilities(
+        self.backend.inspect_operation_capabilities(
             CapabilityRequest {
                 id: RequestId(request.id.0),
                 location: locations[index].clone(),
                 cancellable: request.cancellable.clone(),
             },
-            Box::new(move |result| match result.outcome {
-                RequestOutcome::Succeeded(snapshot)
-                    if snapshot.version == request.capability_version
-                        && (elevated
-                            || snapshot.supports(if index < request.sources.len() {
-                                request.kind.capability()
-                            } else {
-                                Capability::Create
-                            })) =>
-                {
-                    owner.inspect(request, index + 1)
+            if index < request.sources.len() {
+                request.kind.capability()
+            } else {
+                Capability::Create
+            },
+            Box::new(move |result| {
+                if result.id != RequestId(request.id.0) {
+                    return;
                 }
-                RequestOutcome::Failed(error)
-                    if elevated && error.kind == OperationErrorKind::PermissionDenied =>
+                if index >= request.sources.len()
+                    && matches!(
+                        request.kind,
+                        MutationKind::Copy | MutationKind::Move | MutationKind::Rename
+                    )
                 {
-                    owner.inspect(request, index + 1)
+                    if let RequestOutcome::Succeeded(snapshot) = &result.outcome {
+                        if let Err(error) =
+                            validate_provider_target(&request, &locations[index], snapshot)
+                        {
+                            owner.accept(
+                                OperationEvent::Failed {
+                                    id: request.id,
+                                    sequence: 0,
+                                    error,
+                                    completion: OperationCompletion {
+                                        remaining: request.sources.clone(),
+                                        ..Default::default()
+                                    },
+                                },
+                                false,
+                            );
+                            return;
+                        }
+                    }
                 }
-                outcome => {
-                    let completion = OperationCompletion {
-                        remaining: request.sources.clone(),
-                        ..Default::default()
-                    };
-                    let event = match outcome {
-                        RequestOutcome::Cancelled => OperationEvent::Cancelled {
-                            id: request.id,
-                            sequence: 0,
-                            outcome: CancellationOutcome { completion },
-                        },
-                        RequestOutcome::Failed(error) => OperationEvent::Failed {
-                            id: request.id,
-                            sequence: 0,
-                            error,
-                            completion,
-                        },
-                        _ => OperationEvent::Failed {
-                            id: request.id,
-                            sequence: 0,
-                            error: OperationError::new(
-                                OperationErrorKind::CapabilityChanged,
-                                request.sources.first(),
-                                request.destination.as_ref(),
-                            ),
-                            completion,
-                        },
-                    };
-                    owner.accept(event, false);
+                match result.outcome {
+                    RequestOutcome::Succeeded(snapshot)
+                        if snapshot.version == request.capability_version
+                            && (elevated
+                                || snapshot.supports(if index < request.sources.len() {
+                                    request.kind.capability()
+                                } else {
+                                    Capability::Create
+                                })) =>
+                    {
+                        owner.inspect(request, index + 1)
+                    }
+                    RequestOutcome::Failed(error)
+                        if elevated && error.kind == OperationErrorKind::PermissionDenied =>
+                    {
+                        owner.inspect(request, index + 1)
+                    }
+                    outcome => {
+                        let completion = OperationCompletion {
+                            remaining: request.sources.clone(),
+                            ..Default::default()
+                        };
+                        let event = match outcome {
+                            RequestOutcome::Cancelled => OperationEvent::Cancelled {
+                                id: request.id,
+                                sequence: 0,
+                                outcome: CancellationOutcome { completion },
+                            },
+                            RequestOutcome::Failed(error) => OperationEvent::Failed {
+                                id: request.id,
+                                sequence: 0,
+                                error,
+                                completion,
+                            },
+                            _ => OperationEvent::Failed {
+                                id: request.id,
+                                sequence: 0,
+                                error: OperationError::new(
+                                    OperationErrorKind::CapabilityChanged,
+                                    request.sources.first(),
+                                    request.destination.as_ref(),
+                                ),
+                                completion,
+                            },
+                        };
+                        owner.accept(event, false);
+                    }
                 }
             }),
         );

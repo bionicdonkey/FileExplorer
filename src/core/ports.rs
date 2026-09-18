@@ -22,6 +22,16 @@ pub trait DirectoryRepository {
 
 pub trait FileOperations {
     fn inspect_capabilities(&self, request: CapabilityRequest, done: CapabilityCallback);
+    /// Operation-scoped inspection preserves a denied-access reason separately
+    /// from an unsupported capability or an outdated capability version.
+    fn inspect_operation_capabilities(
+        &self,
+        request: CapabilityRequest,
+        _capability: Capability,
+        done: CapabilityCallback,
+    ) {
+        self.inspect_capabilities(request, done);
+    }
     /// Implementations recheck capability immediately before work, never
     /// overwrite conflicts by default, and report partial/unknown effects.
     fn submit(&self, request: OperationRequest, sink: OperationSink);

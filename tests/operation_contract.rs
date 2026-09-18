@@ -13,6 +13,164 @@ mod operation_contract {
     use zorin_explorer::application::operations::{
         CancelResult, ChangeExtent, OperationCoordinator, OperationState,
     };
+    fn capabilities(version: u64) -> CapabilitySnapshot {
+        let mut snapshot = super::capabilities(version);
+        snapshot.containment = Containment::KnownAncestors(vec![location("root")]);
+        snapshot.supported.insert(Capability::Trash);
+        snapshot
+    }
+
+    #[derive(Default)]
+    struct HeldProvider {
+        inspections: RefCell<Vec<(CapabilityRequest, CapabilityCallback)>>,
+        operations: RefCell<Vec<(OperationRequest, OperationSink)>>,
+    }
+    impl FileOperations for HeldProvider {
+        fn inspect_capabilities(&self, request: CapabilityRequest, done: CapabilityCallback) {
+            self.inspections.borrow_mut().push((request, done));
+        }
+        fn submit(&self, request: OperationRequest, sink: OperationSink) {
+            self.operations.borrow_mut().push((request, sink));
+        }
+    }
+    fn local_request(id: u64) -> OperationRequest {
+        let mut request = operation(id, 1);
+        request.sources = vec![Location::from_uri(&format!("file:///source-{id}")).unwrap()];
+        request.destination = Some(Location::from_uri("file:///destination").unwrap());
+        request
+    }
+    #[test]
+    fn callbacks_cannot_impersonate_another_operation() {
+        let provider = Rc::new(HeldProvider::default());
+        let coordinator = OperationCoordinator::new(provider.clone());
+        coordinator
+            .submit(local_request(1), capabilities(1))
+            .unwrap();
+        let (_, callback) = provider.inspections.borrow_mut().remove(0);
+        callback(RequestCompletion {
+            id: RequestId(999),
+            outcome: RequestOutcome::Succeeded(capabilities(1)),
+        });
+        assert!(provider.inspections.borrow().is_empty());
+        assert!(provider.operations.borrow().is_empty());
+        assert!(coordinator.records()[0].events.is_empty());
+    }
+    #[test]
+    fn operation_sink_rejects_wrong_ids_without_unlocking_other_records() {
+        let provider = Rc::new(HeldProvider::default());
+        let coordinator = OperationCoordinator::new(provider.clone());
+        coordinator
+            .submit(local_request(1), capabilities(1))
+            .unwrap();
+        coordinator
+            .submit(local_request(2), capabilities(1))
+            .unwrap();
+        for _ in 0..2 {
+            let (request, callback) = provider.inspections.borrow_mut().remove(0);
+            callback(RequestCompletion {
+                id: request.id,
+                outcome: RequestOutcome::Succeeded(capabilities(1)),
+            });
+        }
+        let locks = coordinator.active_lock_keys();
+        let (_, mut sink) = provider.operations.borrow_mut().remove(0);
+        sink(OperationEvent::Succeeded {
+            id: OperationId(2),
+            sequence: 1,
+            completion: OperationCompletion::default(),
+        });
+        assert_eq!(coordinator.records()[1].state, OperationState::Queued);
+        assert!(coordinator.records()[1].events.is_empty());
+        assert_eq!(coordinator.active_lock_keys(), locks);
+        sink(OperationEvent::Succeeded {
+            id: OperationId(1),
+            sequence: 1,
+            completion: OperationCompletion::default(),
+        });
+        assert_eq!(coordinator.records()[0].state, OperationState::Succeeded);
+    }
+    #[test]
+    fn remote_descendant_and_unproven_transfer_targets_are_rejected() {
+        for containment in [
+            Containment::Opaque,
+            Containment::KnownAncestors(vec![Location::from_uri("smb://host/share/a").unwrap()]),
+        ] {
+            let provider = Rc::new(HeldProvider::default());
+            let coordinator = OperationCoordinator::new(provider.clone());
+            let mut request = operation(1, 1);
+            request.sources = vec![Location::from_uri("smb://host/share/a").unwrap()];
+            request.destination = Some(Location::from_uri("smb://host/share/a/child").unwrap());
+            let mut snapshot = capabilities(1);
+            snapshot.containment = containment;
+            assert!(coordinator.submit(request, snapshot).is_err());
+            assert!(provider.inspections.borrow().is_empty());
+        }
+    }
+    #[test]
+    fn refreshed_target_ancestry_blocks_a_remote_descendant_before_submit() {
+        let provider = Rc::new(HeldProvider::default());
+        let coordinator = OperationCoordinator::new(provider.clone());
+        let request = operation(1, 1);
+        let source = request.sources[0].clone();
+        coordinator.submit(request, capabilities(1)).unwrap();
+        let (inspection, callback) = provider.inspections.borrow_mut().remove(0);
+        callback(RequestCompletion {
+            id: inspection.id,
+            outcome: RequestOutcome::Succeeded(capabilities(1)),
+        });
+        let (inspection, callback) = provider.inspections.borrow_mut().remove(0);
+        let mut destination_snapshot = capabilities(1);
+        destination_snapshot.containment = Containment::KnownAncestors(vec![source]);
+        callback(RequestCompletion {
+            id: inspection.id,
+            outcome: RequestOutcome::Succeeded(destination_snapshot),
+        });
+        assert!(provider.operations.borrow().is_empty());
+        assert!(
+            matches!(&coordinator.records()[0].state, OperationState::Failed(error) if error.kind == OperationErrorKind::InvalidRequest)
+        );
+        assert!(coordinator.active_lock_keys().is_empty());
+    }
+
+    #[test]
+    fn create_and_rename_share_locks_and_reinspect_before_mutation() {
+        let provider = Rc::new(HeldProvider::default());
+        let coordinator = OperationCoordinator::new(provider.clone());
+        let mut create = local_request(1);
+        create.kind = MutationKind::Create;
+        create.destination = None;
+        let mut rename = local_request(2);
+        rename.kind = MutationKind::Rename;
+        let mut supported = capabilities(1);
+        supported.supported.insert(Capability::Rename);
+        coordinator.submit(create, supported.clone()).unwrap();
+        coordinator.submit(rename, supported.clone()).unwrap();
+        assert_eq!(provider.inspections.borrow().len(), 1);
+        let (inspection, callback) = provider.inspections.borrow_mut().remove(0);
+        callback(RequestCompletion {
+            id: inspection.id,
+            outcome: RequestOutcome::Succeeded(supported),
+        });
+        assert!(provider.inspections.borrow().is_empty());
+        assert_eq!(coordinator.records()[1].state, OperationState::Queued);
+        let (request, mut sink) = provider.operations.borrow_mut().remove(0);
+        sink(OperationEvent::Succeeded {
+            id: request.id,
+            sequence: 1,
+            completion: OperationCompletion::default(),
+        });
+        let (inspection, callback) = provider.inspections.borrow_mut().remove(0);
+        // Rename is no longer supported when the queued request becomes ready.
+        callback(RequestCompletion {
+            id: inspection.id,
+            outcome: RequestOutcome::Succeeded(capabilities(1)),
+        });
+        assert!(provider.operations.borrow().is_empty());
+        assert!(
+            matches!(&coordinator.records()[1].state, OperationState::Failed(error) if error.kind == OperationErrorKind::CapabilityChanged)
+        );
+        assert!(coordinator.active_lock_keys().is_empty());
+    }
 
     #[test]
     fn containment_locks_and_cancel_race_preserve_backend_outcome() {
@@ -170,12 +328,16 @@ mod operation_contract {
         let mock = provider(&context);
         mock.set_capabilities(capabilities(1));
         let coordinator = OperationCoordinator::new(Rc::new(mock.clone()));
-        coordinator
-            .submit(operation(1, 3), capabilities(1))
-            .unwrap();
+        let mut opaque_request = operation(1, 3);
+        opaque_request.kind = MutationKind::Trash;
+        opaque_request.destination = None;
+        let mut opaque = capabilities(1);
+        opaque.containment = Containment::Opaque;
+        coordinator.submit(opaque_request, opaque).unwrap();
         let mut other = operation(2, 1);
+        other.kind = MutationKind::Trash;
         other.sources = vec![location("different")];
-        other.destination = Some(location("elsewhere"));
+        other.destination = None;
         let mut trusted = capabilities(1);
         trusted.containment = Containment::KnownAncestors(vec![location("ancestor")]);
         coordinator.submit(other, trusted).unwrap();
@@ -188,7 +350,7 @@ mod operation_contract {
         request.sources = vec![Location::from_uri("file:///tmp/a").unwrap()];
         request.destination = Some(Location::from_uri("file:///var/out").unwrap());
         assert_eq!(
-            lock_keys(&request, &capabilities(1)).unwrap(),
+            lock_keys(&request, &super::capabilities(1)).unwrap(),
             [
                 "file:///",
                 "file:///tmp",

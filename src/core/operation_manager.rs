@@ -53,6 +53,8 @@ struct StoredOperationRecordV2 {
 pub enum OperationKind {
     Copy,
     Move,
+    Create,
+    Rename,
     Trash,
     Delete,
 }
@@ -232,6 +234,8 @@ impl OperationManager {
             kind: match kind {
                 OperationKind::Copy => MutationKind::Copy,
                 OperationKind::Move => MutationKind::Move,
+                OperationKind::Create => MutationKind::Create,
+                OperationKind::Rename => MutationKind::Rename,
                 OperationKind::Trash => MutationKind::Trash,
                 OperationKind::Delete => MutationKind::Delete,
             },
@@ -258,10 +262,11 @@ impl OperationManager {
         let id = request.id.0;
         let kind = match request.kind {
             MutationKind::Copy => OperationKind::Copy,
-            MutationKind::Move | MutationKind::Rename => OperationKind::Move,
+            MutationKind::Move => OperationKind::Move,
+            MutationKind::Rename => OperationKind::Rename,
             MutationKind::Trash => OperationKind::Trash,
             MutationKind::Delete => OperationKind::Delete,
-            MutationKind::Create => OperationKind::Copy,
+            MutationKind::Create => OperationKind::Create,
         };
         self.records.lock().unwrap().push(OperationRecord {
             id,
@@ -364,6 +369,8 @@ impl OperationManager {
 
     fn sync_projections(&self, coordinator: &OperationCoordinator) {
         let projections = coordinator.records();
+        // A terminal facade record must never precede its event projection.
+        *self.projections.lock().unwrap() = projections.clone();
         let mut terminal_changed = false;
         for p in &projections {
             if p.events.last().is_some_and(|e| e.is_terminal()) {
@@ -423,7 +430,6 @@ impl OperationManager {
                 }
             });
         }
-        *self.projections.lock().unwrap() = projections;
         if terminal_changed {
             self.persist_history();
         }
@@ -730,6 +736,56 @@ fn update(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn create_and_rename_facades_submit_uri_operations_with_terminal_events() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = OperationManager::default();
+        let created = crate::core::operations::FileOperations::create_folder(
+            &manager,
+            directory.path(),
+            "created",
+        )
+        .unwrap();
+        let renamed = crate::core::operations::FileOperations::rename(
+            &manager,
+            &directory.path().join("created"),
+            "renamed",
+        )
+        .unwrap();
+        assert_eq!(
+            wait_for_finished(&manager, created).state,
+            OperationState::Completed
+        );
+        assert_eq!(
+            wait_for_finished(&manager, renamed).state,
+            OperationState::Completed
+        );
+        assert!(!directory.path().join("created").exists());
+        assert!(directory.path().join("renamed").is_dir());
+        let projections = manager.projections();
+        let create = projections.iter().find(|p| p.id.0 == created).unwrap();
+        let rename = projections.iter().find(|p| p.id.0 == renamed).unwrap();
+        assert_eq!(create.request.kind, MutationKind::Create);
+        assert_eq!(rename.request.kind, MutationKind::Rename);
+        assert_eq!(
+            create.request.sources,
+            [Location::from_local_path(&directory.path().join("created"))]
+        );
+        assert_eq!(
+            rename.request.explicit_target,
+            Some(Location::from_local_path(&directory.path().join("renamed")))
+        );
+        for projection in [create, rename] {
+            assert_eq!(
+                projection.events.iter().filter(|e| e.is_terminal()).count(),
+                1
+            );
+            assert!(projection
+                .events
+                .iter()
+                .any(|e| matches!(e, crate::core::contracts::OperationEvent::Started { .. })));
+        }
+    }
     #[test]
     fn active_count_only_includes_running_operations() {
         let manager = OperationManager::default();

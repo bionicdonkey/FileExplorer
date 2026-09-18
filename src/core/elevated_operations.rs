@@ -24,7 +24,7 @@ pub fn retry_request_command(request: &OperationRequest) -> Option<Command> {
         MutationKind::Move | MutationKind::Rename => "move",
         MutationKind::Trash => "trash",
         MutationKind::Delete => "delete",
-        MutationKind::Create => return None,
+        MutationKind::Create => "create",
     };
     let mut command = Command::new("pkexec");
     command
@@ -101,6 +101,8 @@ fn verb_for(kind: OperationKind) -> &'static str {
     match kind {
         OperationKind::Copy => "copy",
         OperationKind::Move => "move",
+        OperationKind::Create => "create",
+        OperationKind::Rename => "move",
         OperationKind::Trash => "trash",
         OperationKind::Delete => "delete",
     }
@@ -165,6 +167,15 @@ impl ElevatedOperations {
             ));
         }
         match verb {
+            "create" => crate::infrastructure::gio_operations::perform(
+                MutationKind::Create,
+                &gio::File::for_path(source),
+                None,
+                &gio::Cancellable::new(),
+                &mut false,
+                &mut |_| {},
+            )
+            .map_err(|error| io::Error::new(io::ErrorKind::Other, error)),
             "copy" => {
                 let destination = destination.ok_or_else(|| {
                     io::Error::new(io::ErrorKind::InvalidInput, "copy requires a destination")

@@ -979,14 +979,18 @@ fn wire_tab(
             ContextCommand::NewFolder => {
                 if let Some(parent) = path {
                     let refresh = command_view.clone();
+                    let submit_operations = command_operations.clone();
+                    let refresh_operations = command_operations.clone();
                     show_name_dialog(
                         &command_view,
                         "New Folder",
                         "Folder name",
                         "New Folder",
                         "Create",
-                        move |name| FileOperations::create_folder(&parent, &name).map(|_| ()),
-                        move || refresh.set_location(refresh.location()),
+                        move |name| {
+                            FileOperations::create_folder(&submit_operations, &parent, &name)
+                        },
+                        move |id| schedule_refresh(refresh.clone(), refresh_operations.clone(), id),
                     );
                 }
             }
@@ -998,14 +1002,16 @@ fn wire_tab(
                         .unwrap_or_default()
                         .to_owned();
                     let refresh = command_view.clone();
+                    let submit_operations = command_operations.clone();
+                    let refresh_operations = command_operations.clone();
                     show_name_dialog(
                         &command_view,
                         "Rename",
                         "New name",
                         &initial,
                         "Rename",
-                        move |name| FileOperations::rename(&path, &name).map(|_| ()),
-                        move || refresh.set_location(refresh.location()),
+                        move |name| FileOperations::rename(&submit_operations, &path, &name),
+                        move |id| schedule_refresh(refresh.clone(), refresh_operations.clone(), id),
                     );
                 }
             }
@@ -1056,8 +1062,8 @@ fn show_name_dialog<F, S>(
     action: F,
     on_success: S,
 ) where
-    F: Fn(String) -> std::io::Result<()> + 'static,
-    S: Fn() + 'static,
+    F: Fn(String) -> std::io::Result<u64> + 'static,
+    S: Fn(u64) + 'static,
 {
     let dialog = gtk::Dialog::new();
     dialog.set_title(Some(title));
@@ -1090,8 +1096,10 @@ fn show_name_dialog<F, S>(
     dialog.connect_response(move |dialog, response| {
         if response == gtk::ResponseType::Accept {
             let name = entry.text().trim().to_owned();
-            if !name.is_empty() && action(name).is_ok() {
-                on_success();
+            if !name.is_empty() {
+                if let Ok(id) = action(name) {
+                    on_success(id);
+                }
             }
         }
         dialog.close();
@@ -1442,6 +1450,7 @@ fn choose_destination(
         action_label,
         view.location(),
         sidebar_model,
+        operations.clone(),
         move |destination| {
             start_transfer(
                 &reload,

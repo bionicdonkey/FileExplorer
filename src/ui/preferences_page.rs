@@ -20,7 +20,7 @@ pub fn build(preferences: Rc<RefCell<ApplicationPreferences>>, operations: Opera
     for category in category_names() {
         let page = match category {
             "File operations" => operations_page(preferences.clone(), operations.clone()),
-            "General" => general_page(preferences.clone(), sidebar_model.clone()),
+            "General" => general_page(preferences.clone(), sidebar_model.clone(), operations.clone()),
             "Search & privacy" => search_privacy_page(preferences.clone(), search_history.clone()),
             "Sidebar" => sidebar_page(preferences.clone(), sidebar_model.clone(), sidebar_holder.clone()),
             "About" => about_page(),
@@ -82,7 +82,7 @@ fn about_page() -> GtkBox {
     page
 }
 
-fn general_page(preferences: Rc<RefCell<ApplicationPreferences>>, sidebar_model: Rc<RefCell<SidebarModel>>) -> GtkBox {
+fn general_page(preferences: Rc<RefCell<ApplicationPreferences>>, sidebar_model: Rc<RefCell<SidebarModel>>, operations: OperationManager) -> GtkBox {
     let page = GtkBox::new(Orientation::Vertical, 10); page.set_margin_top(18);
     let heading = Label::new(Some("General")); heading.add_css_class("title-3"); heading.set_xalign(0.0); page.append(&heading);
     let close = CheckButton::with_label("Close Zorin Explorer when the last tab is closed"); close.set_active(preferences.borrow().close_on_last_tab);
@@ -101,7 +101,7 @@ fn general_page(preferences: Rc<RefCell<ApplicationPreferences>>, sidebar_model:
     new_tab_row.append(&new_tab_label);
     let browse = Button::with_label("Browse…");
     let browse_preferences = preferences.clone(); let browse_label = new_tab_label.clone(); let browse_sidebar_model = sidebar_model.clone();
-    browse.connect_clicked(move |button| choose_new_tab_location(button, browse_preferences.clone(), browse_label.clone(), browse_sidebar_model.clone()));
+    browse.connect_clicked(move |button| choose_new_tab_location(button, browse_preferences.clone(), browse_label.clone(), browse_sidebar_model.clone(), operations.clone()));
     new_tab_row.append(&browse);
     let reset = Button::with_label("Reset to Home");
     let reset_preferences = preferences.clone(); let reset_label = new_tab_label.clone();
@@ -120,10 +120,10 @@ fn new_tab_location_display(uri: &str) -> String {
     gio::File::for_uri(uri).path().map(|path| path.display().to_string()).unwrap_or_else(|| uri.to_owned())
 }
 
-fn choose_new_tab_location(button: &Button, preferences: Rc<RefCell<ApplicationPreferences>>, label: Label, sidebar_model: Rc<RefCell<SidebarModel>>) {
+fn choose_new_tab_location(button: &Button, preferences: Rc<RefCell<ApplicationPreferences>>, label: Label, sidebar_model: Rc<RefCell<SidebarModel>>, operations: OperationManager) {
     let Some(parent) = button.root().and_downcast::<gtk::Window>() else { return; };
     let initial = gio::File::for_uri(&preferences.borrow().new_tab_location).path().unwrap_or_default();
-    crate::ui::folder_picker::pick_folder(&parent, "New Tabs Open To", "Select", initial, sidebar_model, move |path| {
+    crate::ui::folder_picker::pick_folder(&parent, "New Tabs Open To", "Select", initial, sidebar_model, operations, move |path| {
         let uri = gio::File::for_path(&path).uri().to_string();
         preferences.borrow_mut().new_tab_location = uri.clone();
         let _ = preferences.borrow().save();

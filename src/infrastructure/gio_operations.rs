@@ -66,10 +66,41 @@ impl GioOperations {
 }
 impl FileOperations for GioOperations {
     fn inspect_capabilities(&self, request: CapabilityRequest, done: CapabilityCallback) {
+        self.inspect(request, None, done);
+    }
+    fn inspect_operation_capabilities(
+        &self,
+        request: CapabilityRequest,
+        capability: Capability,
+        done: CapabilityCallback,
+    ) {
+        self.inspect(request, Some(capability), done);
+    }
+    fn submit(&self, request: OperationRequest, sink: OperationSink) {
+        self.dispatch(request, None, sink);
+    }
+    fn submit_with_decision(
+        &self,
+        request: OperationRequest,
+        decision: ConflictDecision,
+        sink: OperationSink,
+    ) {
+        self.dispatch(request, Some(decision), sink);
+    }
+}
+impl GioOperations {
+    fn inspect(
+        &self,
+        request: CapabilityRequest,
+        capability: Option<Capability>,
+        done: CapabilityCallback,
+    ) {
         self.context.spawn_local(async move {
             let location = request.location.clone();
             let cancel = request.cancellable.clone();
-            let result = gio::spawn_blocking(move || inspect_local(&location, &cancel)).await;
+            let result =
+                gio::spawn_blocking(move || inspect_local_for(&location, &cancel, capability))
+                    .await;
             let outcome = if request.cancellable.is_cancelled() {
                 RequestOutcome::Cancelled
             } else {
@@ -89,19 +120,6 @@ impl FileOperations for GioOperations {
             });
         });
     }
-    fn submit(&self, request: OperationRequest, sink: OperationSink) {
-        self.dispatch(request, None, sink);
-    }
-    fn submit_with_decision(
-        &self,
-        request: OperationRequest,
-        decision: ConflictDecision,
-        sink: OperationSink,
-    ) {
-        self.dispatch(request, Some(decision), sink);
-    }
-}
-impl GioOperations {
     fn dispatch(
         &self,
         request: OperationRequest,
@@ -189,6 +207,27 @@ fn execute_elevated(request: OperationRequest, sink: &mut dyn FnMut(OperationEve
 }
 fn local(location: &Location) -> bool {
     location.uri().starts_with("file:") && location.local_path().is_some()
+}
+
+fn inspect_local_for(
+    location: &Location,
+    cancel: &gio::Cancellable,
+    capability: Option<Capability>,
+) -> Result<CapabilitySnapshot, OperationError> {
+    let snapshot = inspect_local(location, cancel)?;
+    if capability.is_some_and(|required| {
+        GioOperations::local_capabilities().supports(required) && !snapshot.supports(required)
+    }) {
+        return Err(OperationError::from_gio(
+            &glib::Error::new(
+                gio::IOErrorEnum::PermissionDenied,
+                "operation.permission-denied",
+            ),
+            Some(location),
+            None,
+        ));
+    }
+    Ok(snapshot)
 }
 
 fn inspect_local(
@@ -319,7 +358,15 @@ fn execute_inner(
         .chain(request.explicit_target.iter())
         .enumerate()
     {
-        match inspect_local(location, &request.cancellable) {
+        match inspect_local_for(
+            location,
+            &request.cancellable,
+            Some(if index < request.sources.len() {
+                request.kind.capability()
+            } else {
+                Capability::Create
+            }),
+        ) {
             Ok(capabilities)
                 if capabilities.supports(if index < request.sources.len() {
                     request.kind.capability()

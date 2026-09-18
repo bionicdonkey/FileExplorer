@@ -12,7 +12,7 @@ use gtk::{
 use crate::core::location::Location;
 use crate::core::navigation::NavigationHistory;
 use crate::core::operations::FileOperations;
-use crate::core::{SidebarLocation, SidebarModel};
+use crate::core::{OperationManager, OperationState, SidebarLocation, SidebarModel};
 use crate::ui::header::LocationBar;
 
 /// An in-process folder picker built from this app's own widgets, so
@@ -31,6 +31,7 @@ pub fn pick_folder<F: Fn(PathBuf) + 'static>(
     action_label: &str,
     initial: PathBuf,
     sidebar_model: Rc<RefCell<SidebarModel>>,
+    operations: OperationManager,
     on_selected: F,
 ) {
     let dialog = adw::Dialog::new();
@@ -259,10 +260,29 @@ pub fn pick_folder<F: Fn(PathBuf) + 'static>(
     new_folder.connect_clicked({
         let location = location.clone();
         let navigate = navigate.clone();
+        let error_label = destination_label.clone();
         move |_| {
-            let created = FileOperations::create_folder(&location.borrow(), "New Folder").ok();
-            if let Some(path) = created {
-                navigate(path, true);
+            let parent = location.borrow().clone();
+            if let Ok(id) = FileOperations::create_folder(&operations, &parent, "New Folder") {
+                let operations = operations.clone();
+                let navigate = navigate.clone();
+                let error_label = error_label.clone();
+                glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+                    let Some(record) = operations.records().into_iter().find(|r| r.id == id) else {
+                        return glib::ControlFlow::Break;
+                    };
+                    if record.finished_at.is_none() {
+                        return glib::ControlFlow::Continue;
+                    }
+                    if record.state == OperationState::Completed {
+                        navigate(parent.join("New Folder"), true);
+                    } else {
+                        error_label.set_text(
+                            "The folder could not be created. See File operations for details.",
+                        );
+                    }
+                    glib::ControlFlow::Break
+                });
             }
         }
     });
