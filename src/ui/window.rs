@@ -1148,10 +1148,10 @@ fn show_properties_dialog(view: &FileView, path: &Path) {
 
 fn target_path(target: &ContextTarget) -> Option<PathBuf> {
     match target {
-        ContextTarget::File { path, .. }
-        | ContextTarget::Folder(path)
-        | ContextTarget::SidebarLocation(path) => Some(path.clone()),
-        ContextTarget::Background(path) => Some(path.clone()),
+        ContextTarget::File(item) | ContextTarget::Folder(item) => item.local_path(),
+        ContextTarget::SidebarLocation(location) | ContextTarget::Background(location) => {
+            location.local_path()
+        }
         ContextTarget::Tab => None,
     }
 }
@@ -1198,7 +1198,9 @@ fn dispatch_active_file_command(
     };
     let view = data.borrow()[index].view.clone();
     let target = if command == ContextCommand::Paste {
-        Some(ContextTarget::Background(view.location()))
+        Some(ContextTarget::Background(Location::from_local_path(
+            &view.location(),
+        )))
     } else {
         view.selected_target()
     };

@@ -13,13 +13,14 @@ use gtk::{
 
 use crate::core::directory_model::DirectoryModel;
 use crate::core::file_item::FileItem;
-use crate::core::{
-    GroupField, ListColumn, ListColumnLayout, SidebarLocation, SidebarNode, SortDirection,
-    SortField, ViewMode, ViewOptions,
-};
 use crate::core::sidebar_model::SidebarSection;
+use crate::core::{
+    GroupField, ListColumn, ListColumnLayout, Location, SidebarLocation, SidebarNode,
+    SortDirection, SortField, ViewMode, ViewOptions,
+};
 use crate::ui::context_menu::{
-    delete_command, item_commands, open_with_apps, ContextCommand, ContextTarget,
+    configure_command_button, delete_command, item_commands, open_with_apps, CommandAvailability,
+    ContextCommand, ContextTarget,
 };
 
 #[derive(Clone)]
@@ -51,15 +52,14 @@ impl ViewNavigationState {
 
 fn filesystem_space(path: &Path) -> Option<(u64, u64)> {
     gio::File::for_path(path)
-        .query_filesystem_info(
-            "filesystem::size,filesystem::free",
-            gio::Cancellable::NONE,
-        )
+        .query_filesystem_info("filesystem::size,filesystem::free", gio::Cancellable::NONE)
         .ok()
-        .map(|info| (
-            info.attribute_uint64("filesystem::size"),
-            info.attribute_uint64("filesystem::free"),
-        ))
+        .map(|info| {
+            (
+                info.attribute_uint64("filesystem::size"),
+                info.attribute_uint64("filesystem::free"),
+            )
+        })
         .filter(|(total, _)| *total > 0)
 }
 
@@ -108,7 +108,9 @@ impl FileView {
                     &background_parent,
                     x,
                     y,
-                    ContextTarget::Background(background_view.location()),
+                    ContextTarget::Background(Location::from_local_path(
+                        &background_view.location(),
+                    )),
                     &background_view,
                     gesture
                         .current_event_state()
@@ -207,6 +209,9 @@ impl FileView {
     }
 
     pub fn dispatch_context_command(&self, target: ContextTarget, command: ContextCommand) {
+        if !CommandAvailability::for_target(&target).allows(command) {
+            return;
+        }
         if let Some(callback) = self.on_context_command.borrow().as_ref() {
             callback(target, command);
         }
@@ -400,7 +405,8 @@ impl FileView {
                     detail.set_xalign(0.0);
                     text.append(&detail);
                     let progress = gtk::ProgressBar::new();
-                    progress.set_fraction((1.0 - free as f64 / total.max(1) as f64).clamp(0.0, 1.0));
+                    progress
+                        .set_fraction((1.0 - free as f64 / total.max(1) as f64).clamp(0.0, 1.0));
                     progress.set_show_text(false);
                     text.append(&progress);
                 }
@@ -607,7 +613,7 @@ impl FileView {
                 .pending_cut
                 .borrow()
                 .as_ref()
-                .is_some_and(|path| path == item.path())
+                .is_some_and(|path| item.local_path().as_deref() == Some(path))
             {
                 tile.add_css_class("cut-pending");
             }
@@ -726,9 +732,10 @@ fn show_item_context_menu(
     let menu = GtkBox::new(Orientation::Vertical, 2);
     menu.set_margin_top(6);
     menu.set_margin_bottom(6);
+    let availability = CommandAvailability::for_target(&target);
     for command in item_commands(&target) {
         if command == ContextCommand::OpenWith {
-            menu.append(&open_with_submenu(&target));
+            menu.append(&open_with_submenu(&target, &availability));
             continue;
         }
         if command == ContextCommand::Copy {
@@ -743,6 +750,7 @@ fn show_item_context_menu(
                     ContextCommand::CopyTo,
                 ],
                 popover.clone(),
+                &availability,
             ));
             continue;
         }
@@ -753,6 +761,7 @@ fn show_item_context_menu(
                 view,
                 &[ContextCommand::Cut, ContextCommand::MoveTo],
                 popover.clone(),
+                &availability,
             ));
             continue;
         }
@@ -771,6 +780,7 @@ fn show_item_context_menu(
                 view.clone(),
                 popover.clone(),
                 shift_held,
+                &availability,
             ));
         } else {
             menu.append(&command_button(
@@ -779,6 +789,7 @@ fn show_item_context_menu(
                 view.clone(),
                 command,
                 Some(popover.clone()),
+                &availability,
             ));
         }
     }
@@ -791,15 +802,20 @@ fn dynamic_delete_button(
     view: FileView,
     popover: Popover,
     shift_held: bool,
+    availability: &CommandAvailability,
 ) -> Button {
     let shifted = Rc::new(RefCell::new(shift_held));
     let button = Button::with_label(context_command_label(delete_command(shift_held)));
+    set_command_enabled(&button, availability, delete_command(shift_held));
     let update_label = {
         let button = button.clone();
         let shifted = shifted.clone();
+        let availability = availability.clone();
         move |is_shifted| {
             *shifted.borrow_mut() = is_shifted;
-            button.set_label(context_command_label(delete_command(is_shifted)));
+            let command = delete_command(is_shifted);
+            button.set_label(context_command_label(command));
+            set_command_enabled(&button, &availability, command);
         }
     };
     let keys = gtk::EventControllerKey::new();
@@ -814,6 +830,7 @@ fn dynamic_delete_button(
     });
     let button_on_release = button.clone();
     let shifted_on_release = shifted.clone();
+    let availability_on_release = availability.clone();
     keys.connect_key_released(move |_, key, _, modifiers| {
         if key == gtk::gdk::Key::Shift_L
             || key == gtk::gdk::Key::Shift_R
@@ -821,15 +838,18 @@ fn dynamic_delete_button(
         {
             *shifted_on_release.borrow_mut() = false;
             button_on_release.set_label(context_command_label(delete_command(false)));
+            set_command_enabled(
+                &button_on_release,
+                &availability_on_release,
+                delete_command(false),
+            );
         }
     });
     popover.add_controller(keys);
     button.connect_clicked(move |_| {
         popover.popdown();
         let command = delete_command(*shifted.borrow());
-        if let Some(callback) = view.on_context_command.borrow().as_ref() {
-            callback(target.clone(), command);
-        }
+        view.dispatch_context_command(target.clone(), command);
     });
     button
 }
@@ -840,12 +860,29 @@ fn command_submenu(
     view: &FileView,
     commands: &[ContextCommand],
     root: Popover,
+    availability: &CommandAvailability,
 ) -> Button {
     let button = Button::with_label(label);
+    let enabled = commands
+        .iter()
+        .copied()
+        .any(|command| availability.allows(command));
+    button.set_sensitive(enabled);
+    if !enabled {
+        if let Some(reason) = commands
+            .iter()
+            .copied()
+            .find_map(|command| availability.disabled_reason_for(command))
+        {
+            button.set_tooltip_text(Some(reason));
+            button.update_property(&[gtk::accessible::Property::Description(reason)]);
+        }
+    }
     let submenu_parent = button.clone();
     let target = target.clone();
     let view = view.clone();
     let commands = commands.to_vec();
+    let availability = availability.clone();
     button.connect_clicked(move |_| {
         let menu = GtkBox::new(Orientation::Vertical, 2);
         menu.set_margin_top(6);
@@ -857,6 +894,7 @@ fn command_submenu(
                 view.clone(),
                 *command,
                 Some(root.clone()),
+                &availability,
             ));
         }
         show_submenu(&submenu_parent, &menu);
@@ -864,13 +902,17 @@ fn command_submenu(
     button
 }
 
-fn open_with_submenu(target: &ContextTarget) -> Button {
+fn open_with_submenu(target: &ContextTarget, availability: &CommandAvailability) -> Button {
     let button = Button::with_label("Open With ›");
+    set_command_enabled(&button, availability, ContextCommand::OpenWith);
     let submenu_parent = button.clone();
     let target = target.clone();
     button.connect_clicked(move |_| {
-        let (path, content_type) = match &target {
-            ContextTarget::File { path, content_type } => (path.clone(), content_type.clone()),
+        let (uri, content_type) = match &target {
+            ContextTarget::File(item) => (
+                item.location().uri().to_owned(),
+                item.content_type().to_owned(),
+            ),
             _ => return,
         };
         let menu = GtkBox::new(Orientation::Vertical, 2);
@@ -878,12 +920,9 @@ fn open_with_submenu(target: &ContextTarget) -> Button {
         menu.set_margin_bottom(6);
         for app in open_with_apps(&content_type) {
             let app_button = Button::with_label(&app.display_name());
-            let path = path.clone();
+            let uri = uri.clone();
             app_button.connect_clicked(move |_| {
-                let _ = app.launch(
-                    &[gio::File::for_path(&path)],
-                    None::<&gio::AppLaunchContext>,
-                );
+                let _ = app.launch(&[gio::File::for_uri(&uri)], None::<&gio::AppLaunchContext>);
             });
             menu.append(&app_button);
         }
@@ -891,7 +930,7 @@ fn open_with_submenu(target: &ContextTarget) -> Button {
         let other = Button::with_label("Other Application…");
         let parent = submenu_parent.clone();
         other.connect_clicked(move |_| {
-            show_application_chooser(&parent, path.clone(), content_type.clone())
+            show_application_chooser(&parent, uri.clone(), content_type.clone())
         });
         menu.append(&other);
         show_submenu(&submenu_parent, &menu);
@@ -909,7 +948,7 @@ fn show_submenu(parent: &Button, menu: &GtkBox) {
 }
 
 #[allow(deprecated)]
-fn show_application_chooser(parent: &Button, path: PathBuf, content_type: String) {
+fn show_application_chooser(parent: &Button, uri: String, content_type: String) {
     let window = parent.root().and_downcast::<gtk::Window>();
     let dialog = gtk::AppChooserDialog::for_content_type(
         window.as_ref(),
@@ -919,10 +958,7 @@ fn show_application_chooser(parent: &Button, path: PathBuf, content_type: String
     dialog.connect_response(move |dialog, response| {
         if response == gtk::ResponseType::Ok {
             if let Some(app) = dialog.app_info() {
-                let _ = app.launch(
-                    &[gio::File::for_path(&path)],
-                    None::<&gio::AppLaunchContext>,
-                );
+                let _ = app.launch(&[gio::File::for_uri(&uri)], None::<&gio::AppLaunchContext>);
             }
         }
         dialog.close();
@@ -936,23 +972,31 @@ fn command_button(
     view: FileView,
     command: ContextCommand,
     parent: Option<Popover>,
+    availability: &CommandAvailability,
 ) -> Button {
     let button = Button::with_label(label);
+    set_command_enabled(&button, availability, command);
     button.connect_clicked(move |_| {
         if let Some(popover) = &parent {
             popover.popdown();
         }
         if command == ContextCommand::Open {
-            if let ContextTarget::Folder(path) | ContextTarget::File { path, .. } = &target {
-                activate_path(&view, path.clone());
+            if let ContextTarget::Folder(item) | ContextTarget::File(item) = &target {
+                activate_item(&view, item.clone());
                 return;
             }
         }
-        if let Some(callback) = view.on_context_command.borrow().as_ref() {
-            callback(target.clone(), command);
-        }
+        view.dispatch_context_command(target.clone(), command);
     });
     button
+}
+
+fn set_command_enabled(
+    button: &Button,
+    availability: &CommandAvailability,
+    command: ContextCommand,
+) {
+    configure_command_button(button, availability, command);
 }
 
 fn context_command_label(command: ContextCommand) -> &'static str {
@@ -988,7 +1032,7 @@ fn context_command_label_for(
     view: &FileView,
 ) -> &'static str {
     if command == ContextCommand::ToggleQuickAccess
-        && matches!(target, ContextTarget::Folder(path) | ContextTarget::SidebarLocation(path) | ContextTarget::Background(path) if view.is_quick_access_location(path))
+        && target_local_path(target).is_some_and(|path| view.is_quick_access_location(&path))
     {
         "Unpin from Quick access"
     } else {
@@ -1222,12 +1266,9 @@ fn compare_items(left: &FileItem, right: &FileItem, column: ListColumn) -> gtk::
 
 fn file_target(item: &FileItem) -> ContextTarget {
     if item.is_dir() {
-        ContextTarget::Folder(item.path().to_path_buf())
+        ContextTarget::Folder(item.clone())
     } else {
-        ContextTarget::File {
-            path: item.path().to_path_buf(),
-            content_type: item.content_type().to_string(),
-        }
+        ContextTarget::File(item.clone())
     }
 }
 
@@ -1250,8 +1291,7 @@ mod tests {
 
     use super::{
         cached_thumbnail_file_for, drag_uri_for, grid_tile_label, is_mountable_file_type,
-        local_image_thumbnail_file, thumbnail_cache_paths,
-        thumbnail_cache_homes_from,
+        local_image_thumbnail_file, thumbnail_cache_homes_from, thumbnail_cache_paths,
         uses_native_row_sorting, FileView, ViewNavigationState,
     };
     use crate::core::sidebar_model::SidebarSection;
@@ -1287,7 +1327,10 @@ mod tests {
 
         assert_eq!(state.remote_uri.as_deref(), Some("smb://server/share"));
         assert_eq!(
-            state.section_overview.as_ref().map(|section| section.title.as_str()),
+            state
+                .section_overview
+                .as_ref()
+                .map(|section| section.title.as_str()),
             Some("Network & online")
         );
     }
@@ -1361,7 +1404,10 @@ mod tests {
         fs::write(&path, "contents").unwrap();
         let item = crate::core::file_item::FileItem::from_path(&path).unwrap();
 
-        assert_eq!(drag_uri_for(&item), Some(gio::File::for_path(path).uri().to_string()));
+        assert_eq!(
+            drag_uri_for(&item),
+            Some(gio::File::for_path(path).uri().to_string())
+        );
     }
 
     #[test]
@@ -1442,8 +1488,7 @@ fn file_icon(item: &FileItem) -> Image {
         return Image::from_icon_name(icon_name);
     }
 
-    let (content_type, _) = gio::content_type_guess(Some(item.path()), &[]);
-    let icon = gio::content_type_get_icon(&content_type);
+    let icon = gio::content_type_get_icon(item.content_type());
     Image::from_gicon(&icon)
 }
 
@@ -1487,14 +1532,12 @@ fn cached_thumbnail_file_for(item: &FileItem, cache_home: &Path) -> Option<PathB
 }
 
 fn local_image_thumbnail_file(item: &FileItem) -> Option<PathBuf> {
-    (item.content_type().starts_with("image/") && item.path().is_file())
-        .then(|| item.path().to_path_buf())
+    item.local_path()
+        .filter(|path| item.content_type().starts_with("image/") && path.is_file())
 }
 
 fn thumbnail_uri(item: &FileItem) -> Option<String> {
-    item.uri().map(str::to_owned).or_else(|| {
-        (!item.path().as_os_str().is_empty()).then(|| gio::File::for_path(item.path()).uri().to_string())
-    })
+    Some(item.location().uri().to_owned())
 }
 
 fn thumbnail_cache_homes() -> Vec<PathBuf> {
@@ -1518,8 +1561,8 @@ fn thumbnail_cache_homes_from(home: Option<&Path>, xdg_cache: Option<&Path>) -> 
 }
 
 fn thumbnail_cache_paths(cache_home: &Path, uri: &str) -> Vec<PathBuf> {
-    let mut checksum = glib::Checksum::new(glib::ChecksumType::Md5)
-        .expect("MD5 is available in GLib");
+    let mut checksum =
+        glib::Checksum::new(glib::ChecksumType::Md5).expect("MD5 is available in GLib");
     checksum.update(uri.as_bytes());
     let filename = format!("{}.png", checksum.string().expect("checksum has a value"));
     ["large", "normal"]
@@ -1542,9 +1585,7 @@ fn drag_content_provider(item: &FileItem) -> Option<gtk::gdk::ContentProvider> {
 }
 
 fn drag_uri_for(item: &FileItem) -> Option<String> {
-    item.uri().map(str::to_owned).or_else(|| {
-        (!item.path().as_os_str().is_empty()).then(|| gio::File::for_path(item.path()).uri().to_string())
-    })
+    Some(item.location().uri().to_owned())
 }
 
 fn format_modified(modified: std::time::SystemTime) -> String {
@@ -1574,18 +1615,27 @@ fn activate_path(view: &FileView, path: PathBuf) {
 }
 
 fn activate_item(view: &FileView, item: FileItem) {
-    if let Some(uri) = item.uri() {
-        if item.is_dir() {
-            if let Some(callback) = view.on_uri_navigate.borrow().as_ref() {
-                callback(uri.to_owned());
-            } else {
-                view.set_uri(uri.to_owned());
-            }
+    let uri = item.location().uri();
+    if item.is_dir() {
+        if let Some(path) = item.local_path() {
+            activate_path(view, path);
+        } else if let Some(callback) = view.on_uri_navigate.borrow().as_ref() {
+            callback(uri.to_owned());
         } else {
-            let _ = gio::AppInfo::launch_default_for_uri(uri, None::<&gio::AppLaunchContext>);
+            view.set_uri(uri.to_owned());
         }
     } else {
-        activate_path(view, item.path().to_path_buf());
+        let _ = gio::AppInfo::launch_default_for_uri(uri, None::<&gio::AppLaunchContext>);
+    }
+}
+
+fn target_local_path(target: &ContextTarget) -> Option<PathBuf> {
+    match target {
+        ContextTarget::File(item) | ContextTarget::Folder(item) => item.local_path(),
+        ContextTarget::Background(location) | ContextTarget::SidebarLocation(location) => {
+            location.local_path()
+        }
+        ContextTarget::Tab => None,
     }
 }
 

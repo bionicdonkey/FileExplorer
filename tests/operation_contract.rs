@@ -7,6 +7,33 @@ use zorin_explorer::core::contracts::*;
 use zorin_explorer::core::ports::*;
 use zorin_explorer::core::Location;
 use zorin_explorer::infrastructure::mock_provider::*;
+use zorin_explorer::ui::context_menu::{CommandAvailability, ContextCommand, ContextTarget};
+
+#[test]
+fn uri_items_keep_canonical_identity_and_disable_unsupported_trash() {
+    let parent = gio::File::for_uri("smb://host/share");
+    let info = gio::FileInfo::new();
+    info.set_name("report.txt");
+    info.set_display_name("report.txt");
+    info.set_file_type(gio::FileType::Regular);
+
+    let item = zorin_explorer::core::FileItem::from_gio(&parent, &info);
+    let availability = CommandAvailability::for_selection(&[item.clone()], None);
+
+    assert_eq!(item.identity_key(), "smb://host/share/report.txt");
+    assert_eq!(item.location().uri(), "smb://host/share/report.txt");
+    assert!(!availability.can_trash);
+    assert_eq!(
+        availability.disabled_reason,
+        Some("This location does not support Trash")
+    );
+    assert!(!availability.allows(ContextCommand::OpenInTerminal));
+    assert!(!availability.allows(ContextCommand::DeletePermanently));
+    assert!(
+        !CommandAvailability::for_target(&ContextTarget::Folder(item))
+            .allows(ContextCommand::OpenInNewTab)
+    );
+}
 
 mod operation_contract {
     use super::*;
