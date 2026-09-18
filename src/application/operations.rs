@@ -498,12 +498,11 @@ impl OperationCoordinator {
                 match result.outcome {
                     RequestOutcome::Succeeded(snapshot)
                         if snapshot.version == request.capability_version
-                            && (elevated
-                                || snapshot.supports(if index < request.sources.len() {
-                                    request.kind.capability()
-                                } else {
-                                    Capability::Create
-                                })) =>
+                            && snapshot.supports(if index < request.sources.len() {
+                                request.kind.capability()
+                            } else {
+                                Capability::Create
+                            }) =>
                     {
                         owner.inspect(request, index + 1)
                     }

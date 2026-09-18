@@ -40,6 +40,101 @@ mod operation_contract {
         request
     }
     #[test]
+    fn linked_elevation_still_requires_successful_copy_and_create_capabilities() {
+        use zorin_explorer::application::operations::elevated_retry_request;
+        for missing in [Capability::Copy, Capability::Create] {
+            let provider = Rc::new(HeldProvider::default());
+            let coordinator = OperationCoordinator::new(provider.clone());
+            coordinator
+                .submit(local_request(1), capabilities(1))
+                .unwrap();
+            let (inspection, callback) = provider.inspections.borrow_mut().remove(0);
+            callback(RequestCompletion {
+                id: inspection.id,
+                outcome: RequestOutcome::Failed(OperationError::new(
+                    OperationErrorKind::PermissionDenied,
+                    Some(&inspection.location),
+                    None,
+                )),
+            });
+            let original = coordinator.records().remove(0);
+            let retry = elevated_retry_request(&original, OperationId(2)).unwrap();
+            coordinator
+                .submit_linked_retry(retry, capabilities(1), original.id)
+                .unwrap();
+            if missing == Capability::Create {
+                let (inspection, callback) = provider.inspections.borrow_mut().remove(0);
+                callback(RequestCompletion {
+                    id: inspection.id,
+                    outcome: RequestOutcome::Succeeded(capabilities(1)),
+                });
+            }
+            let (inspection, callback) = provider.inspections.borrow_mut().remove(0);
+            let mut snapshot = capabilities(1);
+            snapshot.supported.remove(&missing);
+            callback(RequestCompletion {
+                id: inspection.id,
+                outcome: RequestOutcome::Succeeded(snapshot),
+            });
+            let result = coordinator.records().remove(1);
+            assert!(
+                matches!(&result.state, OperationState::Failed(error) if error.kind == OperationErrorKind::CapabilityChanged),
+                "missing {missing:?}: {result:?}"
+            );
+            assert_eq!(result.change, ChangeExtent::Unchanged);
+            assert!(provider.operations.borrow().is_empty());
+            assert!(provider.inspections.borrow().is_empty());
+            assert!(!result
+                .events
+                .iter()
+                .any(|event| matches!(event, OperationEvent::Started { .. })));
+            assert!(coordinator.active_lock_keys().is_empty());
+            assert_eq!(coordinator.records()[0].events, original.events);
+        }
+    }
+    #[test]
+    fn linked_elevation_keeps_only_the_explicit_permission_denied_exception() {
+        use zorin_explorer::application::operations::elevated_retry_request;
+        let provider = Rc::new(HeldProvider::default());
+        let coordinator = OperationCoordinator::new(provider.clone());
+        coordinator
+            .submit(local_request(1), capabilities(1))
+            .unwrap();
+        let deny = |inspection: CapabilityRequest, callback: CapabilityCallback| {
+            callback(RequestCompletion {
+                id: inspection.id,
+                outcome: RequestOutcome::Failed(OperationError::new(
+                    OperationErrorKind::PermissionDenied,
+                    Some(&inspection.location),
+                    None,
+                )),
+            })
+        };
+        let (inspection, callback) = provider.inspections.borrow_mut().remove(0);
+        deny(inspection, callback);
+        let original = coordinator.records().remove(0);
+        let retry = elevated_retry_request(&original, OperationId(2)).unwrap();
+        coordinator
+            .submit_linked_retry(retry, capabilities(1), original.id)
+            .unwrap();
+        let (inspection, callback) = provider.inspections.borrow_mut().remove(0);
+        deny(inspection, callback);
+        let (inspection, callback) = provider.inspections.borrow_mut().remove(0);
+        callback(RequestCompletion {
+            id: inspection.id,
+            outcome: RequestOutcome::Succeeded(capabilities(1)),
+        });
+        let (request, mut sink) = provider.operations.borrow_mut().remove(0);
+        assert_eq!(request.id, OperationId(2));
+        sink(OperationEvent::Succeeded {
+            id: request.id,
+            sequence: 1,
+            completion: OperationCompletion::default(),
+        });
+        assert_eq!(coordinator.records()[1].state, OperationState::Succeeded);
+        assert_eq!(coordinator.records()[0].events, original.events);
+    }
+    #[test]
     fn callbacks_cannot_impersonate_another_operation() {
         let provider = Rc::new(HeldProvider::default());
         let coordinator = OperationCoordinator::new(provider.clone());
