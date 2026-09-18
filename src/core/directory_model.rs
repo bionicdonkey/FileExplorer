@@ -36,7 +36,7 @@ impl DirectoryModel {
     pub fn load_uri_with_options(uri: &str, options: &ViewOptions) -> io::Result<Vec<FileItem>> {
         let file = gio::File::for_uri(uri);
         let enumerator = file.enumerate_children(
-            "standard::name,standard::display-name,standard::type,standard::icon,standard::content-type,standard::size,time::modified,standard::target-uri",
+            "standard::name,standard::display-name,standard::type,standard::icon,standard::content-type,standard::size,time::modified,standard::target-uri,access::can-read,access::can-write,access::can-trash,access::can-delete",
             gio::FileQueryInfoFlags::NONE,
             gio::Cancellable::NONE,
         ).map_err(|error| io::Error::new(io::ErrorKind::Other, error))?;
@@ -117,6 +117,7 @@ mod tests {
     use std::fs;
     use std::time::SystemTime;
 
+    use gio::prelude::FileExt;
     use tempfile::tempdir;
 
     use super::{group_label, DirectoryModel};
@@ -141,5 +142,19 @@ mod tests {
         let item = DirectoryModel::load(directory.path()).unwrap().pop().unwrap();
 
         assert_eq!(group_label(&item, GroupField::DateModified, SystemTime::now()), Some("Today".into()));
+    }
+
+    #[test]
+    fn gio_listing_capabilities_reach_the_file_item() {
+        let directory = tempdir().unwrap();
+        fs::write(directory.path().join("readable.txt"), "contents").unwrap();
+        let uri = gio::File::for_path(directory.path()).uri();
+
+        let items = DirectoryModel::load_uri_with_options(&uri, &ViewOptions::default()).unwrap();
+        let item = items.iter().find(|item| item.name() == "readable.txt").unwrap();
+
+        assert!(item
+            .capabilities()
+            .supports(crate::core::contracts::Capability::Copy));
     }
 }

@@ -66,7 +66,10 @@ fn filesystem_space(path: &Path) -> Option<(u64, u64)> {
 #[derive(Clone)]
 pub struct FileView {
     pub widget: ScrolledWindow,
+    /// Compatibility local-tab path. It is never used as the current URI
+    /// identity while a remote location is displayed.
     location: Rc<RefCell<PathBuf>>,
+    current_location: Rc<RefCell<Location>>,
     navigation_state: Rc<RefCell<ViewNavigationState>>,
     on_navigate: Rc<RefCell<Option<Box<dyn Fn(PathBuf)>>>>,
     on_uri_navigate: Rc<RefCell<Option<Box<dyn Fn(String)>>>>,
@@ -74,6 +77,7 @@ pub struct FileView {
     on_options_changed: Rc<RefCell<Option<Box<dyn Fn(ViewOptions)>>>>,
     options: Rc<RefCell<ViewOptions>>,
     selected_target: Rc<RefCell<Option<ContextTarget>>>,
+    on_command_availability_changed: Rc<RefCell<Option<Box<dyn Fn(CommandAvailability)>>>>,
     pending_cut: Rc<RefCell<Option<PathBuf>>>,
     search_results: Rc<RefCell<Option<Vec<FileItem>>>>,
     is_quick_access_location: Rc<RefCell<Option<Rc<dyn Fn(&Path) -> bool>>>>,
@@ -84,8 +88,10 @@ impl FileView {
         let scroll = ScrolledWindow::new();
         scroll.set_vexpand(true);
         let on_navigate = Rc::new(RefCell::new(None));
+        let current_location = Location::from_local_path(&location.borrow());
         let view = Self {
             widget: scroll,
+            current_location: Rc::new(RefCell::new(current_location)),
             location,
             navigation_state: Rc::new(RefCell::new(ViewNavigationState::default())),
             on_navigate,
@@ -94,6 +100,7 @@ impl FileView {
             on_options_changed: Rc::new(RefCell::new(None)),
             options: Rc::new(RefCell::new(ViewOptions::default())),
             selected_target: Rc::new(RefCell::new(None)),
+            on_command_availability_changed: Rc::new(RefCell::new(None)),
             pending_cut: Rc::new(RefCell::new(None)),
             search_results: Rc::new(RefCell::new(None)),
             is_quick_access_location: Rc::new(RefCell::new(None)),
@@ -108,9 +115,7 @@ impl FileView {
                     &background_parent,
                     x,
                     y,
-                    ContextTarget::Background(Location::from_local_path(
-                        &background_view.location(),
-                    )),
+                    ContextTarget::Background(background_view.current_location()),
                     &background_view,
                     gesture
                         .current_event_state()
@@ -125,16 +130,25 @@ impl FileView {
 
     pub fn set_location(&self, path: PathBuf) {
         *self.navigation_state.borrow_mut() = ViewNavigationState::default();
+        *self.current_location.borrow_mut() = Location::from_local_path(&path);
         *self.location.borrow_mut() = path;
         *self.selected_target.borrow_mut() = None;
         *self.search_results.borrow_mut() = None;
+        self.notify_command_availability_changed();
         self.reload();
     }
 
     pub fn set_uri(&self, uri: String) {
-        self.navigation_state.borrow_mut().set_uri(uri.clone());
+        let Ok(current_location) = Location::from_uri(&uri) else {
+            return;
+        };
+        self.navigation_state
+            .borrow_mut()
+            .set_uri(current_location.uri().to_owned());
+        *self.current_location.borrow_mut() = current_location;
         *self.selected_target.borrow_mut() = None;
         *self.search_results.borrow_mut() = None;
+        self.notify_command_availability_changed();
         self.widget
             .set_child(Some(&Label::new(Some("Connecting to remote location…"))));
 
@@ -160,8 +174,12 @@ impl FileView {
                 move |result| {
                     let _keep_operation_alive = &keep_operation;
                     if let Ok(mounted_root) = result {
-                        view.navigation_state.borrow_mut().remote_uri =
-                            Some(mounted_root.uri().to_string());
+                        if let Ok(mounted_location) = Location::try_from_file(mounted_root) {
+                            view.navigation_state.borrow_mut().remote_uri =
+                                Some(mounted_location.uri().to_owned());
+                            *view.current_location.borrow_mut() = mounted_location;
+                            view.notify_command_availability_changed();
+                        }
                     }
                     view.reload();
                 },
@@ -206,6 +224,32 @@ impl FileView {
 
     pub fn selected_target(&self) -> Option<ContextTarget> {
         self.selected_target.borrow().clone()
+    }
+
+    pub fn current_location(&self) -> Location {
+        self.current_location.borrow().clone()
+    }
+
+    pub fn command_availability(&self) -> CommandAvailability {
+        self.selected_target()
+            .map(|target| CommandAvailability::for_target(&target))
+            .unwrap_or_else(|| {
+                CommandAvailability::for_selection(&[], Some(&self.current_location()))
+            })
+    }
+
+    pub fn set_command_availability_handler<F: Fn(CommandAvailability) + 'static>(
+        &self,
+        callback: F,
+    ) {
+        *self.on_command_availability_changed.borrow_mut() = Some(Box::new(callback));
+        self.notify_command_availability_changed();
+    }
+
+    fn notify_command_availability_changed(&self) {
+        if let Some(callback) = self.on_command_availability_changed.borrow().as_ref() {
+            callback(self.command_availability());
+        }
     }
 
     pub fn dispatch_context_command(&self, target: ContextTarget, command: ContextCommand) {
@@ -259,6 +303,12 @@ impl FileView {
         self.reload();
     }
 
+    /// Reloads the displayed canonical location without converting a remote
+    /// tab back to the stale local compatibility path.
+    pub fn refresh(&self) {
+        self.reload();
+    }
+
     pub fn is_showing_search_results(&self) -> bool {
         self.search_results.borrow().is_some()
     }
@@ -269,6 +319,7 @@ impl FileView {
     pub fn show_section_overview(&self, section: SidebarSection) {
         *self.selected_target.borrow_mut() = None;
         *self.search_results.borrow_mut() = None;
+        self.notify_command_availability_changed();
         self.navigation_state.borrow_mut().show_section(section);
         self.reload();
     }
@@ -486,11 +537,13 @@ impl FileView {
             None => SingleSelection::new(Some(store)),
         };
         let selected_target = self.selected_target.clone();
+        let availability_view = self.clone();
         selection.connect_selection_changed(move |model, position, _| {
             *selected_target.borrow_mut() = model
                 .item(position)
                 .and_downcast::<glib::BoxedAnyObject>()
                 .and_then(|object| file_target_from_row(&object.borrow::<ListRow>()));
+            availability_view.notify_command_availability_changed();
         });
         let view = ColumnView::new(Some(selection.clone()));
         view.set_reorderable(true);
@@ -599,12 +652,14 @@ impl FileView {
         });
         let grid_selection_items = items.to_vec();
         let selected_target = self.selected_target.clone();
+        let availability_view = self.clone();
         grid.connect_selected_children_changed(move |grid| {
             *selected_target.borrow_mut() = grid
                 .selected_children()
                 .first()
                 .and_then(|child| grid_selection_items.get(child.index() as usize))
                 .map(file_target);
+            availability_view.notify_command_availability_changed();
         });
         for item in items {
             let tile = GtkBox::new(Orientation::Vertical, layout.gap / 2);
@@ -639,6 +694,7 @@ impl FileView {
             gesture.connect_pressed(move |gesture, _, x, y| {
                 gesture.set_state(gtk::EventSequenceState::Claimed);
                 *selected_target.borrow_mut() = Some(target.clone());
+                view.notify_command_availability_changed();
                 if let Some(child) = menu_tile.parent().and_downcast::<gtk::FlowBoxChild>() {
                     grid_context.select_child(&child);
                 }
@@ -1136,6 +1192,7 @@ fn column_factory(column: ListColumn, thumbnails: bool, view: FileView) -> Signa
                 };
                 gesture.set_state(gtk::EventSequenceState::Claimed);
                 *context_view.selected_target.borrow_mut() = Some(target.clone());
+                context_view.notify_command_availability_changed();
                 show_item_context_menu(
                     &parent,
                     x,
@@ -1333,6 +1390,20 @@ mod tests {
                 .map(|section| section.title.as_str()),
             Some("Network & online")
         );
+    }
+
+    #[test]
+    #[ignore = "requires a GTK desktop session"]
+    fn remote_current_location_does_not_replace_the_local_compatibility_path() {
+        gtk::init().unwrap();
+        let local = PathBuf::from("/tmp");
+        let view = FileView::new(Rc::new(RefCell::new(local.clone())));
+
+        view.set_uri("smb://host/share".into());
+
+        assert_eq!(view.current_location().uri(), "smb://host/share");
+        assert_eq!(view.location(), local);
+        assert_eq!(view.command_availability().can_paste, false);
     }
 
     #[test]

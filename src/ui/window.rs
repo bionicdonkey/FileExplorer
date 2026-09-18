@@ -599,6 +599,7 @@ impl ExplorerWindow {
                 } else {
                     select_header.set_location(&tab.location.borrow());
                 }
+                select_header.set_file_action_availability(&tab.view.command_availability());
                 if tab.view.section_title().is_none() {
                     sync_sidebar_for_tab(
                         &select_sidebar,
@@ -806,6 +807,17 @@ fn wire_tab(
     let quick_access_model = sidebar.model();
     view.set_quick_access_predicate(move |path| {
         quick_access_model.borrow().preferences().is_pinned(path)
+    });
+    let availability_tabs = tabs.clone();
+    let availability_page = page.clone();
+    let availability_header = header.clone();
+    view.set_command_availability_handler(move |availability| {
+        if availability_tabs
+            .selected_page()
+            .is_some_and(|selected| selected == availability_page)
+        {
+            availability_header.set_file_action_availability(&availability);
+        }
     });
     let options_data = data.clone();
     let options_preferences = preferences.clone();
@@ -1046,7 +1058,7 @@ fn wire_tab(
                     command_sidebar.toggle_quick_access(path);
                 }
             }
-            ContextCommand::Refresh => command_view.set_location(command_view.location()),
+            ContextCommand::Refresh => command_view.refresh(),
             _ => {}
         }
     });
@@ -1198,9 +1210,7 @@ fn dispatch_active_file_command(
     };
     let view = data.borrow()[index].view.clone();
     let target = if command == ContextCommand::Paste {
-        Some(ContextTarget::Background(Location::from_local_path(
-            &view.location(),
-        )))
+        Some(ContextTarget::Background(view.current_location()))
     } else {
         view.selected_target()
     };

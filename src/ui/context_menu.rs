@@ -64,12 +64,16 @@ impl CommandAvailability {
         let can_paste = destination.is_some_and(|location| location.uri().starts_with("file:"));
         let can_open = supports_all(Capability::Open);
         let can_use_local_adapter = selection.len() == 1 && selection[0].local_path().is_some();
-        let can_copy = supports_all(Capability::Copy);
-        let can_cut = supports_all(Capability::Move);
-        let can_rename = selection.len() == 1 && supports_all(Capability::Rename);
+        // The compatibility operation manager still has a local execution
+        // adapter. A provider advertising a URI capability is not enough to
+        // enable an action that would otherwise be silently dropped.
+        let can_copy = can_use_local_adapter && supports_all(Capability::Copy);
+        let can_cut = can_use_local_adapter && supports_all(Capability::Move);
+        let can_rename =
+            can_use_local_adapter && selection.len() == 1 && supports_all(Capability::Rename);
         let can_open_terminal = can_use_local_adapter && selection[0].is_dir() && can_open;
-        let can_trash = supports_all(Capability::Trash);
-        let can_delete = supports_all(Capability::Delete);
+        let can_trash = can_use_local_adapter && supports_all(Capability::Trash);
+        let can_delete = can_use_local_adapter && supports_all(Capability::Delete);
         let disabled_reason = if !can_trash && !selection.is_empty() {
             Some("This location does not support Trash")
         } else if !can_delete && !selection.is_empty() {
@@ -169,7 +173,10 @@ pub fn configure_command_button(
 ) {
     let enabled = availability.allows(command);
     button.set_sensitive(enabled);
-    if let Some(reason) = availability.disabled_reason_for(command) {
+    if enabled {
+        button.set_tooltip_text(None);
+        button.reset_property(gtk::AccessibleProperty::Description);
+    } else if let Some(reason) = availability.disabled_reason_for(command) {
         button.set_tooltip_text(Some(reason));
         button.update_property(&[gtk::accessible::Property::Description(reason)]);
     }

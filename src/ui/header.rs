@@ -8,6 +8,7 @@ use gtk::{
 };
 
 use crate::core::location::Location;
+use crate::ui::context_menu::{configure_command_button, CommandAvailability, ContextCommand};
 
 #[derive(Clone, Copy)]
 pub enum NavigationAction {
@@ -250,6 +251,10 @@ pub struct HeaderControls {
     forward: Button,
     up: Button,
     refresh: Button,
+    cut: Button,
+    copy: Button,
+    paste: Button,
+    trash: Button,
     on_file_action: Rc<RefCell<Option<Box<dyn Fn(FileAction)>>>>,
 }
 
@@ -285,6 +290,7 @@ impl HeaderControls {
             Rc::new(RefCell::new(None));
         let actions = GtkBox::new(Orientation::Horizontal, 0);
         actions.add_css_class("linked");
+        let mut action_buttons = Vec::new();
         for (action, label, icon) in [
             (FileAction::Cut, "Cut", "edit-cut-symbolic"),
             (FileAction::Copy, "Copy", "edit-copy-symbolic"),
@@ -298,6 +304,7 @@ impl HeaderControls {
             let button = Button::from_icon_name(icon);
             button.set_tooltip_text(Some(label));
             button.set_icon_name(icon);
+            button.update_property(&[gtk::accessible::Property::Label(label)]);
             button.add_css_class("flat");
             let callback = on_file_action.clone();
             button.connect_clicked(move |_| {
@@ -305,6 +312,7 @@ impl HeaderControls {
                     callback(action);
                 }
             });
+            action_buttons.push(button.clone());
             actions.append(&button);
         }
         widget.append(&actions);
@@ -316,6 +324,10 @@ impl HeaderControls {
             forward,
             up,
             refresh,
+            cut: action_buttons.remove(0),
+            copy: action_buttons.remove(0),
+            paste: action_buttons.remove(0),
+            trash: action_buttons.remove(0),
             on_file_action,
         }
     }
@@ -345,6 +357,20 @@ impl HeaderControls {
         *self.on_file_action.borrow_mut() = Some(Box::new(callback));
     }
 
+    pub fn set_file_action_availability(&self, availability: &CommandAvailability) {
+        for (button, action, label) in [
+            (&self.cut, ContextCommand::Cut, "Cut"),
+            (&self.copy, ContextCommand::Copy, "Copy"),
+            (&self.paste, ContextCommand::Paste, "Paste"),
+            (&self.trash, ContextCommand::MoveToTrash, "Move to Trash"),
+        ] {
+            configure_command_button(button, availability, action);
+            if availability.allows(action) {
+                button.set_tooltip_text(Some(label));
+            }
+        }
+    }
+
     pub fn set_location(&self, path: &std::path::Path) {
         self.location_bar.set_location(path);
     }
@@ -360,5 +386,38 @@ impl HeaderControls {
     #[cfg(test)]
     pub(crate) fn displayed_location_text(&self) -> String {
         self.location_bar.entry.text().to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+    use std::path::PathBuf;
+    use std::rc::Rc;
+
+    use gtk::prelude::*;
+
+    use super::HeaderControls;
+    use crate::core::FileItem;
+    use crate::ui::context_menu::CommandAvailability;
+
+    #[test]
+    #[ignore = "requires a GTK desktop session"]
+    fn toolbar_actions_follow_the_shared_availability_query() {
+        gtk::init().unwrap();
+        let header = HeaderControls::new(Rc::new(RefCell::new(PathBuf::from("/tmp"))));
+        let parent = gio::File::for_uri("smb://host/share");
+        let info = gio::FileInfo::new();
+        info.set_name("report.txt");
+        info.set_display_name("report.txt");
+        let remote = FileItem::from_gio(&parent, &info);
+
+        header.set_file_action_availability(&CommandAvailability::for_selection(&[remote], None));
+
+        assert!(!header.cut.is_sensitive());
+        assert_eq!(
+            header.trash.tooltip_text().as_deref(),
+            Some("This location does not support Trash")
+        );
     }
 }

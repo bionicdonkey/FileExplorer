@@ -35,6 +35,35 @@ fn uri_items_keep_canonical_identity_and_disable_unsupported_trash() {
     );
 }
 
+#[test]
+fn uri_items_with_provider_capabilities_stay_disabled_until_uri_execution_exists() {
+    let parent = gio::File::for_uri("smb://host/share");
+    let info = gio::FileInfo::new();
+    info.set_name("report.txt");
+    info.set_display_name("report.txt");
+    info.set_file_type(gio::FileType::Regular);
+    for attribute in [
+        "access::can-read",
+        "access::can-write",
+        "access::can-trash",
+        "access::can-delete",
+    ] {
+        info.set_attribute_boolean(attribute, true);
+    }
+
+    let availability = CommandAvailability::for_selection(
+        &[zorin_explorer::core::FileItem::from_gio(&parent, &info)],
+        None,
+    );
+
+    assert!(availability.can_open);
+    assert!(!availability.can_copy);
+    assert!(!availability.can_cut);
+    assert!(!availability.can_rename);
+    assert!(!availability.can_trash);
+    assert!(!availability.can_delete);
+}
+
 mod operation_contract {
     use super::*;
     use zorin_explorer::application::operations::{

@@ -35,6 +35,30 @@ fn slice1_disabled_trash_action_exposes_a_safe_name_and_reason() {
 }
 
 #[test]
+fn slice1_reenabled_action_clears_the_stale_disabled_explanation() {
+    gtk::init().expect("headless GTK must initialize");
+    let button = gtk::Button::with_label("Move to Trash");
+    configure_command_button(
+        &button,
+        &CommandAvailability::for_selection(&[remote_item()], None),
+        ContextCommand::MoveToTrash,
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("local.txt");
+    std::fs::write(&path, "contents").unwrap();
+    let local = zorin_explorer::core::FileItem::from_path(&path).unwrap();
+
+    configure_command_button(
+        &button,
+        &CommandAvailability::for_selection(&[local], None),
+        ContextCommand::MoveToTrash,
+    );
+
+    assert!(button.is_sensitive());
+    assert_eq!(button.tooltip_text(), None);
+}
+
+#[test]
 fn slice1_cancel_state_and_error_text_remain_explicit_and_redacted() {
     let context = glib::MainContext::new();
     let _guard = context.acquire().unwrap();
