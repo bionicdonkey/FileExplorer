@@ -1473,9 +1473,12 @@ fn start_transfer(
     };
     let target = destination.join(&name);
     let refresh_view = view.clone();
-    let submit = move |target: Option<PathBuf>| {
+    let submit = move |target: Option<PathBuf>, replace: bool| {
         let operation_id = match target {
             Some(target) => operations.submit_to_target(kind, source.clone(), target),
+            None if replace => {
+                operations.submit_replacing(kind, vec![source.clone()], destination.clone())
+            }
             None => operations.submit(kind, vec![source.clone()], Some(destination.clone())),
         };
         if kind == OperationKind::Move {
@@ -1486,7 +1489,7 @@ fn start_transfer(
         schedule_refresh(refresh_view.clone(), operations.clone(), operation_id);
     };
     if !target.exists() {
-        submit(None);
+        submit(None, false);
         return;
     }
     match ApplicationPreferences::load_default()
@@ -1494,11 +1497,11 @@ fn start_transfer(
         .conflict_default
     {
         ConflictDefault::Replace => {
-            submit(None);
+            submit(None, true);
             return;
         }
         ConflictDefault::KeepBoth => {
-            submit(Some(FileOperations::keep_both_destination(&target)));
+            submit(Some(FileOperations::keep_both_destination(&target)), false);
             return;
         }
         ConflictDefault::Skip => return,
@@ -1522,8 +1525,8 @@ fn start_transfer(
     dialog.set_default_response(Some("cancel"));
     dialog.set_close_response("cancel");
     dialog.connect_response(None, move |_, response| match response {
-        "replace" => submit(None),
-        "keep" => submit(Some(FileOperations::keep_both_destination(&target))),
+        "replace" => submit(None, true),
+        "keep" => submit(Some(FileOperations::keep_both_destination(&target)), false),
         _ => {}
     });
     dialog.present();
@@ -1544,7 +1547,9 @@ fn schedule_refresh(view: FileView, operations: OperationManager, operation_id: 
         };
         if matches!(
             record.state,
-            crate::core::OperationState::Queued | crate::core::OperationState::Running
+            crate::core::OperationState::Queued
+                | crate::core::OperationState::Running
+                | crate::core::OperationState::CancelRequested
         ) {
             return glib::ControlFlow::Continue;
         }
@@ -1589,7 +1594,7 @@ fn confirm_permanent_delete(view: &FileView, path: PathBuf, operations: Operatio
     let reload = view.clone();
     dialog.connect_response(None, move |_, response| {
         if response == "delete" {
-            let operation_id = operations.submit(OperationKind::Delete, vec![path.clone()], None);
+            let operation_id = operations.submit_confirmed_delete(vec![path.clone()]);
             schedule_refresh(reload.clone(), operations.clone(), operation_id);
         }
     });

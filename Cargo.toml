@@ -12,6 +12,8 @@ glib = "0.19"
 gtk = { package = "gtk4", version = "0.8", features = ["v4_12"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+futures-channel = "0.3"
+futures-util = "0.3"
 # Keep the proc-macro dependency compatible with the Rust 1.75 toolchain.
 proc-macro-crate = "=3.1.0"
 indexmap = "=2.7.1"

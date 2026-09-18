@@ -74,6 +74,14 @@ pub enum MutationKind {
     Delete,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConflictDecision {
+    Replace,
+    KeepBoth,
+    Skip,
+    CancelRemaining,
+}
+
 impl MutationKind {
     pub fn capability(self) -> Capability {
         match self {

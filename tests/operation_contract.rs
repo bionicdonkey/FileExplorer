@@ -8,6 +8,199 @@ use zorin_explorer::core::ports::*;
 use zorin_explorer::core::Location;
 use zorin_explorer::infrastructure::mock_provider::*;
 
+mod operation_contract {
+    use super::*;
+    use zorin_explorer::application::operations::{
+        CancelResult, ChangeExtent, OperationCoordinator, OperationState,
+    };
+
+    #[test]
+    fn containment_locks_and_cancel_race_preserve_backend_outcome() {
+        let context = glib::MainContext::new();
+        let _guard = context.acquire().unwrap();
+        let mock = provider(&context);
+        mock.set_capabilities(capabilities(1));
+        mock.set_operation_behavior(MockOperationBehavior::SucceedDespiteCancellation);
+        let coordinator = OperationCoordinator::new(Rc::new(mock.clone()));
+        let mut recursive = operation(90, 1);
+        recursive.sources = vec![Location::from_uri("file:///a").unwrap()];
+        recursive.destination = Some(Location::from_uri("file:///a/child").unwrap());
+        assert!(coordinator.submit(recursive, capabilities(1)).is_err());
+        let id = coordinator
+            .submit(operation(1, 1), capabilities(1))
+            .unwrap();
+        let second = coordinator
+            .submit(operation(2, 1), capabilities(1))
+            .unwrap();
+        for _ in 0..4 {
+            mock.advance(2);
+            pump(&context);
+        }
+        assert_eq!(coordinator.records()[1].state, OperationState::Queued);
+        assert!(!coordinator.active_lock_keys().is_empty());
+        assert_eq!(coordinator.cancel(id), CancelResult::Requested);
+        assert_eq!(
+            coordinator.records()[0].state,
+            OperationState::CancelRequested
+        );
+        assert!(!coordinator.active_lock_keys().is_empty());
+        assert_eq!(
+            coordinator.cancel(second),
+            CancelResult::CancelledBeforeStart
+        );
+        for _ in 0..12 {
+            mock.advance(2);
+            pump(&context);
+        }
+        let records = coordinator.records();
+        assert_eq!(records[0].state, OperationState::Succeeded);
+        assert_eq!(
+            records[0].events.iter().filter(|e| e.is_terminal()).count(),
+            1
+        );
+        assert!(coordinator.active_lock_keys().is_empty());
+    }
+
+    #[test]
+    fn coordinator_retains_partial_results_and_rejects_unconfirmed_delete() {
+        let context = glib::MainContext::new();
+        let _guard = context.acquire().unwrap();
+        let mock = provider(&context);
+        mock.set_capabilities(capabilities(1));
+        mock.set_operation_behavior(MockOperationBehavior::FailAfter {
+            completed: 1,
+            kind: OperationErrorKind::PermissionDenied,
+        });
+        let coordinator = OperationCoordinator::new(Rc::new(mock.clone()));
+        coordinator
+            .submit(operation(1, 3), capabilities(1))
+            .unwrap();
+        let mut delete = operation(2, 1);
+        delete.kind = MutationKind::Delete;
+        assert!(coordinator.submit(delete, capabilities(1)).is_err());
+        for _ in 0..20 {
+            mock.advance(2);
+            pump(&context);
+        }
+        let records = coordinator.records();
+        assert_eq!(records[0].change, ChangeExtent::Partial);
+        assert_eq!(records[0].completion.completed, [location("source-0")]);
+        assert!(matches!(records[0].state, OperationState::Failed(_)));
+    }
+
+    #[test]
+    fn elevated_retry_requires_unchanged_local_permission_failure_and_a_new_id() {
+        use zorin_explorer::application::operations::elevated_retry_request;
+        let context = glib::MainContext::new();
+        let _guard = context.acquire().unwrap();
+        let mock = provider(&context);
+        mock.set_capabilities(capabilities(1));
+        mock.set_operation_behavior(MockOperationBehavior::FailAfter {
+            completed: 0,
+            kind: OperationErrorKind::PermissionDenied,
+        });
+        let coordinator = OperationCoordinator::new(Rc::new(mock.clone()));
+        let mut request = operation(1, 1);
+        request.sources = vec![Location::from_uri("file:///source").unwrap()];
+        request.destination = Some(Location::from_uri("file:///destination").unwrap());
+        coordinator.submit(request, capabilities(1)).unwrap();
+        for _ in 0..12 {
+            mock.advance(2);
+            pump(&context);
+        }
+        let original = coordinator.records().remove(0);
+        let retry = elevated_retry_request(&original, OperationId(2)).unwrap();
+        assert_eq!(
+            retry.sources,
+            [Location::from_uri("file:///source").unwrap()]
+        );
+        assert!(elevated_retry_request(&original, OperationId(1)).is_err());
+        let mut remote = original.clone();
+        remote.request.sources = vec![location("remote")];
+        assert!(elevated_retry_request(&remote, OperationId(3)).is_err());
+        let mut uncertain = original.clone();
+        uncertain.change = ChangeExtent::Unknown;
+        assert!(elevated_retry_request(&uncertain, OperationId(3)).is_err());
+        mock.set_operation_behavior(MockOperationBehavior::Succeed);
+        coordinator
+            .submit_linked_retry(retry, capabilities(1), original.id)
+            .unwrap();
+        for _ in 0..12 {
+            mock.advance(2);
+            pump(&context);
+        }
+        let records = coordinator.records();
+        assert_eq!(records[0].state, original.state);
+        assert_eq!(records[0].events, original.events);
+        assert_eq!(records[1].retry_of, Some(original.id));
+        assert_eq!(records[1].state, OperationState::Succeeded);
+    }
+
+    #[test]
+    fn skip_and_cancel_remaining_never_reach_the_backend() {
+        for decision in [ConflictDecision::Skip, ConflictDecision::CancelRemaining] {
+            let context = glib::MainContext::new();
+            let _guard = context.acquire().unwrap();
+            let mock = provider(&context);
+            mock.set_capabilities(capabilities(1));
+            let coordinator = OperationCoordinator::new(Rc::new(mock.clone()));
+            coordinator
+                .submit_with_decision(operation(1, 1), capabilities(1), decision)
+                .unwrap();
+            for _ in 0..12 {
+                mock.advance(2);
+                pump(&context);
+            }
+            let p = coordinator.records().remove(0);
+            assert_eq!(p.change, ChangeExtent::Unchanged);
+            assert!(!p
+                .events
+                .iter()
+                .any(|e| matches!(e, OperationEvent::Started { .. })));
+            assert_eq!(p.completion.remaining, [location("source-0")]);
+            assert_eq!(p.events.len(), 1);
+        }
+    }
+
+    #[test]
+    fn opaque_request_conflicts_with_a_trusted_request_and_local_keys_are_sorted() {
+        use zorin_explorer::application::operations::lock_keys;
+        let context = glib::MainContext::new();
+        let _guard = context.acquire().unwrap();
+        let mock = provider(&context);
+        mock.set_capabilities(capabilities(1));
+        let coordinator = OperationCoordinator::new(Rc::new(mock.clone()));
+        coordinator
+            .submit(operation(1, 3), capabilities(1))
+            .unwrap();
+        let mut other = operation(2, 1);
+        other.sources = vec![location("different")];
+        other.destination = Some(location("elsewhere"));
+        let mut trusted = capabilities(1);
+        trusted.containment = Containment::KnownAncestors(vec![location("ancestor")]);
+        coordinator.submit(other, trusted).unwrap();
+        for _ in 0..5 {
+            mock.advance(2);
+            pump(&context);
+        }
+        assert_eq!(coordinator.records()[1].state, OperationState::Queued);
+        let mut request = operation(3, 1);
+        request.sources = vec![Location::from_uri("file:///tmp/a").unwrap()];
+        request.destination = Some(Location::from_uri("file:///var/out").unwrap());
+        assert_eq!(
+            lock_keys(&request, &capabilities(1)).unwrap(),
+            [
+                "file:///",
+                "file:///tmp",
+                "file:///tmp/a",
+                "file:///var",
+                "file:///var/out",
+                "file:///var/out/a"
+            ]
+        );
+    }
+}
+
 fn location(name: &str) -> Location {
     Location::from_uri(&format!("mock://host/{name}")).unwrap()
 }

@@ -25,6 +25,15 @@ pub trait FileOperations {
     /// Implementations recheck capability immediately before work, never
     /// overwrite conflicts by default, and report partial/unknown effects.
     fn submit(&self, request: OperationRequest, sink: OperationSink);
+    /// Unsupported explicit conflict decisions safely retain no-overwrite behavior.
+    fn submit_with_decision(
+        &self,
+        request: OperationRequest,
+        _decision: ConflictDecision,
+        sink: OperationSink,
+    ) {
+        self.submit(request, sink);
+    }
 }
 
 pub trait SearchRepository {

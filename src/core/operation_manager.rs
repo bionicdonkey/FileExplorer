@@ -1,14 +1,34 @@
 use std::fs;
-use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::core::elevated_operations;
-use crate::core::operations::FileOperations;
+use crate::application::operations::{
+    OperationCoordinator, OperationProjection, OperationState as ProjectedState,
+};
+use crate::core::contracts::{ConflictDecision, MutationKind, OperationId, OperationRequest};
 use crate::core::{Location, RecoverableStateNotice};
+use crate::infrastructure::gio_operations::GioOperations;
 use serde::{Deserialize, Serialize};
+use std::rc::Rc;
+use std::sync::mpsc::{self, Sender};
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OperationSummary {
+    pub completed: Vec<String>,
+    pub remaining: Vec<String>,
+    pub effect: String,
+    pub error_kind: Option<String>,
+    pub retry_of: Option<u64>,
+    pub explicit_target: Option<String>,
+}
+struct Submission {
+    request: OperationRequest,
+    confirmed_delete: bool,
+    decision: Option<ConflictDecision>,
+    retry_of: Option<OperationId>,
+}
 
 #[derive(Serialize, Deserialize)]
 struct StoredOperationHistoryV2 {
@@ -17,6 +37,8 @@ struct StoredOperationHistoryV2 {
 }
 #[derive(Serialize, Deserialize)]
 struct StoredOperationRecordV2 {
+    #[serde(default)]
+    outcome: Option<OperationSummary>,
     id: u64,
     kind: OperationKind,
     sources: Vec<String>,
@@ -40,6 +62,7 @@ pub enum OperationState {
     Queued,
     Running,
     Completed,
+    CancelRequested,
     Failed(String),
     Cancelled,
 }
@@ -69,6 +92,10 @@ pub struct OperationManager {
     next_id: Arc<AtomicU64>,
     cancelled: Arc<Mutex<Vec<(u64, Arc<AtomicBool>)>>>,
     history_path: Option<Arc<PathBuf>>,
+    worker: Arc<Mutex<Option<Sender<Submission>>>>,
+    projections: Arc<Mutex<Vec<OperationProjection>>>,
+    summaries: Arc<Mutex<std::collections::HashMap<u64, OperationSummary>>>,
+    persistence: Arc<Mutex<()>>,
     retention_days: Arc<AtomicU64>,
     recoverable_notices: Arc<Mutex<Vec<RecoverableStateNotice>>>,
 }
@@ -80,6 +107,10 @@ impl Default for OperationManager {
             next_id: Arc::new(AtomicU64::new(0)),
             cancelled: Arc::new(Mutex::new(Vec::new())),
             history_path: None,
+            worker: Arc::new(Mutex::new(None)),
+            projections: Arc::new(Mutex::new(Vec::new())),
+            summaries: Default::default(),
+            persistence: Default::default(),
             retention_days: Arc::new(AtomicU64::new(7)),
             recoverable_notices: Arc::new(Mutex::new(Vec::new())),
         }
@@ -95,7 +126,33 @@ impl OperationManager {
         };
         if let Some(path) = path {
             if let Ok(bytes) = fs::read(path) {
-                let (records, notices) = decode_history(&bytes);
+                let (records, mut notices) = decode_history(&bytes);
+                if let Ok(stored) = serde_json::from_slice::<StoredOperationHistoryV2>(&bytes) {
+                    for record in stored.records {
+                        if !records.iter().any(|r| r.id == record.id) {
+                            continue;
+                        }
+                        if let Some(mut outcome) = record.outcome {
+                            let mut valid = true;
+                            for uri in outcome
+                                .completed
+                                .iter_mut()
+                                .chain(outcome.remaining.iter_mut())
+                                .chain(outcome.explicit_target.iter_mut())
+                            {
+                                match Location::from_uri(uri) {
+                                    Ok(location) => *uri = location.uri().to_owned(),
+                                    Err(_) => valid = false,
+                                }
+                            }
+                            if valid {
+                                manager.summaries.lock().unwrap().insert(record.id, outcome);
+                            } else {
+                                notices.push(RecoverableStateNotice::MalformedRecord);
+                            }
+                        }
+                    }
+                }
                 *manager.records.lock().unwrap() = records;
                 *manager.recoverable_notices.lock().unwrap() = notices;
             }
@@ -129,7 +186,7 @@ impl OperationManager {
         sources: Vec<PathBuf>,
         destination: Option<PathBuf>,
     ) -> u64 {
-        self.submit_inner(kind, sources, destination, None)
+        self.submit_inner(kind, sources, destination, None, false, None)
     }
 
     pub fn submit_to_target(&self, kind: OperationKind, source: PathBuf, target: PathBuf) -> u64 {
@@ -138,159 +195,276 @@ impl OperationManager {
             vec![source],
             target.parent().map(Path::to_path_buf),
             Some(target),
+            false,
+            None,
         )
     }
 
+    pub fn submit_confirmed_delete(&self, sources: Vec<PathBuf>) -> u64 {
+        self.submit_inner(OperationKind::Delete, sources, None, None, true, None)
+    }
+    pub fn submit_replacing(
+        &self,
+        kind: OperationKind,
+        sources: Vec<PathBuf>,
+        destination: PathBuf,
+    ) -> u64 {
+        self.submit_inner(
+            kind,
+            sources,
+            Some(destination),
+            None,
+            false,
+            Some(ConflictDecision::Replace),
+        )
+    }
     fn submit_inner(
         &self,
         kind: OperationKind,
         sources: Vec<PathBuf>,
         destination: Option<PathBuf>,
         explicit_target: Option<PathBuf>,
+        confirmed_delete: bool,
+        decision: Option<ConflictDecision>,
     ) -> u64 {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
-        let cancel = Arc::new(AtomicBool::new(false));
-        // A placeholder; count_bytes() walks the whole tree and must not run
-        // on the caller's thread (the GTK main loop), or submitting a large
-        // folder copy freezes the app before the record even appears queued.
-        let total = sources.len().max(1);
+        let request = OperationRequest {
+            id: OperationId(self.next_id.fetch_add(1, Ordering::Relaxed) + 1),
+            kind: match kind {
+                OperationKind::Copy => MutationKind::Copy,
+                OperationKind::Move => MutationKind::Move,
+                OperationKind::Trash => MutationKind::Trash,
+                OperationKind::Delete => MutationKind::Delete,
+            },
+            sources: sources
+                .iter()
+                .map(|p| Location::from_local_path(p))
+                .collect(),
+            destination: destination.as_ref().map(|p| Location::from_local_path(p)),
+            explicit_target: explicit_target
+                .as_ref()
+                .map(|p| Location::from_local_path(p)),
+            capability_version: 1,
+            cancellable: gio::Cancellable::new(),
+        };
+        self.enqueue(Submission {
+            request,
+            confirmed_delete,
+            decision,
+            retry_of: None,
+        })
+    }
+    fn enqueue(&self, submission: Submission) -> u64 {
+        let request = &submission.request;
+        let id = request.id.0;
+        let kind = match request.kind {
+            MutationKind::Copy => OperationKind::Copy,
+            MutationKind::Move | MutationKind::Rename => OperationKind::Move,
+            MutationKind::Trash => OperationKind::Trash,
+            MutationKind::Delete => OperationKind::Delete,
+            MutationKind::Create => OperationKind::Copy,
+        };
         self.records.lock().unwrap().push(OperationRecord {
             id,
             kind,
-            source_uris: sources
+            source_uris: request.sources.iter().map(|l| l.uri().to_owned()).collect(),
+            sources: request
+                .sources
                 .iter()
-                .map(|path| Location::from_local_path(path).uri().to_owned())
+                .filter_map(Location::local_path)
                 .collect(),
-            sources: sources.clone(),
-            destination_uri: destination
-                .as_ref()
-                .map(|path| Location::from_local_path(path).uri().to_owned()),
-            destination: destination.clone(),
+            destination_uri: request.destination.as_ref().map(|l| l.uri().to_owned()),
+            destination: request.destination.as_ref().and_then(Location::local_path),
             completed: 0,
-            total,
+            total: request.sources.len().max(1),
             state: OperationState::Queued,
             finished_at: None,
         });
-        self.cancelled.lock().unwrap().push((id, cancel.clone()));
-        let records = self.records.clone();
-        let manager = self.clone();
-        std::thread::spawn(move || {
-            update(&records, id, |record| {
-                record.state = OperationState::Running
-            });
-            if kind == OperationKind::Copy {
-                // Progress is tracked in bytes, not file count: a single huge
-                // file is one "file" but the transfer still needs to show
-                // motion throughout, not just jump from 0% to 100%.
-                let counted_total = (FileOperations::count_bytes(&sources) as usize).max(1);
-                update(&records, id, |record| record.total = counted_total);
-                let progress_records = records.clone();
-                let mut completed = 0usize;
-                let mut on_progress = move |bytes: u64| {
-                    completed += bytes as usize;
-                    update(&progress_records, id, |record| record.completed = completed);
-                };
-                let result = match &explicit_target {
-                    Some(target) => sources.first().map_or(Ok(()), |source| {
-                        FileOperations::copy_to_target_with_progress(
-                            source,
-                            target,
-                            &cancel,
-                            &mut on_progress,
-                        )
-                    }),
-                    None => FileOperations::copy_with_progress(
-                        &sources,
-                        destination.as_deref().expect("copy requires destination"),
-                        &cancel,
-                        &mut on_progress,
-                    ),
-                };
-                finish(&records, &manager, id, result);
-                return;
-            }
-            for (index, source) in sources.iter().enumerate() {
-                if cancel.load(Ordering::Relaxed) {
-                    update(&records, id, |record| {
-                        record.state = OperationState::Cancelled;
-                        record.finished_at = Some(now());
-                    });
-                    manager.persist_history();
-                    return;
-                }
-                let result = match kind {
-                    OperationKind::Move => match &explicit_target {
-                        Some(target) => FileOperations::move_to_target(source, target),
-                        None => FileOperations::move_to(
-                            &[source.clone()],
-                            destination.as_deref().expect("move requires destination"),
-                        ),
-                    },
-                    OperationKind::Trash => FileOperations::move_to_trash(&[source.clone()]),
-                    OperationKind::Delete => FileOperations::delete_permanently(&[source.clone()]),
-                    OperationKind::Copy => unreachable!("copy is handled above"),
-                };
-                match result {
-                    Ok(()) => update(&records, id, |record| record.completed = index + 1),
-                    Err(error) => {
-                        update(&records, id, |record| {
-                            record.state = OperationState::Failed(error.to_string());
-                            record.finished_at = Some(now());
-                        });
-                        manager.persist_history();
-                        return;
-                    }
-                }
-            }
-            update(&records, id, |record| {
-                record.state = OperationState::Completed;
-                record.finished_at = Some(now());
-            });
-            manager.persist_history();
-        });
+        self.cancelled
+            .lock()
+            .unwrap()
+            .push((id, Arc::new(AtomicBool::new(false))));
+        self.dispatch(submission);
         id
     }
 
-    /// Re-attempts a single failed, local, permission-denied record through
-    /// the polkit-backed helper. Ineligible records (batches, remote/GVfs
-    /// paths, non-permission failures) are rejected before anything runs.
-    pub fn retry_elevated(&self, id: u64) -> Result<(), String> {
-        let record = self
-            .records
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|record| record.id == id)
-            .cloned()
-            .ok_or_else(|| "operation record not found".to_string())?;
-        let mut command = elevated_operations::retry_command(&record).ok_or_else(|| {
-            "this operation cannot be retried with elevated privileges".to_string()
-        })?;
-        update(&self.records, id, |record| {
-            record.state = OperationState::Running
+    fn dispatch(&self, submission: Submission) {
+        let mut worker = self.worker.lock().unwrap();
+        let sender = worker.get_or_insert_with(|| {
+            let (send, receive) = mpsc::channel::<Submission>();
+            let manager = Self {
+                worker: Arc::new(Mutex::new(None)),
+                ..self.clone()
+            };
+            std::thread::spawn(move || {
+                let context = glib::MainContext::new();
+                let _guard = context.acquire().unwrap();
+                let adapter = Rc::new(GioOperations::new(context.clone()));
+                let coordinator = OperationCoordinator::new(adapter.clone());
+                loop {
+                    match receive.recv_timeout(std::time::Duration::from_millis(2)) {
+                        Ok(submission) => {
+                            let request = submission.request;
+                            let id = request.id.0;
+                            let result = if let Some(original) = submission.retry_of {
+                                adapter.authorize_elevated_retry(request.id);
+                                coordinator.submit_linked_retry(
+                                    request,
+                                    GioOperations::local_capabilities(),
+                                    original,
+                                )
+                            } else if submission.confirmed_delete {
+                                coordinator.submit_confirmed_delete(
+                                    request,
+                                    GioOperations::local_capabilities(),
+                                )
+                            } else if let Some(decision) = submission.decision {
+                                coordinator.submit_with_decision(
+                                    request,
+                                    GioOperations::local_capabilities(),
+                                    decision,
+                                )
+                            } else {
+                                coordinator.submit(request, GioOperations::local_capabilities())
+                            };
+                            if let Err(error) = result {
+                                update(&manager.records, id, |r| {
+                                    r.state = OperationState::Failed(error.to_string());
+                                    r.finished_at = Some(now());
+                                });
+                                manager.persist_history();
+                            }
+                        }
+                        Err(mpsc::RecvTimeoutError::Disconnected) => {
+                            for p in coordinator.records() {
+                                coordinator.cancel(p.id);
+                            }
+                            while !coordinator.active_lock_keys().is_empty() {
+                                context.iteration(true);
+                            }
+                            manager.sync_projections(&coordinator);
+                            break;
+                        }
+                        Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    }
+                    for (id, flag) in manager.cancelled.lock().unwrap().iter() {
+                        if flag.load(Ordering::Relaxed) {
+                            coordinator.cancel(OperationId(*id));
+                        }
+                    }
+                    while context.pending() {
+                        context.iteration(false);
+                    }
+                    manager.sync_projections(&coordinator);
+                }
+            });
+            send
         });
-        let records = self.records.clone();
-        let manager = self.clone();
-        std::thread::spawn(move || {
-            let outcome = command.status();
-            match outcome {
-                Ok(status) if status.success() => update(&records, id, |record| {
-                    record.state = OperationState::Completed;
-                    record.finished_at = Some(now());
-                }),
-                Ok(status) => update(&records, id, |record| {
-                    record.state =
-                        OperationState::Failed(format!("Elevated retry exited with {status}"));
-                    record.finished_at = Some(now());
-                }),
-                Err(error) => update(&records, id, |record| {
-                    record.state = OperationState::Failed(error.to_string());
-                    record.finished_at = Some(now());
-                }),
+        let _ = sender.send(submission);
+    }
+
+    fn sync_projections(&self, coordinator: &OperationCoordinator) {
+        let projections = coordinator.records();
+        let mut terminal_changed = false;
+        for p in &projections {
+            if p.events.last().is_some_and(|e| e.is_terminal()) {
+                self.summaries.lock().unwrap().insert(
+                    p.id.0,
+                    OperationSummary {
+                        completed: p
+                            .completion
+                            .completed
+                            .iter()
+                            .map(|l| l.uri().to_owned())
+                            .collect(),
+                        remaining: p
+                            .completion
+                            .remaining
+                            .iter()
+                            .map(|l| l.uri().to_owned())
+                            .collect(),
+                        effect: format!("{:?}", p.change),
+                        error_kind: if let ProjectedState::Failed(error) = &p.state {
+                            Some(format!("{:?}", error.kind))
+                        } else {
+                            None
+                        },
+                        retry_of: p.retry_of.map(|id| id.0),
+                        explicit_target: p
+                            .request
+                            .explicit_target
+                            .as_ref()
+                            .map(|l| l.uri().to_owned()),
+                    },
+                );
             }
-            manager.persist_history();
+            update(&self.records, p.id.0, |record| {
+                let state = match &p.state {
+                    ProjectedState::Queued => OperationState::Queued,
+                    ProjectedState::Running => OperationState::Running,
+                    ProjectedState::CancelRequested => OperationState::CancelRequested,
+                    ProjectedState::Succeeded => OperationState::Completed,
+                    ProjectedState::Failed(error) => OperationState::Failed(error.to_string()),
+                    ProjectedState::Cancelled(_) => OperationState::Cancelled,
+                };
+                record.state = state;
+                record.completed =
+                    p.progress
+                        .completed_bytes
+                        .unwrap_or(p.progress.completed_items) as usize;
+                record.total = p
+                    .progress
+                    .total_bytes
+                    .or(p.progress.total_items)
+                    .unwrap_or(record.total as u64) as usize;
+                if p.events.last().is_some_and(|e| e.is_terminal()) && record.finished_at.is_none()
+                {
+                    record.finished_at = Some(now());
+                    terminal_changed = true;
+                }
+            });
+        }
+        *self.projections.lock().unwrap() = projections;
+        if terminal_changed {
+            self.persist_history();
+        }
+    }
+
+    pub fn projections(&self) -> Vec<OperationProjection> {
+        self.projections.lock().unwrap().clone()
+    }
+
+    /// An explicit privileged retry creates a new, linked operation.
+    pub fn retry_elevated(&self, id: u64) -> Result<(), String> {
+        let original = self
+            .projections()
+            .into_iter()
+            .find(|p| p.id.0 == id)
+            .ok_or_else(|| "operation record not eligible".to_string())?;
+        let new_id = OperationId(self.next_id.fetch_add(1, Ordering::Relaxed) + 1);
+        let request = crate::application::operations::elevated_retry_request(&original, new_id)
+            .map_err(|e| e.to_string())?;
+        self.enqueue(Submission {
+            request,
+            confirmed_delete: false,
+            decision: None,
+            retry_of: Some(original.id),
         });
         Ok(())
+    }
+    pub fn summary(&self, id: u64) -> Option<OperationSummary> {
+        self.summaries.lock().unwrap().get(&id).cloned()
+    }
+    pub fn can_retry_elevated(&self, id: u64) -> bool {
+        self.projections()
+            .iter()
+            .find(|p| p.id.0 == id)
+            .is_some_and(|p| {
+                crate::application::operations::elevated_retry_request(
+                    p,
+                    OperationId(self.next_id.load(Ordering::Relaxed).saturating_add(1)),
+                )
+                .is_ok()
+            })
     }
 
     pub fn records(&self) -> Vec<OperationRecord> {
@@ -305,17 +479,14 @@ impl OperationManager {
             .filter(|record| {
                 matches!(
                     record.state,
-                    OperationState::Queued | OperationState::Running
+                    OperationState::Queued
+                        | OperationState::Running
+                        | OperationState::CancelRequested
                 )
             })
             .count()
     }
-    /// Signals the operation's own thread to stop *and* immediately marks
-    /// the record Cancelled, rather than waiting for that thread to notice
-    /// the flag. If the thread is still running, its own completion write
-    /// will simply overwrite this again; if it never got scheduled (or died
-    /// without reporting), the record no longer sits stuck forever with a
-    /// Cancel button that visibly does nothing.
+    /// Records cancellation intent. Only backend acknowledgement is terminal.
     pub fn cancel(&self, id: u64) {
         if let Some((_, flag)) = self
             .cancelled
@@ -329,13 +500,11 @@ impl OperationManager {
         update(&self.records, id, |record| {
             if matches!(
                 record.state,
-                OperationState::Queued | OperationState::Running
+                OperationState::Queued | OperationState::Running | OperationState::CancelRequested
             ) {
-                record.state = OperationState::Cancelled;
-                record.finished_at = Some(now());
+                record.state = OperationState::CancelRequested;
             }
         });
-        self.persist_history();
     }
     /// Signals every currently active record to stop. Cancellation still
     /// happens on each operation's own background thread, so callers that
@@ -349,7 +518,7 @@ impl OperationManager {
         self.records.lock().unwrap().retain(|record| {
             matches!(
                 record.state,
-                OperationState::Queued | OperationState::Running
+                OperationState::Queued | OperationState::Running | OperationState::CancelRequested
             )
         });
         self.persist_history();
@@ -359,7 +528,7 @@ impl OperationManager {
         self.records.lock().unwrap().retain(|record| {
             matches!(
                 record.state,
-                OperationState::Queued | OperationState::Running
+                OperationState::Queued | OperationState::Running | OperationState::CancelRequested
             ) || record
                 .finished_at
                 .is_some_and(|finished| finished >= cutoff)
@@ -367,6 +536,7 @@ impl OperationManager {
         self.persist_history();
     }
     fn persist_history(&self) {
+        let _guard = self.persistence.lock().unwrap();
         let Some(path) = &self.history_path else {
             return;
         };
@@ -376,24 +546,39 @@ impl OperationManager {
             .filter(|record| {
                 !matches!(
                     record.state,
-                    OperationState::Queued | OperationState::Running
-                )
+                    OperationState::Queued
+                        | OperationState::Running
+                        | OperationState::CancelRequested
+                ) && record.finished_at.is_some_and(|finished| {
+                    finished >= now() - self.retention_days.load(Ordering::Relaxed) as i64 * 86_400
+                })
             })
             .collect();
         if let Some(parent) = path.parent() {
             let _ = fs::create_dir_all(parent);
         }
         if let Ok(bytes) = serde_json::to_vec_pretty(&StoredOperationHistoryV2 {
-            schema_version: 2,
-            records: records.iter().map(stored_record).collect(),
+            schema_version: 3,
+            records: records
+                .iter()
+                .map(|record| {
+                    let mut stored = stored_record(record);
+                    stored.outcome = self.summary(record.id);
+                    stored
+                })
+                .collect(),
         }) {
-            let _ = fs::write(path.as_ref(), bytes);
+            let temporary = path.with_extension("json.tmp");
+            if fs::write(&temporary, bytes).is_ok() {
+                let _ = fs::rename(temporary, path.as_ref());
+            }
         }
     }
 }
 
 fn stored_record(record: &OperationRecord) -> StoredOperationRecordV2 {
     StoredOperationRecordV2 {
+        outcome: None,
         id: record.id,
         kind: record.kind,
         sources: if record.source_uris.is_empty() {
@@ -420,6 +605,12 @@ fn stored_record(record: &OperationRecord) -> StoredOperationRecordV2 {
 
 fn decode_history(bytes: &[u8]) -> (Vec<OperationRecord>, Vec<RecoverableStateNotice>) {
     if let Ok(mut records) = serde_json::from_slice::<Vec<OperationRecord>>(bytes) {
+        records.retain(|r| {
+            !matches!(
+                r.state,
+                OperationState::Queued | OperationState::Running | OperationState::CancelRequested
+            )
+        });
         for record in &mut records {
             if record.source_uris.is_empty() {
                 record.source_uris = record
@@ -443,11 +634,12 @@ fn decode_history(bytes: &[u8]) -> (Vec<OperationRecord>, Vec<RecoverableStateNo
     let Some(object) = value.as_object() else {
         return (Vec::new(), vec![RecoverableStateNotice::MalformedRecord]);
     };
-    if object
-        .get("schema_version")
-        .and_then(serde_json::Value::as_u64)
-        != Some(2)
-    {
+    if !matches!(
+        object
+            .get("schema_version")
+            .and_then(serde_json::Value::as_u64),
+        Some(2 | 3)
+    ) {
         return (Vec::new(), vec![RecoverableStateNotice::UnsupportedSchema]);
     }
     let Some(stored_records) = object.get("records").and_then(serde_json::Value::as_array) else {
@@ -460,6 +652,12 @@ fn decode_history(bytes: &[u8]) -> (Vec<OperationRecord>, Vec<RecoverableStateNo
             notices.push(RecoverableStateNotice::MalformedRecord);
             continue;
         };
+        if matches!(
+            record.state,
+            OperationState::Queued | OperationState::Running | OperationState::CancelRequested
+        ) {
+            continue;
+        }
         let source_locations = record
             .sources
             .iter()
@@ -529,24 +727,6 @@ fn update(
     }
 }
 
-fn finish(
-    records: &Arc<Mutex<Vec<OperationRecord>>>,
-    manager: &OperationManager,
-    id: u64,
-    result: io::Result<()>,
-) {
-    let state = match result {
-        Ok(()) => OperationState::Completed,
-        Err(error) if error.kind() == io::ErrorKind::Interrupted => OperationState::Cancelled,
-        Err(error) => OperationState::Failed(error.to_string()),
-    };
-    update(records, id, |record| {
-        record.state = state;
-        record.finished_at = Some(now());
-    });
-    manager.persist_history();
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -609,11 +789,7 @@ mod tests {
     }
 
     #[test]
-    fn cancel_immediately_marks_the_record_cancelled_even_if_no_thread_is_listening() {
-        // Regression guard: cancel() used to only flip an atomic flag for the
-        // operation's own thread to notice. If that thread never got
-        // scheduled (or died before finishing), Cancel visibly did nothing
-        // and the record stayed Queued/Running forever.
+    fn cancel_records_intent_without_claiming_backend_completion() {
         let manager = OperationManager::default();
         manager.records.lock().unwrap().push(OperationRecord {
             id: 1,
@@ -635,15 +811,63 @@ mod tests {
             .into_iter()
             .find(|record| record.id == 1)
             .unwrap();
-        assert_eq!(record.state, OperationState::Cancelled);
-        assert!(record.finished_at.is_some());
-        assert_eq!(manager.active_count(), 0);
+        assert_ne!(record.state, OperationState::Cancelled);
+        assert!(record.finished_at.is_none());
+        assert_eq!(manager.active_count(), 1);
     }
 
     #[test]
     fn retrying_an_unknown_record_is_rejected() {
         let manager = OperationManager::default();
         assert!(manager.retry_elevated(404).is_err());
+    }
+
+    #[test]
+    fn unconfirmed_delete_is_rejected_and_terminal_outcomes_survive_reload() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source");
+        let target = directory.path().join("target");
+        fs::write(&source, "keep").unwrap();
+        fs::create_dir(&target).unwrap();
+        let path = directory.path().join("history.json");
+        let manager = OperationManager::load_history(Some(path.clone()), 7);
+        let id = manager.submit(OperationKind::Delete, vec![source.clone()], None);
+        let record = wait_for_finished(&manager, id);
+        assert!(matches!(record.state, OperationState::Failed(_)));
+        assert!(source.exists());
+        let copied = manager.submit(OperationKind::Copy, vec![source.clone()], Some(target));
+        wait_for_finished(&manager, copied);
+        manager.persist_history();
+        let stored: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(stored["schema_version"], 3);
+        assert_eq!(
+            stored["records"][1]["outcome"]["completed"],
+            serde_json::json!([Location::from_local_path(&source).uri()])
+        );
+        assert_eq!(stored["records"][1]["outcome"]["effect"], "Complete");
+        let loaded = OperationManager::load_history(Some(path.clone()), 7);
+        loaded.persist_history();
+        let saved: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        assert_eq!(
+            saved["records"][1]["outcome"],
+            stored["records"][1]["outcome"]
+        );
+    }
+
+    #[test]
+    fn history_rejects_unsafe_outcome_uris_and_does_not_restore_active_jobs() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("history.json");
+        fs::write(&path, br#"{"schema_version":3,"records":[{"id":1,"kind":"Copy","sources":["file:///a"],"destination":null,"completed":1,"total":1,"state":"Completed","finished_at":2000000000,"outcome":{"completed":["sftp://name:secret@host/item"],"remaining":[],"effect":"Complete","error_kind":null,"retry_of":null,"explicit_target":null}},{"id":2,"kind":"Copy","sources":["file:///b"],"destination":null,"completed":0,"total":1,"state":"Running","finished_at":2000000000}]}"#).unwrap();
+        let manager = OperationManager::load_history(Some(path.clone()), 7);
+        assert_eq!(manager.records().len(), 1);
+        assert!(manager.summary(1).is_none());
+        assert!(manager
+            .recoverable_notices()
+            .contains(&RecoverableStateNotice::MalformedRecord));
+        assert!(!String::from_utf8(fs::read(path).unwrap())
+            .unwrap()
+            .contains("secret"));
     }
 
     #[test]
@@ -689,7 +913,7 @@ mod tests {
         manager.persist_history();
         let saved: serde_json::Value =
             serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-        assert_eq!(saved["schema_version"], 2);
+        assert_eq!(saved["schema_version"], 3);
         assert_eq!(
             saved["records"][0]["sources"],
             serde_json::json!(["file:///tmp/source"])
@@ -825,39 +1049,20 @@ mod tests {
     }
 
     #[test]
-    fn copying_a_single_large_file_reports_byte_progress_not_a_single_frozen_unit() {
-        // Regression guard for the reported bug: a single big file used to
-        // be "1 of 1" the whole transfer (no visible progress until done).
+    fn copying_a_single_large_file_retains_backend_byte_progress_events() {
+        // GIO can clone/reflink a file atomically; elapsed-time sampling cannot
+        // require intermediate bytes that the backend never reported.
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("big.bin");
         let destination = directory.path().join("destination");
         fs::create_dir(&destination).unwrap();
         fs::write(&source, vec![0u8; 5 * (1 << 20)]).unwrap();
         let manager = OperationManager::default();
-
         let id = manager.submit(OperationKind::Copy, vec![source], Some(destination));
-
-        let placeholder_units_total = 1; // sources.len().max(1), the pre-count placeholder
-        let mut saw_mid_transfer_progress = false;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while std::time::Instant::now() < deadline {
-            if let Some(record) = manager.records().into_iter().find(|record| record.id == id) {
-                if record.total > placeholder_units_total
-                    && record.completed > 0
-                    && record.completed < record.total
-                {
-                    saw_mid_transfer_progress = true;
-                }
-                if record.finished_at.is_some() {
-                    break;
-                }
-            }
-        }
-
-        assert!(
-            saw_mid_transfer_progress,
-            "never observed byte-level progress mid-transfer for a single large file"
-        );
+        let record = wait_for_finished(&manager, id);
+        assert_eq!(record.completed, 5 * (1 << 20));
+        assert_eq!(record.total, record.completed);
+        assert_eq!(record.state, OperationState::Completed);
     }
 
     #[test]
