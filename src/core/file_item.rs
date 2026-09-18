@@ -24,6 +24,25 @@ pub struct FileItem {
 }
 
 impl FileItem {
+    /// Projects owned repository metadata into a rendered row without I/O.
+    pub fn from_snapshot(entry: &super::contracts::EntrySnapshot) -> Self {
+        Self {
+            location: entry.location.clone(),
+            identity_key: entry.location.uri().to_owned(),
+            capabilities: entry.capabilities.clone(),
+            name: entry.display_name.clone(),
+            is_dir: matches!(
+                entry.kind,
+                super::contracts::EntryKind::Directory | super::contracts::EntryKind::Shortcut
+            ),
+            size: entry.size.unwrap_or(0),
+            modified: entry.modified.unwrap_or(UNIX_EPOCH),
+            content_type: entry
+                .content_type
+                .clone()
+                .unwrap_or_else(|| "application/octet-stream".into()),
+        }
+    }
     pub fn from_dir_entry(entry: &DirEntry) -> io::Result<Self> {
         // DirEntry::metadata() describes the link itself. fs::metadata follows
         // it, which lets a symbolic link to a folder behave like a folder.

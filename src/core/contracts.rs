@@ -14,6 +14,18 @@ use super::{Location, ResolvedLocation};
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct RequestId(pub u64);
 
+impl RequestId {
+    /// Shared namespace for directory, capability and search requests.
+    pub(crate) fn allocate() -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        Self(
+            NEXT.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+                .expect("request IDs exhausted"),
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct OperationId(pub u64);
 

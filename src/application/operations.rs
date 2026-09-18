@@ -454,9 +454,10 @@ impl OperationCoordinator {
             .iter()
             .find(|r| r.projection.id == request.id)
             .is_some_and(|r| r.projection.retry_of.is_some());
+        let capability_request_id = RequestId::allocate();
         self.backend.inspect_operation_capabilities(
             CapabilityRequest {
-                id: RequestId(request.id.0),
+                id: capability_request_id,
                 location: locations[index].clone(),
                 cancellable: request.cancellable.clone(),
             },
@@ -466,7 +467,7 @@ impl OperationCoordinator {
                 Capability::Create
             },
             Box::new(move |result| {
-                if result.id != RequestId(request.id.0) {
+                if result.id != capability_request_id {
                     return;
                 }
                 if index >= request.sources.len()

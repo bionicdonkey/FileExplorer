@@ -6,6 +6,12 @@ use crate::ui::context_menu::ContextCommand;
 
 use crate::ui::tab_layout::TabLayout;
 
+/// Update a directory tab only when its canonical location has committed.
+pub fn set_location_title(page: &adw::TabPage, location: &crate::core::Location) {
+    page.set_title(&location.display_name());
+    page.set_tooltip(&location.redacted());
+}
+
 #[derive(Clone)]
 pub struct TabStrip {
     pub bar: TabBar,
@@ -38,7 +44,12 @@ impl TabStrip {
             next_view.select_next_page();
         });
 
-        Self { bar, view, previous_button, next_button }
+        Self {
+            bar,
+            view,
+            previous_button,
+            next_button,
+        }
     }
 
     pub fn set_layout(&self, layout: TabLayout) {
@@ -66,11 +77,18 @@ impl TabStrip {
             let menu = GtkBox::new(Orientation::Vertical, 2);
             menu.set_margin_top(6);
             menu.set_margin_bottom(6);
-            for (label, command) in [("Close Tab", ContextCommand::CloseTab), ("Close Other Tabs", ContextCommand::CloseOtherTabs), ("Duplicate Tab", ContextCommand::DuplicateTab)] {
+            for (label, command) in [
+                ("Close Tab", ContextCommand::CloseTab),
+                ("Close Other Tabs", ContextCommand::CloseOtherTabs),
+                ("Duplicate Tab", ContextCommand::DuplicateTab),
+            ] {
                 let button = Button::with_label(label);
                 let handler = handler.clone();
                 let popover = popover.clone();
-                button.connect_clicked(move |_| { popover.popdown(); handler(command); });
+                button.connect_clicked(move |_| {
+                    popover.popdown();
+                    handler(command);
+                });
                 menu.append(&button);
             }
             popover.set_child(Some(&menu));
@@ -102,7 +120,10 @@ mod tests {
 
         assert!(!tabs.previous_button.is_visible());
         assert!(!tabs.next_button.is_visible());
-        assert_eq!(tabs.previous_button.tooltip_text().as_deref(), Some("Previous tab"));
+        assert_eq!(
+            tabs.previous_button.tooltip_text().as_deref(),
+            Some("Previous tab")
+        );
         assert_eq!(tabs.next_button.tooltip_text().as_deref(), Some("Next tab"));
         let overflow = calculate_tab_layout(TabLayoutInput::new(11, 1280));
         let fitting = calculate_tab_layout(TabLayoutInput::new(1, 1280));

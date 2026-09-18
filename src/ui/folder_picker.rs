@@ -54,7 +54,9 @@ pub fn pick_folder<F: Fn(PathBuf) + 'static>(
     let location = Rc::new(RefCell::new(start.clone()));
     let selected: Rc<RefCell<Option<PathBuf>>> = Rc::new(RefCell::new(None));
     let history = Rc::new(RefCell::new(NavigationHistory::new()));
-    history.borrow_mut().push(start);
+    history
+        .borrow_mut()
+        .push(crate::core::Location::from_local_path(&start));
     let listed_folders: Rc<RefCell<Vec<PathBuf>>> = Rc::new(RefCell::new(Vec::new()));
 
     let content = GtkBox::new(Orientation::Vertical, 0);
@@ -150,7 +152,9 @@ pub fn pick_folder<F: Fn(PathBuf) + 'static>(
             *location.borrow_mut() = path.clone();
             *selected.borrow_mut() = None;
             if record_history {
-                history.borrow_mut().push(path.clone());
+                history
+                    .borrow_mut()
+                    .push(crate::core::Location::from_local_path(&path));
             }
             location_bar.set_location(&path);
             back.set_sensitive(history.borrow().can_go_back());
@@ -231,7 +235,10 @@ pub fn pick_folder<F: Fn(PathBuf) + 'static>(
         let history = history.clone();
         let navigate = navigate.clone();
         move |_| {
-            let path = history.borrow_mut().back().map(Path::to_path_buf);
+            let path = history
+                .borrow_mut()
+                .back()
+                .and_then(crate::core::Location::local_path);
             if let Some(path) = path {
                 navigate(path, false);
             }
@@ -241,7 +248,10 @@ pub fn pick_folder<F: Fn(PathBuf) + 'static>(
         let history = history.clone();
         let navigate = navigate.clone();
         move |_| {
-            let path = history.borrow_mut().forward().map(Path::to_path_buf);
+            let path = history
+                .borrow_mut()
+                .forward()
+                .and_then(crate::core::Location::local_path);
             if let Some(path) = path {
                 navigate(path, false);
             }

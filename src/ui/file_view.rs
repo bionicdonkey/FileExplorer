@@ -11,13 +11,16 @@ use gtk::{
     SingleSelection, SortListModel,
 };
 
-use crate::core::directory_model::DirectoryModel;
+use crate::application::navigation::NavigationCoordinator;
+use crate::core::directory_model::sort_items;
 use crate::core::file_item::FileItem;
+use crate::core::navigation::{NavigationStatus, TabContent, TabState};
 use crate::core::sidebar_model::SidebarSection;
 use crate::core::{
     GroupField, ListColumn, ListColumnLayout, Location, SidebarLocation, SidebarNode,
     SortDirection, SortField, ViewMode, ViewOptions,
 };
+use crate::infrastructure::gio_directory::GioDirectoryRepository;
 use crate::ui::context_menu::{
     configure_command_button, delete_command, item_commands, open_with_apps, CommandAvailability,
     ContextCommand, ContextTarget,
@@ -27,27 +30,6 @@ use crate::ui::context_menu::{
 enum ListRow {
     Group(String),
     File(FileItem),
-}
-
-#[derive(Clone, Default)]
-struct ViewNavigationState {
-    remote_uri: Option<String>,
-    section_overview: Option<SidebarSection>,
-}
-
-impl ViewNavigationState {
-    fn set_uri(&mut self, uri: String) {
-        self.remote_uri = Some(uri);
-        self.section_overview = None;
-    }
-
-    fn show_section(&mut self, section: SidebarSection) {
-        self.section_overview = Some(section);
-    }
-
-    fn clear_section(&mut self) -> bool {
-        self.section_overview.take().is_some()
-    }
 }
 
 fn filesystem_space(path: &Path) -> Option<(u64, u64)> {
@@ -83,8 +65,8 @@ pub struct FileView {
     /// Compatibility local-tab path. It is never used as the current URI
     /// identity while a remote location is displayed.
     location: Rc<RefCell<PathBuf>>,
-    current_location: Rc<RefCell<Location>>,
-    navigation_state: Rc<RefCell<ViewNavigationState>>,
+    navigation: NavigationCoordinator,
+    on_location_committed: Rc<RefCell<Option<Box<dyn Fn(Location)>>>>,
     on_navigate: Rc<RefCell<Option<Box<dyn Fn(PathBuf)>>>>,
     on_uri_navigate: Rc<RefCell<Option<Box<dyn Fn(String)>>>>,
     on_context_command: Rc<RefCell<Option<Box<dyn Fn(ContextTarget, ContextCommand)>>>>,
@@ -93,21 +75,35 @@ pub struct FileView {
     selected_target: Rc<RefCell<Option<ContextTarget>>>,
     on_command_availability_changed: Rc<RefCell<Option<Box<dyn Fn(CommandAvailability)>>>>,
     pending_cut: Rc<RefCell<Option<PathBuf>>>,
-    search_results: Rc<RefCell<Option<Vec<FileItem>>>>,
     is_quick_access_location: Rc<RefCell<Option<Rc<dyn Fn(&Path) -> bool>>>>,
 }
 
 impl FileView {
     pub fn new(location: Rc<RefCell<PathBuf>>) -> Self {
+        Self::new_with_repository(
+            location,
+            Rc::new(GioDirectoryRepository::new(
+                glib::MainContext::ref_thread_default(),
+            )),
+        )
+    }
+
+    pub fn new_with_repository(
+        location: Rc<RefCell<PathBuf>>,
+        repository: Rc<dyn crate::core::ports::DirectoryRepository>,
+    ) -> Self {
         let scroll = ScrolledWindow::new();
         scroll.set_vexpand(true);
         let on_navigate = Rc::new(RefCell::new(None));
         let current_location = Location::from_local_path(&location.borrow());
         let view = Self {
             widget: scroll,
-            current_location: Rc::new(RefCell::new(current_location)),
+            navigation: NavigationCoordinator::new(
+                Rc::new(RefCell::new(TabState::new(current_location))),
+                repository,
+            ),
+            on_location_committed: Rc::new(RefCell::new(None)),
             location,
-            navigation_state: Rc::new(RefCell::new(ViewNavigationState::default())),
             on_navigate,
             on_uri_navigate: Rc::new(RefCell::new(None)),
             on_context_command: Rc::new(RefCell::new(None)),
@@ -116,7 +112,6 @@ impl FileView {
             selected_target: Rc::new(RefCell::new(None)),
             on_command_availability_changed: Rc::new(RefCell::new(None)),
             pending_cut: Rc::new(RefCell::new(None)),
-            search_results: Rc::new(RefCell::new(None)),
             is_quick_access_location: Rc::new(RefCell::new(None)),
         };
         let background_view = view.clone();
@@ -138,78 +133,128 @@ impl FileView {
             }
         });
         view.widget.add_controller(background);
-        view.reload();
+        view.refresh();
         view
     }
 
+    pub fn tab_state(&self) -> Rc<RefCell<TabState>> {
+        self.navigation.state.clone()
+    }
+
     pub fn set_location(&self, path: PathBuf) {
-        *self.navigation_state.borrow_mut() = ViewNavigationState::default();
-        *self.current_location.borrow_mut() = Location::from_local_path(&path);
-        *self.location.borrow_mut() = path;
-        *self.selected_target.borrow_mut() = None;
-        *self.search_results.borrow_mut() = None;
-        self.notify_command_availability_changed();
-        self.reload();
+        self.navigate(Location::from_local_path(&path));
     }
 
     pub fn set_uri(&self, uri: String) {
-        let Ok(current_location) = Location::from_uri(&uri) else {
-            return;
-        };
-        self.navigation_state
-            .borrow_mut()
-            .set_uri(current_location.uri().to_owned());
-        *self.current_location.borrow_mut() = current_location;
-        *self.selected_target.borrow_mut() = None;
-        *self.search_results.borrow_mut() = None;
-        self.notify_command_availability_changed();
-        self.widget
-            .set_child(Some(&Label::new(Some("Connecting to remote location…"))));
+        if let Ok(location) = Location::from_uri(&uri) {
+            self.navigate(location);
+        }
+    }
 
-        let location = gio::File::for_uri(&uri);
-        let is_mountable = location
-            .query_info(
-                "standard::type",
-                gio::FileQueryInfoFlags::NONE,
-                gio::Cancellable::NONE,
-            )
-            .map(|info| is_mountable_file_type(info.file_type()))
-            .unwrap_or(false);
-        let parent = self.widget.root().and_downcast::<gtk::Window>();
-        let operation = gtk::MountOperation::new(parent.as_ref());
-        let keep_operation = operation.clone();
+    fn navigate(&self, location: Location) {
         let view = self.clone();
+        self.navigation.navigate(location, move |accepted| {
+            if accepted {
+                view.navigation_finished();
+            }
+        });
+        self.show_loading();
+    }
 
-        if is_mountable {
-            location.mount_mountable(
-                gio::MountMountFlags::NONE,
-                Some(&operation),
-                gio::Cancellable::NONE,
-                move |result| {
-                    let _keep_operation_alive = &keep_operation;
-                    if let Ok(mounted_root) = result {
-                        if let Ok(mounted_location) = Location::try_from_file(mounted_root) {
-                            view.navigation_state.borrow_mut().remote_uri =
-                                Some(mounted_location.uri().to_owned());
-                            *view.current_location.borrow_mut() = mounted_location;
-                            view.notify_command_availability_changed();
-                        }
+    pub fn go_back(&self) {
+        let view = self.clone();
+        if self.navigation.back(move |accepted| {
+            if accepted {
+                view.navigation_finished();
+            }
+        }) {
+            self.show_loading();
+        }
+    }
+
+    pub fn go_forward(&self) {
+        let view = self.clone();
+        if self.navigation.forward(move |accepted| {
+            if accepted {
+                view.navigation_finished();
+            }
+        }) {
+            self.show_loading();
+        }
+    }
+
+    pub fn close(&self) {
+        self.navigation.close_tab();
+    }
+
+    pub fn set_location_committed_handler(&self, callback: impl Fn(Location) + 'static) {
+        *self.on_location_committed.borrow_mut() = Some(Box::new(callback));
+    }
+
+    fn show_loading(&self) {
+        if self.navigation.state.borrow().directory.is_none() && self.section_title().is_none() {
+            self.widget
+                .set_child(Some(&Label::new(Some("Loading folder…"))));
+        }
+    }
+
+    fn navigation_finished(&self) {
+        let state = self.navigation.state.borrow();
+        let location = state.location.clone();
+        let succeeded = matches!(state.status, NavigationStatus::Ready);
+        drop(state);
+        if succeeded {
+            if let Some(path) = location.local_path() {
+                *self.location.borrow_mut() = path;
+            }
+            let state = self.navigation.state.borrow();
+            *self.selected_target.borrow_mut() = state.directory.as_ref().and_then(|snapshot| {
+                snapshot
+                    .entries
+                    .iter()
+                    .find(|entry| {
+                        state
+                            .selection_keys
+                            .iter()
+                            .any(|key| key == entry.location.uri())
+                    })
+                    .map(|entry| file_target(&FileItem::from_snapshot(entry)))
+            });
+            drop(state);
+            self.notify_command_availability_changed();
+            if let Some(callback) = self.on_location_committed.borrow().as_ref() {
+                callback(location);
+            }
+        }
+        self.reload();
+    }
+
+    fn show_error(&self) {
+        let status = self.navigation.state.borrow().status.clone();
+        if let NavigationStatus::Failed { error, .. } = status {
+            // Retain the successful listing and attach a non-modal retry message.
+            let content = self.widget.child();
+            self.widget.set_child(gtk::Widget::NONE);
+            let box_ = GtkBox::new(Orientation::Vertical, 8);
+            let banner = GtkBox::new(Orientation::Horizontal, 8);
+            banner.append(&Label::new(Some(error.message_key)));
+            let retry = Button::with_label("Retry");
+            let view = self.clone();
+            retry.connect_clicked(move |_| {
+                let view_done = view.clone();
+                view.navigation.retry(move |accepted| {
+                    if accepted {
+                        view_done.navigation_finished();
                     }
-                    view.reload();
-                },
-            );
-        } else {
-            location.mount_enclosing_volume(
-                gio::MountMountFlags::NONE,
-                Some(&operation),
-                gio::Cancellable::NONE,
-                move |_| {
-                    let _keep_operation_alive = &keep_operation;
-                    // This operation reports an error when the location is already mounted;
-                    // in either case enumeration is the definitive result.
-                    view.reload();
-                },
-            );
+                });
+                view.show_loading();
+            });
+            banner.append(&retry);
+            box_.append(&banner);
+            if let Some(content) = content {
+                box_.append(&content);
+            }
+            self.widget.set_child(Some(&box_));
         }
     }
 
@@ -241,7 +286,7 @@ impl FileView {
     }
 
     pub fn current_location(&self) -> Location {
-        self.current_location.borrow().clone()
+        self.navigation.state.borrow().location.clone()
     }
 
     pub fn command_availability(&self) -> CommandAvailability {
@@ -258,6 +303,13 @@ impl FileView {
     }
 
     fn notify_command_availability_changed(&self) {
+        self.navigation.state.borrow_mut().selection_keys =
+            match self.selected_target.borrow().as_ref() {
+                Some(ContextTarget::File(item) | ContextTarget::Folder(item)) => {
+                    vec![item.identity_key().to_owned()]
+                }
+                _ => vec![],
+            };
         if let Some(callback) = self.on_command_availability_changed.borrow().as_ref() {
             callback(self.command_availability());
         }
@@ -295,99 +347,122 @@ impl FileView {
     }
 
     pub fn uri(&self) -> Option<String> {
-        self.navigation_state.borrow().remote_uri.clone()
+        let location = self.current_location();
+        location
+            .local_path()
+            .is_none()
+            .then(|| location.uri().to_owned())
     }
 
     /// Replaces the current listing with search results, which may include
     /// items outside the folder currently open in this view.
     pub fn show_search_results(&self, items: Vec<FileItem>) {
-        *self.search_results.borrow_mut() = Some(items);
+        let mut state = self.navigation.state.borrow_mut();
+        state.cancel_pending();
+        state.content = TabContent::Search {
+            underlying: state.location.clone(),
+            items,
+        };
+        drop(state);
         self.reload();
     }
 
-    /// Returns the view to its normal folder listing.
     pub fn clear_search_results(&self) {
-        if self.search_results.borrow().is_none() {
+        if self.is_showing_search_results() {
+            self.navigation.state.borrow_mut().restore_directory();
+            self.reload();
+        }
+    }
+
+    pub fn refresh(&self) {
+        if self.section_title().is_some() {
+            self.reload();
             return;
         }
-        *self.search_results.borrow_mut() = None;
-        self.reload();
-    }
-
-    /// Reloads the displayed canonical location without converting a remote
-    /// tab back to the stale local compatibility path.
-    pub fn refresh(&self) {
-        self.reload();
+        let view = self.clone();
+        self.navigation.refresh(move |accepted| {
+            if accepted {
+                view.navigation_finished();
+            }
+        });
+        self.show_loading();
     }
 
     pub fn is_showing_search_results(&self) -> bool {
-        self.search_results.borrow().is_some()
+        matches!(
+            self.navigation.state.borrow().content,
+            TabContent::Search { .. }
+        )
     }
 
-    /// Displays the immediate entries belonging to a sidebar section. Sections
-    /// are virtual locations, so they intentionally do not alter the tab's
-    /// filesystem location or navigation history.
     pub fn show_section_overview(&self, section: SidebarSection) {
         *self.selected_target.borrow_mut() = None;
-        *self.search_results.borrow_mut() = None;
+        self.navigation.state.borrow_mut().show_section(section);
         self.notify_command_availability_changed();
-        self.navigation_state.borrow_mut().show_section(section);
         self.reload();
     }
 
-    /// Leaves the virtual overview and restores the tab's underlying location.
     pub fn clear_section_overview(&self) -> bool {
-        let was_showing = self.navigation_state.borrow_mut().clear_section();
-        if was_showing {
-            self.reload();
+        if self.section_title().is_none() {
+            return false;
         }
-        was_showing
+        self.navigation.state.borrow_mut().restore_directory();
+        if self.navigation.state.borrow().directory.is_some() {
+            self.reload();
+        } else {
+            self.refresh();
+        }
+        true
     }
 
     pub fn section_title(&self) -> Option<String> {
-        self.navigation_state
-            .borrow()
-            .section_overview
-            .as_ref()
-            .map(|section| section.title.clone())
+        match &self.navigation.state.borrow().content {
+            TabContent::SectionOverview { section, .. } => Some(section.title.clone()),
+            _ => None,
+        }
     }
 
     #[cfg(test)]
     pub(crate) fn section_overview_node_count(&self) -> usize {
-        self.navigation_state
-            .borrow()
-            .section_overview
-            .as_ref()
-            .map_or(0, |section| section.nodes.len())
+        match &self.navigation.state.borrow().content {
+            TabContent::SectionOverview { section, .. } => section.nodes.len(),
+            _ => 0,
+        }
     }
 
+    /// Repaints owned metadata; never enumerates or queries the filesystem.
     fn reload(&self) {
-        if let Some(section) = self.navigation_state.borrow().section_overview.clone() {
-            self.render_section_overview(&section);
-            return;
-        }
+        let state = self.navigation.state.borrow().clone();
         let options = self.options();
-        if let Some(items) = self.search_results.borrow().clone() {
-            self.render(items, &options);
-            return;
-        }
-        let result = self
-            .navigation_state
-            .borrow()
-            .remote_uri
-            .as_deref()
-            .map(|uri| DirectoryModel::load_uri_with_options(uri, &options))
-            .unwrap_or_else(|| {
-                DirectoryModel::load_with_options(&self.location.borrow(), &options)
-            });
-        match result {
-            Ok(items) => self.render(items, &options),
-            Err(error) => {
-                self.widget.set_child(Some(&Label::new(Some(&format!(
-                    "Unable to open folder: {error}"
-                )))));
+        let mut items = match state.content {
+            TabContent::SectionOverview { section, .. } => {
+                self.render_section_overview(&section);
+                return;
             }
-        }
+            TabContent::Search { items, .. } => items,
+            _ => match state.directory {
+                Some(snapshot) => snapshot
+                    .entries
+                    .iter()
+                    .filter(|entry| options.show_hidden || !entry.display_name.starts_with('.'))
+                    .map(FileItem::from_snapshot)
+                    .collect(),
+                None => {
+                    self.widget.set_child(Some(&Label::new(Some(
+                        if matches!(state.status, NavigationStatus::Loading(_)) {
+                            "Loading folder…"
+                        } else {
+                            "No folder loaded"
+                        },
+                    ))));
+                    self.show_error();
+                    return;
+                }
+            },
+        };
+        sort_items(&mut items, &options);
+        self.render(items, &options);
+        self.show_error();
     }
 
     fn render_section_overview(&self, section: &SidebarSection) {
@@ -547,11 +622,33 @@ impl FileView {
             Some(sorted) => SingleSelection::new(Some(sorted.clone())),
             None => SingleSelection::new(Some(store)),
         };
+        selection.set_autoselect(false);
+        selection.set_can_unselect(true);
+        let selected_key = self
+            .navigation
+            .state
+            .borrow()
+            .selection_keys
+            .first()
+            .cloned();
+        let selected_position = (0..selection.n_items()).find(|position| {
+            selection
+                .item(*position)
+                .and_downcast::<glib::BoxedAnyObject>()
+                .and_then(|object| file_target_from_row(&object.borrow::<ListRow>()))
+                .is_some_and(|target| match target {
+                    ContextTarget::File(item) | ContextTarget::Folder(item) => {
+                        selected_key.as_deref() == Some(item.identity_key())
+                    }
+                    _ => false,
+                })
+        });
+        selection.set_selected(selected_position.unwrap_or(gtk::INVALID_LIST_POSITION));
         let selected_target = self.selected_target.clone();
         let availability_view = self.clone();
-        selection.connect_selection_changed(move |model, position, _| {
+        selection.connect_selection_changed(move |model, _, _| {
             *selected_target.borrow_mut() = model
-                .item(position)
+                .selected_item()
                 .and_downcast::<glib::BoxedAnyObject>()
                 .and_then(|object| file_target_from_row(&object.borrow::<ListRow>()));
             availability_view.notify_command_availability_changed();
@@ -644,6 +741,13 @@ impl FileView {
     }
 
     fn grid_view(&self, items: &[FileItem], options: &ViewOptions) -> FlowBox {
+        let selected_key = self
+            .navigation
+            .state
+            .borrow()
+            .selection_keys
+            .first()
+            .cloned();
         let layout = options.grid_size.grid_layout();
         let grid = FlowBox::new();
         grid.set_selection_mode(gtk::SelectionMode::Single);
@@ -722,6 +826,11 @@ impl FileView {
             });
             tile.add_controller(gesture);
             grid.append(&tile);
+            if selected_key.as_deref() == Some(item.identity_key()) {
+                if let Some(child) = tile.parent().and_downcast::<gtk::FlowBoxChild>() {
+                    grid.select_child(&child);
+                }
+            }
         }
         grid
     }
@@ -765,10 +874,6 @@ impl FileView {
 /// lists may be reordered by GTK's live column sorter.
 fn uses_native_row_sorting(group_field: GroupField) -> bool {
     group_field == GroupField::None
-}
-
-fn is_mountable_file_type(file_type: gio::FileType) -> bool {
-    file_type == gio::FileType::Mountable
 }
 
 fn grid_tile_label(name: &str, width_chars: i32) -> Label {
@@ -1359,32 +1464,31 @@ mod tests {
 
     use super::{
         cached_thumbnail_file_for, command_availability_for_target, drag_uri_for, grid_tile_label,
-        is_mountable_file_type, local_image_thumbnail_file, thumbnail_cache_homes_from,
-        thumbnail_cache_paths, uses_native_row_sorting, FileView, ViewNavigationState,
+        local_image_thumbnail_file, thumbnail_cache_homes_from, thumbnail_cache_paths,
+        uses_native_row_sorting, FileView,
     };
+    use crate::core::navigation::{TabContent, TabState};
     use crate::core::sidebar_model::SidebarSection;
     use crate::core::{FileItem, GroupField, Location, ViewMode, ViewOptions};
     use crate::ui::context_menu::{CommandAvailability, ContextCommand, ContextTarget};
 
     #[test]
     fn section_overview_preserves_and_restores_a_remote_location() {
-        let mut state = ViewNavigationState::default();
-        state.set_uri("smb://server/share".into());
+        let mut state = TabState::new(Location::from_uri("smb://server/share").unwrap());
         state.show_section(SidebarSection {
             title: "This PC".into(),
             nodes: Vec::new(),
         });
 
-        assert_eq!(state.remote_uri.as_deref(), Some("smb://server/share"));
-        assert!(state.clear_section());
-        assert_eq!(state.remote_uri.as_deref(), Some("smb://server/share"));
-        assert!(state.section_overview.is_none());
+        assert_eq!(state.location.uri(), "smb://server/share");
+        state.restore_directory();
+        assert_eq!(state.location.uri(), "smb://server/share");
+        assert!(matches!(state.content, TabContent::Directory(_)));
     }
 
     #[test]
     fn refreshing_a_section_overview_keeps_its_remote_backing_location() {
-        let mut state = ViewNavigationState::default();
-        state.set_uri("smb://server/share".into());
+        let mut state = TabState::new(Location::from_uri("smb://server/share").unwrap());
         state.show_section(SidebarSection {
             title: "Network & online".into(),
             nodes: Vec::new(),
@@ -1394,13 +1498,9 @@ mod tests {
             nodes: Vec::new(),
         });
 
-        assert_eq!(state.remote_uri.as_deref(), Some("smb://server/share"));
-        assert_eq!(
-            state
-                .section_overview
-                .as_ref()
-                .map(|section| section.title.as_str()),
-            Some("Network & online")
+        assert_eq!(state.location.uri(), "smb://server/share");
+        assert!(
+            matches!(&state.content, TabContent::SectionOverview { section, .. } if section.title == "Network & online")
         );
     }
 
@@ -1413,6 +1513,27 @@ mod tests {
 
         view.set_uri("smb://host/share".into());
 
+        assert_eq!(view.current_location(), Location::from_local_path(&local));
+        let state = view.tab_state();
+        let remote = Location::from_uri("smb://host/share").unwrap();
+        let request = state.borrow_mut().begin_navigation(remote.clone()).unwrap();
+        state.borrow_mut().apply_directory_result(
+            request.generation,
+            crate::core::contracts::RequestCompletion {
+                id: request.request.id,
+                outcome: crate::core::contracts::RequestOutcome::Succeeded(
+                    crate::core::contracts::DirectorySnapshot {
+                        location: crate::core::ResolvedLocation {
+                            requested: remote.clone(),
+                            resolved: remote,
+                        },
+                        entries: vec![],
+                        capabilities: Default::default(),
+                        next_page: None,
+                    },
+                ),
+            },
+        );
         assert_eq!(view.current_location().uri(), "smb://host/share");
         assert_eq!(view.location(), local);
         assert_eq!(view.command_availability().can_paste, false);
@@ -1440,12 +1561,6 @@ mod tests {
         assert!(!uses_native_row_sorting(GroupField::DateModified));
         assert!(!uses_native_row_sorting(GroupField::Type));
         assert!(!uses_native_row_sorting(GroupField::Size));
-    }
-
-    #[test]
-    fn gvfs_mountable_locations_use_the_mountable_operation() {
-        assert!(is_mountable_file_type(gio::FileType::Mountable));
-        assert!(!is_mountable_file_type(gio::FileType::Directory));
     }
 
     #[test]

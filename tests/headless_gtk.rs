@@ -9,6 +9,88 @@ use zorin_explorer::ui::context_menu::{
     configure_command_button, CommandAvailability, ContextCommand,
 };
 
+#[test]
+fn slice2_navigation_commits_after_success_and_refresh_restores_selection() {
+    use std::cell::RefCell;
+    use zorin_explorer::{core::navigation::NavigationStatus, ui::file_view::FileView};
+    gtk::init().expect("headless GTK must initialize");
+    let context = glib::MainContext::default();
+    let _guard = context.acquire().unwrap();
+    let provider = Rc::new(MockProvider::new(context.clone(), MockConfig::default()));
+    let root = Location::from_uri("file:///test").unwrap();
+    let entry = EntrySnapshot {
+        location: Location::from_uri("file:///test/selected").unwrap(),
+        display_name: "selected".into(),
+        kind: EntryKind::File,
+        size: Some(4),
+        modified: None,
+        content_type: None,
+        capabilities: CapabilitySnapshot::default(),
+    };
+    provider.set_directory(
+        root.clone(),
+        vec![entry.clone()],
+        CapabilitySnapshot {
+            stable_order: true,
+            supported: [Capability::List].into_iter().collect(),
+            ..Default::default()
+        },
+    );
+    let view =
+        FileView::new_with_repository(Rc::new(RefCell::new("/test".into())), provider.clone());
+    view.set_options(zorin_explorer::core::ViewOptions {
+        view_mode: zorin_explorer::core::ViewMode::DetailedList,
+        group_field: zorin_explorer::core::GroupField::None,
+        ..Default::default()
+    });
+    assert!(view.tab_state().borrow().history.current().is_none());
+    provider.advance(1);
+    while context.pending() {
+        context.iteration(false);
+    }
+    assert_eq!(view.current_location(), root);
+    let column = view.column_view().unwrap();
+    let model = column
+        .model()
+        .unwrap()
+        .downcast::<gtk::SingleSelection>()
+        .unwrap();
+    model.set_selected(0);
+    assert_eq!(
+        view.tab_state().borrow().selection_keys,
+        ["file:///test/selected"]
+    );
+    view.refresh();
+    provider.advance(1);
+    while context.pending() {
+        context.iteration(false);
+    }
+    assert_eq!(
+        view.tab_state().borrow().selection_keys,
+        ["file:///test/selected"]
+    );
+    let column = view.column_view().unwrap();
+    let model = column
+        .model()
+        .unwrap()
+        .downcast::<gtk::SingleSelection>()
+        .unwrap();
+    assert_eq!(model.selected(), 0);
+    view.set_uri("smb://host/missing".into());
+    assert_eq!(view.current_location(), root);
+    provider.advance(1);
+    while context.pending() {
+        context.iteration(false);
+    }
+    assert!(matches!(
+        view.tab_state().borrow().status,
+        NavigationStatus::Failed { .. }
+    ));
+    assert_eq!(view.current_location(), root);
+    assert_eq!(view.tab_state().borrow().history.current(), Some(&root));
+    view.close();
+}
+
 fn remote_item() -> zorin_explorer::core::FileItem {
     let parent = gio::File::for_uri("smb://host/share");
     let info = gio::FileInfo::new();

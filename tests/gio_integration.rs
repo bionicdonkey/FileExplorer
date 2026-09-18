@@ -4,6 +4,132 @@ use zorin_explorer::{
     infrastructure::gio_operations::GioOperations,
 };
 
+fn directory_result(
+    location: Location,
+    cancelled: bool,
+    page: PageRequest,
+) -> RequestOutcome<DirectorySnapshot> {
+    use gio::prelude::*;
+    use zorin_explorer::{
+        core::ports::DirectoryRepository, infrastructure::gio_directory::GioDirectoryRepository,
+    };
+    let context = glib::MainContext::new();
+    let _guard = context.acquire().unwrap();
+    let adapter = GioDirectoryRepository::new(context.clone());
+    let received = Rc::new(RefCell::new(None));
+    let out = received.clone();
+    let cancel = gio::Cancellable::new();
+    if cancelled {
+        cancel.cancel();
+    }
+    let owner = std::thread::current().id();
+    let callback_context = context.clone();
+    adapter.list(
+        DirectoryRequest {
+            id: RequestId(87),
+            location,
+            page,
+            cancellable: cancel,
+        },
+        Box::new(move |result| {
+            assert_eq!(std::thread::current().id(), owner);
+            assert!(callback_context.is_owner());
+            assert_eq!(result.id, RequestId(87));
+            *out.borrow_mut() = Some(result.outcome);
+        }),
+    );
+    assert!(received.borrow().is_none(), "callback must not run inline");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while received.borrow().is_none() {
+        context.iteration(false);
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::yield_now();
+    }
+    received.take().unwrap()
+}
+
+#[test]
+fn directory_listing_returns_owned_uri_metadata_on_owner_context() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("data.txt"), "hello").unwrap();
+    std::fs::create_dir(dir.path().join("folder")).unwrap();
+    std::fs::write(dir.path().join(".hidden"), "x").unwrap();
+    let location = Location::from_local_path(dir.path());
+    let RequestOutcome::Succeeded(snapshot) = directory_result(
+        location.clone(),
+        false,
+        PageRequest {
+            offset: 0,
+            limit: usize::MAX,
+        },
+    ) else {
+        panic!("listing failed")
+    };
+    assert_eq!(snapshot.location.requested, location);
+    assert_eq!(snapshot.location.resolved, location);
+    assert_eq!(snapshot.entries.len(), 3);
+    let file = snapshot
+        .entries
+        .iter()
+        .find(|entry| entry.display_name == "data.txt")
+        .unwrap();
+    assert_eq!(file.size, Some(5));
+    assert_eq!(file.kind, EntryKind::File);
+    assert_eq!(
+        file.location,
+        Location::from_local_path(&dir.path().join("data.txt"))
+    );
+    assert!(file.capabilities.supports(Capability::Copy));
+    assert!(snapshot.capabilities.supports(Capability::List));
+    assert!(!snapshot.capabilities.stable_order);
+    assert!(snapshot.next_page.is_none());
+}
+
+#[test]
+fn directory_cancellation_errors_and_unstable_paging_are_explicit() {
+    let dir = tempfile::tempdir().unwrap();
+    let location = Location::from_local_path(dir.path());
+    assert!(matches!(
+        directory_result(
+            location.clone(),
+            true,
+            PageRequest {
+                offset: 0,
+                limit: usize::MAX
+            }
+        ),
+        RequestOutcome::Cancelled
+    ));
+    assert!(matches!(
+        directory_result(
+            Location::from_local_path(&dir.path().join("missing")),
+            false,
+            PageRequest {
+                offset: 0,
+                limit: usize::MAX
+            }
+        ),
+        RequestOutcome::Failed(OperationError {
+            kind: OperationErrorKind::NotFound,
+            ..
+        })
+    ));
+    assert!(matches!(
+        directory_result(
+            location,
+            false,
+            PageRequest {
+                offset: 1,
+                limit: 10
+            }
+        ),
+        RequestOutcome::Failed(OperationError {
+            kind: OperationErrorKind::Unsupported,
+            ..
+        })
+    ));
+}
+
 fn run(
     kind: MutationKind,
     sources: Vec<Location>,

@@ -11,7 +11,6 @@ use gtk::{
 
 use crate::core::file_item::FileItem;
 use crate::core::location::Location;
-use crate::core::navigation::NavigationHistory;
 use crate::core::operations::FileOperations;
 use crate::core::{ApplicationPreferences, ConflictDefault, OperationKind, OperationManager};
 use crate::core::{
@@ -32,7 +31,6 @@ use crate::ui::tabs::TabStrip;
 struct TabData {
     view: FileView,
     location: Rc<RefCell<PathBuf>>,
-    history: Rc<RefCell<NavigationHistory>>,
     page: TabPage,
 }
 
@@ -167,7 +165,6 @@ impl ExplorerWindow {
             tabs_data.borrow_mut().push(TabData {
                 view,
                 location,
-                history: history_with(path),
                 page,
             });
         }
@@ -491,7 +488,6 @@ impl ExplorerWindow {
             new_data.borrow_mut().push(TabData {
                 view,
                 location,
-                history: history_with(path),
                 page: page.clone(),
             });
             wire_tab(
@@ -511,6 +507,9 @@ impl ExplorerWindow {
         let session_preferences = application_preferences.clone();
         let session_data = tabs_data.clone();
         window.connect_destroy(move |_| {
+            for tab in session_data.borrow().iter() {
+                tab.view.close();
+            }
             let locations = session_data
                 .borrow()
                 .iter()
@@ -540,6 +539,9 @@ impl ExplorerWindow {
                     show_last_tab_dialog(&close_window);
                 }
                 return true;
+            }
+            if let Some(tab) = close_data.borrow().iter().find(|tab| tab.page == *page) {
+                tab.view.close();
             }
             remove_matching(&close_data, |tab| tab.page == *page);
             view.close_page_finish(page, true);
@@ -697,19 +699,13 @@ fn show_last_tab_dialog(parent: &ApplicationWindow) {
     dialog.present();
 }
 
-fn history_with(path: PathBuf) -> Rc<RefCell<NavigationHistory>> {
-    let history = Rc::new(RefCell::new(NavigationHistory::new()));
-    history.borrow_mut().push(path);
-    history
-}
-
 fn handle_navigation_action(
     index: usize,
     action: NavigationAction,
     data: &Rc<RefCell<Vec<TabData>>>,
     tabs: &TabView,
     header: &HeaderControls,
-    preferences: &Rc<RefCell<ViewPreferencesStore>>,
+    _preferences: &Rc<RefCell<ViewPreferencesStore>>,
     sidebar: &Sidebar,
 ) {
     let view = data.borrow()[index].view.clone();
@@ -736,47 +732,15 @@ fn handle_navigation_action(
             NavigationAction::Forward | NavigationAction::Up => {}
         }
     }
-    if matches!(action, NavigationAction::Refresh) {
-        if let Some(uri) = view.uri() {
-            view.set_uri(uri);
-            return;
+    match action {
+        NavigationAction::Back => view.go_back(),
+        NavigationAction::Forward => view.go_forward(),
+        NavigationAction::Up => {
+            if let Some(parent) = gio::File::for_uri(view.current_location().uri()).parent() {
+                view.set_uri(parent.uri().to_string());
+            }
         }
-    }
-    let next = {
-        let data = data.borrow_mut();
-        match action {
-            NavigationAction::Back => data[index]
-                .history
-                .borrow_mut()
-                .back()
-                .map(ToOwned::to_owned),
-            NavigationAction::Forward => data[index]
-                .history
-                .borrow_mut()
-                .forward()
-                .map(ToOwned::to_owned),
-            NavigationAction::Up => data[index]
-                .location
-                .borrow()
-                .parent()
-                .map(ToOwned::to_owned),
-            NavigationAction::Refresh => Some(data[index].location.borrow().clone()),
-        }
-    };
-    if let Some(path) = next {
-        navigate_tab(
-            index,
-            path,
-            data,
-            tabs,
-            header,
-            preferences,
-            sidebar,
-            !matches!(
-                action,
-                NavigationAction::Back | NavigationAction::Forward | NavigationAction::Refresh
-            ),
-        );
+        NavigationAction::Refresh => view.refresh(),
     }
 }
 
@@ -804,6 +768,41 @@ fn wire_tab(
         .find(|tab| tab.page == page)
         .map(|tab| tab.view.clone())
         .expect("a tab page should have corresponding tab data");
+    let committed_data = Rc::downgrade(data);
+    let committed_page = page.clone();
+    let committed_tabs = tabs.clone();
+    let committed_header = header.clone();
+    let committed_sidebar = sidebar.clone();
+    let committed_preferences = preferences.clone();
+    view.set_location_committed_handler(move |location| {
+        let Some(data) = committed_data.upgrade() else {
+            return;
+        };
+        let view = data
+            .borrow()
+            .iter()
+            .find(|tab| tab.page == committed_page)
+            .map(|tab| tab.view.clone());
+        let Some(view) = view else {
+            return;
+        };
+        if let Some(path) = location.local_path() {
+            view.set_options(committed_preferences.borrow().options_for(&path, &[]));
+        }
+        crate::ui::tabs::set_location_title(&committed_page, &location);
+        if committed_tabs
+            .selected_page()
+            .is_some_and(|selected| selected == committed_page)
+        {
+            if let Some(path) = location.local_path() {
+                committed_header.set_location(&path);
+                committed_sidebar.set_active_path(&path);
+            } else {
+                committed_header.set_uri(location.uri());
+                committed_sidebar.clear_active_path();
+            }
+        }
+    });
     let quick_access_model = sidebar.model();
     view.set_quick_access_predicate(move |path| {
         quick_access_model.borrow().preferences().is_pinned(path)
@@ -1238,7 +1237,6 @@ fn add_tab_at(
     data.borrow_mut().push(TabData {
         view,
         location,
-        history: history_with(path),
         page: page.clone(),
     });
     wire_tab(
@@ -1642,32 +1640,14 @@ fn navigate_tab(
     index: usize,
     path: PathBuf,
     data: &Rc<RefCell<Vec<TabData>>>,
-    tabs: &TabView,
-    header: &HeaderControls,
-    preferences: &Rc<RefCell<ViewPreferencesStore>>,
-    sidebar: &Sidebar,
-    record_history: bool,
+    _tabs: &TabView,
+    _header: &HeaderControls,
+    _preferences: &Rc<RefCell<ViewPreferencesStore>>,
+    _sidebar: &Sidebar,
+    _record_history: bool,
 ) {
-    if !path.is_dir() || index >= data.borrow().len() {
-        return;
-    }
-    let mut data_ref = data.borrow_mut();
-    let tab = &mut data_ref[index];
-    if record_history {
-        tab.history.borrow_mut().push(path.clone());
-    }
-    *tab.location.borrow_mut() = path.clone();
-    tab.view.set_location(path.clone());
-    tab.view
-        .set_options(preferences.borrow().options_for(&path, &[]));
-    tab.page.set_title(&tab_title(&path));
-    if tabs
-        .selected_page()
-        .as_ref()
-        .is_some_and(|page| *page == tab.page)
-    {
-        header.set_location(&path);
-        sidebar.set_active_path(&path);
+    if let Some(tab) = data.borrow().get(index) {
+        tab.view.set_location(path);
     }
 }
 
@@ -1675,23 +1655,12 @@ fn navigate_uri_tab(
     index: usize,
     uri: String,
     data: &Rc<RefCell<Vec<TabData>>>,
-    tabs: &TabView,
-    header: &HeaderControls,
-    sidebar: &Sidebar,
+    _tabs: &TabView,
+    _header: &HeaderControls,
+    _sidebar: &Sidebar,
 ) {
-    let mut data_ref = data.borrow_mut();
-    let Some(tab) = data_ref.get_mut(index) else {
-        return;
-    };
-    tab.view.set_uri(uri.clone());
-    tab.page.set_title(&uri_title(&uri));
-    if tabs
-        .selected_page()
-        .as_ref()
-        .is_some_and(|page| *page == tab.page)
-    {
-        header.set_uri(&uri);
-        sidebar.clear_active_path();
+    if let Some(tab) = data.borrow().get(index) {
+        tab.view.set_uri(uri);
     }
 }
 
@@ -2148,9 +2117,9 @@ mod tests {
     use gtk::{Box as GtkBox, Label, Orientation, SearchEntry, Window};
 
     use super::{
-        content_right_inset, file_toolbar, handle_navigation_action, history_with, matching_index,
-        menu_button, persist_options, remove_matching, shortcut_command,
-        should_protect_last_file_tab, sidebar_path_for_tab, TabData,
+        content_right_inset, file_toolbar, handle_navigation_action, matching_index, menu_button,
+        persist_options, remove_matching, shortcut_command, should_protect_last_file_tab,
+        sidebar_path_for_tab, TabData,
     };
     use crate::core::sidebar_model::SidebarSection;
     use crate::core::{
@@ -2161,6 +2130,31 @@ mod tests {
     use crate::ui::header::{HeaderControls, NavigationAction};
     use crate::ui::sidebar::Sidebar;
 
+    fn commit_remote_location(view: &FileView) {
+        use crate::core::{contracts::*, Location, ResolvedLocation};
+        let location = Location::from_uri("smb://server/share").unwrap();
+        let state = view.tab_state();
+        let request = state
+            .borrow_mut()
+            .begin_navigation(location.clone())
+            .unwrap();
+        assert!(state.borrow_mut().apply_directory_result(
+            request.generation,
+            RequestCompletion {
+                id: request.request.id,
+                outcome: RequestOutcome::Succeeded(DirectorySnapshot {
+                    location: ResolvedLocation {
+                        requested: location.clone(),
+                        resolved: location
+                    },
+                    entries: vec![],
+                    capabilities: Default::default(),
+                    next_page: None,
+                }),
+            }
+        ));
+    }
+
     #[test]
     #[ignore = "requires a GTK desktop session"]
     fn back_from_a_remote_section_restores_the_header_tab_and_sidebar() {
@@ -2168,7 +2162,7 @@ mod tests {
         let path = PathBuf::from("/tmp");
         let location = Rc::new(RefCell::new(path.clone()));
         let view = FileView::new(location.clone());
-        view.set_uri("smb://server/share".into());
+        commit_remote_location(&view);
         view.show_section_overview(SidebarSection {
             title: "Network & online".into(),
             nodes: vec![],
@@ -2180,7 +2174,6 @@ mod tests {
         let data = Rc::new(RefCell::new(vec![TabData {
             view: view.clone(),
             location,
-            history: history_with(path),
             page: page.clone(),
         }]));
         let header = HeaderControls::new(Rc::new(RefCell::new(PathBuf::from("/tmp"))));
@@ -2220,7 +2213,7 @@ mod tests {
         let path = PathBuf::from("/tmp");
         let location = Rc::new(RefCell::new(path.clone()));
         let view = FileView::new(location.clone());
-        view.set_uri("smb://server/share".into());
+        commit_remote_location(&view);
         let model = Rc::new(RefCell::new(SidebarModel::new(
             SidebarPreferences::in_memory(),
             path.clone(),
@@ -2244,7 +2237,6 @@ mod tests {
         let data = Rc::new(RefCell::new(vec![TabData {
             view: view.clone(),
             location,
-            history: history_with(path),
             page,
         }]));
         let header = HeaderControls::new(Rc::new(RefCell::new(PathBuf::from("/tmp"))));
@@ -2273,7 +2265,7 @@ mod tests {
         let path = PathBuf::from("/tmp");
         let location = Rc::new(RefCell::new(path.clone()));
         let view = FileView::new(location.clone());
-        view.set_uri("smb://server/share".into());
+        commit_remote_location(&view);
         view.show_search_results(vec![]);
         let tabs = adw::TabView::new();
         let page = tabs.append(&view.widget);
@@ -2281,7 +2273,6 @@ mod tests {
         let data = Rc::new(RefCell::new(vec![TabData {
             view: view.clone(),
             location,
-            history: history_with(path),
             page,
         }]));
         let header = HeaderControls::new(Rc::new(RefCell::new(PathBuf::from("/tmp"))));
@@ -2307,6 +2298,11 @@ mod tests {
 
         assert_eq!(view.section_title(), None);
         assert_eq!(view.uri().as_deref(), Some("smb://server/share"));
+        assert!(
+            view.is_showing_search_results(),
+            "pending refresh preserves current content"
+        );
+        commit_remote_location(&view);
         assert!(!view.is_showing_search_results());
     }
 

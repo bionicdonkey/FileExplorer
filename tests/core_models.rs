@@ -49,16 +49,25 @@ fn navigation_history_supports_back_and_forward_and_discards_forward_branch() {
     let projects = home.join("Projects");
     let downloads = home.join("Downloads");
 
-    history.push(home.clone());
-    history.push(documents.clone());
-    history.push(projects.clone());
-    assert_eq!(history.current(), Some(projects.as_path()));
-    assert_eq!(history.back(), Some(documents.as_path()));
-    assert_eq!(history.back(), Some(home.as_path()));
-    assert_eq!(history.forward(), Some(documents.as_path()));
+    history.push(Location::from_local_path(&home));
+    history.push(Location::from_local_path(&documents));
+    history.push(Location::from_local_path(&projects));
+    assert_eq!(
+        history.current(),
+        Some(&Location::from_local_path(&projects))
+    );
+    assert_eq!(history.back(), Some(&Location::from_local_path(&documents)));
+    assert_eq!(history.back(), Some(&Location::from_local_path(&home)));
+    assert_eq!(
+        history.forward(),
+        Some(&Location::from_local_path(&documents))
+    );
 
-    history.push(downloads.clone());
-    assert_eq!(history.current(), Some(downloads.as_path()));
+    history.push(Location::from_local_path(&downloads));
+    assert_eq!(
+        history.current(),
+        Some(&Location::from_local_path(&downloads))
+    );
     assert_eq!(history.forward(), None);
-    assert_eq!(history.back(), Some(documents.as_path()));
+    assert_eq!(history.back(), Some(&Location::from_local_path(&documents)));
 }
