@@ -9,7 +9,9 @@ use zorin_explorer::ui::context_menu::{
     configure_command_button, CommandAvailability, ContextCommand,
 };
 
-#[test]
+// GTK owns the default main context for the lifetime of its initializing thread.
+// Its test attribute runs every GTK test on that same persistent worker.
+#[gtk::test]
 fn slice2_search_scope_incomplete_retry_clear_and_remote_activation() {
     use std::cell::RefCell;
     use zorin_explorer::{core::ports::*, ui::file_view::FileView};
@@ -212,7 +214,7 @@ fn slice2_search_scope_incomplete_retry_clear_and_remote_activation() {
     assert_eq!(selected.location().uri(), "smb://host/share/saved");
 }
 
-#[test]
+#[gtk::test]
 fn slice2_navigation_commits_after_success_and_refresh_restores_selection() {
     use std::cell::RefCell;
     use zorin_explorer::{core::navigation::NavigationStatus, ui::file_view::FileView};
@@ -439,10 +441,28 @@ fn slice2_navigation_commits_after_success_and_refresh_restores_selection() {
         }
         None
     }
-    let removed_root = Location::from_uri("smb://host/").unwrap();
+    // GMount::root() identifies the SMB share, not the server-browsing URI.
+    // Real GVfs considers this share a root with no parent.
+    let removed_root = Location::from_uri("smb://host/missing").unwrap();
+    view.refresh();
+    assert!(view.tab_state().borrow().has_pending_navigation());
     view.mark_unavailable(&removed_root);
     assert!(
         matches!(&view.tab_state().borrow().content, zorin_explorer::core::navigation::TabContent::Unavailable(location) if location.uri() == "smb://host/missing")
+    );
+    assert!(!view.tab_state().borrow().has_pending_navigation());
+    // A late completion from the refresh must not resurrect the removed mount.
+    provider.advance(1);
+    while context.pending() {
+        context.iteration(false);
+    }
+    assert!(
+        matches!(&view.tab_state().borrow().content, zorin_explorer::core::navigation::TabContent::Unavailable(location) if location.uri() == "smb://host/missing")
+    );
+    assert_eq!(view.current_location().uri(), "smb://host/missing");
+    assert_eq!(
+        view.tab_state().borrow().history.current(),
+        Some(&removed_root)
     );
     assert_eq!(view.tab_state().borrow().history.back_target(), Some(&root));
     named_button(view.widget.upcast_ref(), "Reconnect")
@@ -529,7 +549,7 @@ fn remote_item() -> zorin_explorer::core::FileItem {
     zorin_explorer::core::FileItem::from_gio(&parent, &info)
 }
 
-#[test]
+#[gtk::test]
 fn slice1_disabled_trash_action_exposes_a_safe_name_and_reason() {
     gtk::init().expect("headless GTK must initialize");
     let availability = CommandAvailability::for_selection(&[remote_item()], None);
@@ -545,7 +565,7 @@ fn slice1_disabled_trash_action_exposes_a_safe_name_and_reason() {
     );
 }
 
-#[test]
+#[gtk::test]
 fn slice1_reenabled_action_clears_the_stale_disabled_explanation() {
     gtk::init().expect("headless GTK must initialize");
     let button = gtk::Button::with_label("Move to Trash");

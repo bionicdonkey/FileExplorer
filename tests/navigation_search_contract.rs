@@ -317,6 +317,35 @@ fn slice2_location_input_and_session_keep_nonlocal_identity() {
 }
 
 #[test]
+fn slice2_search_status_identifies_the_exact_declared_root() {
+    for uri in ["file:///home/reports", "smb://host/share/reports%20one"] {
+        let scope = SearchScope::local_fallback(location(uri));
+        let outcomes = [
+            SearchOutcome::Completed {
+                matches: vec![],
+                declared_scope: scope.clone(),
+                scope_limited: true,
+                limits: vec![SearchLimit::Depth],
+            },
+            SearchOutcome::Incomplete {
+                matches: vec![],
+                declared_scope: scope,
+                reason: SearchIncompleteReason::ProviderFailure,
+                retry: RetryClass::AfterRefresh,
+                error: None,
+            },
+        ];
+        for outcome in outcomes {
+            let text = outcome.status_text();
+            assert!(text.contains(uri), "declared root missing from: {text}");
+            for bound in ["depth 1", "5000 matches", "2 seconds"] {
+                assert!(text.contains(bound), "declared bound missing from: {text}");
+            }
+        }
+    }
+}
+
+#[test]
 fn slice2_unmount_cancels_pending_and_preserves_history_for_reconnect() {
     let mut tab = TabState::new(location("file:///home"));
     success(&mut tab, "file:///home");
@@ -343,6 +372,25 @@ fn slice2_unmount_cancels_pending_and_preserves_history_for_reconnect() {
             outcome: RequestOutcome::Succeeded(snapshot("smb://host/share/folder")),
         }
     ));
+    assert!(tab.apply_directory_result(
+        retry.generation,
+        RequestCompletion {
+            id: retry.request.id,
+            outcome: RequestOutcome::Failed(OperationError::new(
+                OperationErrorKind::MountUnavailable,
+                Some(&location("smb://host/share/folder")),
+                None,
+            )),
+        }
+    ));
+    assert!(
+        matches!(&tab.content, TabContent::Unavailable(l) if l.uri() == "smb://host/share/folder")
+    );
+    assert_eq!(tab.location.uri(), "smb://host/share/folder");
+    assert_eq!(tab.history.current().unwrap().uri(), "smb://host/share/folder");
+    assert_eq!(tab.history.back_target().unwrap().uri(), "file:///home");
+    assert!(tab.directory.is_none());
+    let retry = tab.begin_retry().unwrap();
     assert!(tab.apply_directory_result(
         retry.generation,
         RequestCompletion {

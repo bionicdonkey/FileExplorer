@@ -181,7 +181,7 @@ impl SearchScope {
     pub fn annotation(&self) -> String {
         format!(
             "{}; depth {} (root is 0); up to {} matches; up to {} seconds",
-            self.root.redacted(),
+            self.root.uri(),
             self.max_depth,
             self.max_results,
             self.timeout.as_secs_f64()
