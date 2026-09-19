@@ -709,6 +709,12 @@ fn handle_navigation_action(
     sidebar: &Sidebar,
 ) {
     let view = data.borrow()[index].view.clone();
+    // A section remains visible until a directory load succeeds. Refresh must
+    // replace that pending load before considering a section-only rebuild.
+    if matches!(action, NavigationAction::Refresh) && view.has_pending_navigation() {
+        view.refresh();
+        return;
+    }
     if let Some(section_title) = view.section_title() {
         match action {
             NavigationAction::Back => {
@@ -2256,6 +2262,23 @@ mod tests {
         assert_eq!(view.uri().as_deref(), Some("smb://server/share"));
         assert_eq!(view.section_title().as_deref(), Some("Network & online"));
         assert_eq!(view.section_overview_node_count(), initial_count + 1);
+
+        view.set_uri("smb://server/pending".into());
+        let generation = view.tab_state().borrow().navigation_generation;
+        handle_navigation_action(
+            0,
+            NavigationAction::Refresh,
+            &data,
+            &tabs,
+            &header,
+            &Rc::new(RefCell::new(ViewPreferencesStore::in_memory())),
+            &sidebar,
+        );
+        assert!(view.tab_state().borrow().navigation_generation > generation,
+            "toolbar Refresh must replace the pending navigation, not cancel it by rebuilding the section");
+        assert!(matches!(&view.tab_state().borrow().status,
+            crate::core::navigation::NavigationStatus::Loading(location) if location.uri() == "smb://server/pending"));
+        assert_eq!(view.section_title().as_deref(), Some("Network & online"));
     }
 
     #[test]

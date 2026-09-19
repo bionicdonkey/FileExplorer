@@ -139,6 +139,9 @@ impl TabState {
     pub fn begin_navigation(&mut self, location: Location) -> Option<NavigationRequest> {
         self.begin(location, HistoryCommit::Push)
     }
+    pub fn has_pending_navigation(&self) -> bool {
+        self.pending.is_some()
+    }
     pub fn begin_retry(&mut self) -> Option<NavigationRequest> {
         let (location, commit) = self.retry.clone()?;
         self.begin(location, commit)

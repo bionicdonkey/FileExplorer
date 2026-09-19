@@ -37,6 +37,41 @@ fn success(tab: &mut TabState, uri: &str) {
 }
 
 #[test]
+fn navigation_refresh_from_section_replaces_pending_directory_request() {
+    use zorin_explorer::core::sidebar_model::SidebarSection;
+    let mut tab = TabState::new(location("file:///home"));
+    success(&mut tab, "file:///home");
+    tab.show_section(SidebarSection {
+        title: "Network & online".into(),
+        nodes: vec![],
+    });
+    let first = tab.begin_navigation(location("smb://host/share")).unwrap();
+    assert!(tab.has_pending_navigation());
+    let replacement = tab.begin_refresh().unwrap();
+    assert!(first.request.cancellable.is_cancelled());
+    assert!(tab.has_pending_navigation());
+    assert!(replacement.generation > first.generation);
+    assert_eq!(replacement.request.location.uri(), "smb://host/share");
+    assert!(matches!(tab.content, TabContent::SectionOverview { .. }));
+    assert!(!tab.apply_directory_result(
+        first.generation,
+        RequestCompletion {
+            id: first.request.id,
+            outcome: RequestOutcome::Succeeded(snapshot("smb://host/share"))
+        }
+    ));
+    assert!(tab.apply_directory_result(
+        replacement.generation,
+        RequestCompletion {
+            id: replacement.request.id,
+            outcome: RequestOutcome::Succeeded(snapshot("smb://host/share"))
+        }
+    ));
+    assert!(!tab.has_pending_navigation());
+    assert_eq!(tab.location.uri(), "smb://host/share");
+}
+
+#[test]
 fn navigation_latest_generation_wins_and_only_success_commits_history() {
     let mut tab = TabState::new(location("file:///home"));
     assert!(tab.history.current().is_none());

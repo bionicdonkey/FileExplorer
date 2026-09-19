@@ -88,6 +88,61 @@ fn slice2_navigation_commits_after_success_and_refresh_restores_selection() {
     ));
     assert_eq!(view.current_location(), root);
     assert_eq!(view.tab_state().borrow().history.current(), Some(&root));
+
+    view.show_section_overview(zorin_explorer::core::sidebar_model::SidebarSection {
+        title: "Network & online".into(),
+        nodes: vec![],
+    });
+    view.set_uri("smb://host/missing".into());
+    let generation = view.tab_state().borrow().navigation_generation;
+    view.refresh();
+    assert!(
+        view.tab_state().borrow().navigation_generation > generation,
+        "refresh must replace the pending request even while a section remains visible"
+    );
+    provider.advance(1);
+    while context.pending() {
+        context.iteration(false);
+    }
+    assert_eq!(view.section_title().as_deref(), Some("Network & online"));
+    assert_eq!(view.current_location(), root);
+    assert!(matches!(
+        view.tab_state().borrow().status,
+        NavigationStatus::Failed { .. }
+    ));
+    fn retry_button(widget: &gtk::Widget) -> Option<gtk::Button> {
+        if let Some(button) = widget.downcast_ref::<gtk::Button>() {
+            if button.label().as_deref() == Some("Retry") {
+                return Some(button.clone());
+            }
+        }
+        let mut child = widget.first_child();
+        while let Some(widget) = child {
+            if let Some(button) = retry_button(&widget) {
+                return Some(button);
+            }
+            child = widget.next_sibling();
+        }
+        None
+    }
+    let retry =
+        retry_button(view.widget.upcast_ref()).expect("failed section navigation must offer Retry");
+    provider.set_directory(
+        Location::from_uri("smb://host/missing").unwrap(),
+        vec![],
+        CapabilitySnapshot {
+            stable_order: true,
+            supported: [Capability::List].into_iter().collect(),
+            ..Default::default()
+        },
+    );
+    retry.emit_clicked();
+    provider.advance(1);
+    while context.pending() {
+        context.iteration(false);
+    }
+    assert_eq!(view.section_title(), None);
+    assert_eq!(view.current_location().uri(), "smb://host/missing");
     view.close();
 }
 

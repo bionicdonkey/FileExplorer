@@ -49,6 +49,49 @@ fn directory_result(
 }
 
 #[test]
+#[cfg(unix)]
+fn directory_listing_preserves_non_utf8_filename_identity() {
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+    let dir = tempfile::tempdir().unwrap();
+    let raw_path = dir
+        .path()
+        .join(OsString::from_vec(b"name-\xff.txt".to_vec()));
+    let unicode_path = dir.path().join("name-\u{fffd}.txt");
+    std::fs::write(&raw_path, "raw bytes").unwrap();
+    std::fs::write(&unicode_path, "unicode replacement").unwrap();
+    let RequestOutcome::Succeeded(snapshot) = directory_result(
+        Location::from_local_path(dir.path()),
+        false,
+        PageRequest {
+            offset: 0,
+            limit: usize::MAX,
+        },
+    ) else {
+        panic!("listing failed")
+    };
+    assert_eq!(snapshot.entries.len(), 2);
+    let raw = snapshot
+        .entries
+        .iter()
+        .find(|entry| entry.location.local_path().as_ref() == Some(&raw_path))
+        .expect("the raw filename must survive enumeration without replacement characters");
+    let unicode = snapshot
+        .entries
+        .iter()
+        .find(|entry| entry.location.local_path().as_ref() == Some(&unicode_path))
+        .unwrap();
+    assert_ne!(raw.location, unicode.location);
+    assert_eq!(
+        std::fs::read(raw.location.local_path().unwrap()).unwrap(),
+        b"raw bytes"
+    );
+    assert_eq!(
+        std::fs::read(unicode.location.local_path().unwrap()).unwrap(),
+        b"unicode replacement"
+    );
+}
+
+#[test]
 fn directory_listing_returns_owned_uri_metadata_on_owner_context() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("data.txt"), "hello").unwrap();

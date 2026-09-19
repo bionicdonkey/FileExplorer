@@ -90,7 +90,7 @@ impl FileItem {
     pub fn from_gio(parent: &gio::File, info: &gio::FileInfo) -> Self {
         let entry_name = info
             .has_attribute("standard::name")
-            .then(|| info.name().to_string_lossy().into_owned())
+            .then(|| info.name())
             .unwrap_or_default();
         let file_type = info
             .has_attribute("standard::type")
@@ -100,17 +100,20 @@ impl FileItem {
             .has_attribute("standard::display-name")
             .then(|| info.display_name().to_string())
             .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| entry_name.clone());
+            .unwrap_or_else(|| entry_name.to_string_lossy().into_owned());
+        // GIO names are native filename bytes. Only display labels may be lossy;
+        // constructing a child from a UTF-8 replacement string changes identity.
+        let child = parent.child(&entry_name);
         let child_uri = info
             .attribute_string("standard::target-uri")
             .map(|uri| uri.to_string())
-            .unwrap_or_else(|| parent.resolve_relative_path(&entry_name).uri().to_string());
+            .unwrap_or_else(|| child.uri().to_string());
         // A listing must remain renderable if optional provider metadata is
         // absent or malformed. The validated parent is the safe fallback;
         // unsupported capabilities stay unavailable rather than making this
         // entry disappear.
         let location = Location::from_uri(&child_uri)
-            .or_else(|_| Location::try_from_file(parent.resolve_relative_path(&entry_name)))
+            .or_else(|_| Location::try_from_file(child))
             .unwrap_or_else(|_| Location::home());
         let content_type = gio_content_type(info);
         let modified = gio_modified(info);

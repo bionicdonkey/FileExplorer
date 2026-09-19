@@ -375,7 +375,7 @@ impl FileView {
     }
 
     pub fn refresh(&self) {
-        if self.section_title().is_some() {
+        if !self.has_pending_navigation() && self.section_title().is_some() {
             self.reload();
             return;
         }
@@ -386,6 +386,10 @@ impl FileView {
             }
         });
         self.show_loading();
+    }
+
+    pub fn has_pending_navigation(&self) -> bool {
+        self.navigation.state.borrow().has_pending_navigation()
     }
 
     pub fn is_showing_search_results(&self) -> bool {
@@ -437,6 +441,7 @@ impl FileView {
         let mut items = match state.content {
             TabContent::SectionOverview { section, .. } => {
                 self.render_section_overview(&section);
+                self.show_error();
                 return;
             }
             TabContent::Search { items, .. } => items,
