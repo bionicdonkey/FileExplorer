@@ -135,7 +135,7 @@ impl ApplicationPreferences {
         })
     }
 
-    pub fn save_session(&self, locations: &[String]) -> io::Result<()> {
+    pub fn save_session(&self, locations: &[Location]) -> io::Result<()> {
         if !self.restore_previous_tabs {
             return self.clear_session();
         }
@@ -143,11 +143,7 @@ impl ApplicationPreferences {
             return Ok(());
         };
         fs::create_dir_all(path.parent().expect("session path has a parent"))?;
-        let resolved = locations
-            .iter()
-            .filter_map(|uri| Location::from_uri(uri).ok())
-            .collect::<Vec<_>>();
-        let bytes = encode_session(&resolved)
+        let bytes = encode_session(locations)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         fs::write(path, bytes)
     }

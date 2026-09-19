@@ -9,24 +9,22 @@ use gtk::{
     ToggleButton,
 };
 
-use crate::core::OperationManager;
-use crate::core::{SidebarLocation, SidebarModel, SidebarNode};
 use crate::core::sidebar_model::SidebarSection;
+use crate::core::{Location, OperationManager};
+use crate::core::{SidebarLocation, SidebarModel, SidebarNode};
 use crate::ui::operations_page::active_summary;
 
 #[derive(Clone, Debug)]
 pub enum SidebarAction {
     OpenSection(String),
-    Open(PathBuf),
-    OpenInNewTab(PathBuf),
-    OpenInNewWindow(PathBuf),
+    Open(Location),
+    OpenInNewTab(Location),
+    OpenInNewWindow(Location),
     OpenInTerminal(PathBuf),
-    OpenUri(String),
-    Pin(PathBuf),
-    Unpin(PathBuf),
+    Pin(Location),
+    Unpin(Location),
     AddNetworkLocation,
-    UnpinRemote(String),
-    Unmount(String),
+    Unmount(Location),
     OpenOperations,
 }
 
@@ -36,7 +34,7 @@ pub struct Sidebar {
     content: GtkBox,
     model: Rc<RefCell<SidebarModel>>,
     on_action: Rc<dyn Fn(SidebarAction)>,
-    active_path: Rc<RefCell<Option<PathBuf>>>,
+    active_path: Rc<RefCell<Option<Location>>>,
     active_section: Rc<RefCell<Option<String>>>,
     mount_parent: gtk::Window,
     operation_manager: Rc<RefCell<Option<OperationManager>>>,
@@ -191,7 +189,9 @@ impl Sidebar {
             }
             let action = self.on_action.clone();
             let section_title = section.title.clone();
-            heading.connect_clicked(move |_| action(SidebarAction::OpenSection(section_title.clone())));
+            heading.connect_clicked(move |_| {
+                action(SidebarAction::OpenSection(section_title.clone()))
+            });
             if section.title == "Network & online" {
                 heading.set_hexpand(true);
                 let add = Button::from_icon_name("list-add-symbolic");
@@ -248,7 +248,11 @@ impl Sidebar {
     }
 
     pub fn set_active_path(&self, path: &Path) {
-        *self.active_path.borrow_mut() = Some(path.to_path_buf());
+        self.set_active_location(Location::from_local_path(path));
+    }
+
+    pub fn set_active_location(&self, location: Location) {
+        *self.active_path.borrow_mut() = Some(location);
         *self.active_section.borrow_mut() = None;
         self.refresh();
     }
@@ -266,7 +270,13 @@ impl Sidebar {
 
     #[cfg(test)]
     pub(crate) fn active_navigation_selection(&self) -> (Option<PathBuf>, Option<String>) {
-        (self.active_path.borrow().clone(), self.active_section.borrow().clone())
+        (
+            self.active_path
+                .borrow()
+                .as_ref()
+                .and_then(Location::local_path),
+            self.active_section.borrow().clone(),
+        )
     }
 
     pub fn toggle_quick_access(&self, path: PathBuf) {
@@ -299,7 +309,7 @@ impl Sidebar {
         depth: i32,
         model: Rc<RefCell<SidebarModel>>,
         on_action: Rc<dyn Fn(SidebarAction)>,
-        active_path: Rc<RefCell<Option<PathBuf>>>,
+        active_path: Rc<RefCell<Option<Location>>>,
         mount_parent: gtk::Window,
     ) {
         let row = GtkBox::new(Orientation::Vertical, 0);
@@ -330,8 +340,20 @@ impl Sidebar {
             let children_action = on_action.clone();
             let children_active_path = active_path.clone();
             let children_mount_parent = mount_parent.clone();
+            let pending_mount = Rc::new(RefCell::new(None::<gio::Cancellable>));
+            let unrealized_mount = pending_mount.clone();
+            expander.connect_unrealize(move |_| {
+                if let Some(cancellable) = unrealized_mount.borrow_mut().take() {
+                    cancellable.cancel();
+                }
+            });
             expander.connect_toggled(move |button| {
                 let expanded = button.is_active();
+                if !expanded {
+                    if let Some(cancellable) = pending_mount.borrow_mut().take() {
+                        cancellable.cancel();
+                    }
+                }
                 children_for_toggle.set_visible(expanded);
                 let icon = if expanded {
                     "pan-down-symbolic"
@@ -371,6 +393,9 @@ impl Sidebar {
                             .map(|info| info.file_type() == gio::FileType::Mountable)
                             .unwrap_or(false);
                         let operation = gtk::MountOperation::new(Some(&children_mount_parent));
+                        let cancellable = gio::Cancellable::new();
+                        *pending_mount.borrow_mut() = Some(cancellable.clone());
+                        let completion_cancel = cancellable.clone();
                         let keep_operation = operation.clone();
                         let children_after_mount = children_for_toggle.clone();
                         let model_after_mount = children_model.clone();
@@ -382,13 +407,18 @@ impl Sidebar {
                             location_file.mount_mountable(
                                 gio::MountMountFlags::NONE,
                                 Some(&operation),
-                                gio::Cancellable::NONE,
+                                Some(&cancellable),
                                 move |result| {
                                     let _keep_operation_alive = &keep_operation;
+                                    if completion_cancel.is_cancelled() {
+                                        return;
+                                    }
                                     let location = result
+                                        .ok()
+                                        .and_then(|root| Location::try_from_file(root).ok())
                                         .map(|root| {
-                                            SidebarLocation::from_uri(
-                                                root.uri().to_string(),
+                                            SidebarLocation::from_location(
+                                                root,
                                                 location_after_mount.label(),
                                                 location_after_mount.icon_name(),
                                             )
@@ -411,9 +441,12 @@ impl Sidebar {
                             location_file.mount_enclosing_volume(
                                 gio::MountMountFlags::NONE,
                                 Some(&operation),
-                                gio::Cancellable::NONE,
-                                move |_| {
+                                Some(&cancellable),
+                                move |result| {
                                     let _keep_operation_alive = &keep_operation;
+                                    if completion_cancel.is_cancelled() || result.is_err() {
+                                        return;
+                                    }
                                     let loaded = model_after_mount
                                         .borrow()
                                         .children_for_location(&location_after_mount);
@@ -447,11 +480,7 @@ impl Sidebar {
         button.set_halign(gtk::Align::Fill);
         button.add_css_class("flat");
         button.add_css_class("sidebar-location");
-        if node
-            .location
-            .local_path()
-            .is_some_and(|path| active_path.borrow().as_deref() == Some(path))
-        {
+        if active_path.borrow().as_ref() == Some(node.location.location()) {
             button.add_css_class("selected");
         }
         let button_content = GtkBox::new(Orientation::Horizontal, 8);
@@ -469,10 +498,7 @@ impl Sidebar {
         button.set_child(Some(&button_content));
         let action = on_action.clone();
         let location = node.location.clone();
-        button.connect_clicked(move |_| match location.local_path() {
-            Some(path) => action(SidebarAction::Open(path.to_path_buf())),
-            None => action(SidebarAction::OpenUri(location.uri())),
-        });
+        button.connect_clicked(move |_| action(SidebarAction::Open(location.location().clone())));
         Self::add_context_menu(&button, &node.location, model, on_action);
         header.append(&button);
         row.append(&header);
@@ -486,7 +512,7 @@ impl Sidebar {
         depth: i32,
         model: Rc<RefCell<SidebarModel>>,
         on_action: Rc<dyn Fn(SidebarAction)>,
-        active_path: Rc<RefCell<Option<PathBuf>>>,
+        active_path: Rc<RefCell<Option<Location>>>,
         mount_parent: gtk::Window,
     ) {
         for child in children {
@@ -525,17 +551,36 @@ impl Sidebar {
                 let open = Button::with_label("Open");
                 let open_action = action.clone();
                 let popover_for_open = popover.clone();
-                let uri = location.uri();
+                let uri = location.location().clone();
                 open.connect_clicked(move |_| {
                     popover_for_open.popdown();
-                    open_action(SidebarAction::OpenUri(uri.clone()));
+                    open_action(SidebarAction::Open(uri.clone()));
                 });
                 menu.append(&open);
+                for (label, command) in [
+                    (
+                        "Open in New Tab",
+                        SidebarAction::OpenInNewTab(location.location().clone()),
+                    ),
+                    (
+                        "Open in New Window",
+                        SidebarAction::OpenInNewWindow(location.location().clone()),
+                    ),
+                ] {
+                    let button = Button::with_label(label);
+                    let action = action.clone();
+                    let popover = popover.clone();
+                    button.connect_clicked(move |_| {
+                        popover.popdown();
+                        action(command.clone());
+                    });
+                    menu.append(&button);
+                }
                 if model.borrow().mount_for_location(&location).is_some() {
                     let unmount = Button::with_label("Unmount");
                     let action = action.clone();
                     let popover_for_unmount = popover.clone();
-                    let uri = location.uri();
+                    let uri = location.location().clone();
                     unmount.connect_clicked(move |_| {
                         popover_for_unmount.popdown();
                         action(SidebarAction::Unmount(uri.clone()));
@@ -552,10 +597,10 @@ impl Sidebar {
                     let unpin = Button::with_label("Unpin from Network & online");
                     let action = action.clone();
                     let popover_for_unpin = popover.clone();
-                    let uri = location.uri();
+                    let uri = location.location().clone();
                     unpin.connect_clicked(move |_| {
                         popover_for_unpin.popdown();
-                        action(SidebarAction::UnpinRemote(uri.clone()));
+                        action(SidebarAction::Unpin(uri.clone()));
                     });
                     menu.append(&unpin);
                 }
@@ -568,11 +613,17 @@ impl Sidebar {
                 .expect("local location was checked")
                 .to_path_buf();
             for (label, sidebar_action) in [
-                ("Open", SidebarAction::Open(path.clone())),
-                ("Open in New Tab", SidebarAction::OpenInNewTab(path.clone())),
+                (
+                    "Open",
+                    SidebarAction::Open(Location::from_local_path(&path)),
+                ),
+                (
+                    "Open in New Tab",
+                    SidebarAction::OpenInNewTab(Location::from_local_path(&path)),
+                ),
                 (
                     "Open in New Window",
-                    SidebarAction::OpenInNewWindow(path.clone()),
+                    SidebarAction::OpenInNewWindow(Location::from_local_path(&path)),
                 ),
                 (
                     "Open in Terminal",
@@ -596,7 +647,7 @@ impl Sidebar {
                 let unmount = Button::with_label("Unmount");
                 let action = action.clone();
                 let popover_for_unmount = popover.clone();
-                let uri = location.uri();
+                let uri = location.location().clone();
                 unmount.connect_clicked(move |_| {
                     popover_for_unmount.popdown();
                     action(SidebarAction::Unmount(uri.clone()));
@@ -612,9 +663,9 @@ impl Sidebar {
             let action = action.clone();
             let popover_for_pin = popover.clone();
             let pin_action = if is_pinned {
-                SidebarAction::Unpin(path.clone())
+                SidebarAction::Unpin(Location::from_local_path(&path))
             } else {
-                SidebarAction::Pin(path.clone())
+                SidebarAction::Pin(Location::from_local_path(&path))
             };
             pin_item.connect_clicked(move |_| {
                 popover_for_pin.popdown();
@@ -633,7 +684,7 @@ fn sidebar_sections(model: &Rc<RefCell<SidebarModel>>) -> Vec<SidebarSection> {
 }
 
 fn clear_navigation_selection(
-    active_path: &RefCell<Option<PathBuf>>,
+    active_path: &RefCell<Option<Location>>,
     active_section: &RefCell<Option<String>>,
 ) {
     *active_path.borrow_mut() = None;
@@ -651,7 +702,6 @@ fn should_show_devices_heading(section_title: &str, node_index: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
-    use std::path::PathBuf;
     use std::rc::Rc;
 
     use crate::core::{SidebarModel, SidebarPreferences};
@@ -683,7 +733,9 @@ mod tests {
 
     #[test]
     fn clearing_navigation_selection_also_clears_the_active_section() {
-        let active_path = RefCell::new(Some(PathBuf::from("/tmp/example")));
+        let active_path = RefCell::new(Some(
+            crate::core::Location::from_uri("file:///tmp/example").unwrap(),
+        ));
         let active_section = RefCell::new(Some("Network & online".to_string()));
 
         super::clear_navigation_selection(&active_path, &active_section);

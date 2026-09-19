@@ -16,14 +16,9 @@ fn default_expanded_section() -> String {
 const REMOTE_CHILD_ATTRIBUTES: &str = "standard::name,standard::display-name,standard::type,standard::icon,standard::content-type,standard::target-uri";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum SidebarLocationKind {
-    Local(PathBuf),
-    Uri(String),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SidebarLocation {
-    kind: SidebarLocationKind,
+    location: Location,
+    local_path: Option<PathBuf>,
     label: String,
     icon_name: String,
 }
@@ -35,7 +30,8 @@ impl SidebarLocation {
         icon_name: impl Into<String>,
     ) -> Self {
         Self {
-            kind: SidebarLocationKind::Local(path),
+            location: Location::from_local_path(&path),
+            local_path: Some(path),
             label: label.into(),
             icon_name: icon_name.into(),
         }
@@ -45,26 +41,33 @@ impl SidebarLocation {
         uri: impl Into<String>,
         label: impl Into<String>,
         icon_name: impl Into<String>,
+    ) -> Result<Self, crate::core::LocationError> {
+        let location = Location::from_uri(&uri.into())?;
+        Ok(Self::from_location(location, label, icon_name))
+    }
+
+    pub fn from_location(
+        location: Location,
+        label: impl Into<String>,
+        icon_name: impl Into<String>,
     ) -> Self {
         Self {
-            kind: SidebarLocationKind::Uri(uri.into()),
+            local_path: location.local_path(),
+            location,
             label: label.into(),
             icon_name: icon_name.into(),
         }
     }
 
     pub fn local_path(&self) -> Option<&Path> {
-        match &self.kind {
-            SidebarLocationKind::Local(path) => Some(path),
-            SidebarLocationKind::Uri(_) => None,
-        }
+        self.local_path.as_deref()
     }
 
     pub fn uri(&self) -> String {
-        match &self.kind {
-            SidebarLocationKind::Local(path) => gio::File::for_path(path).uri().to_string(),
-            SidebarLocationKind::Uri(uri) => uri.clone(),
-        }
+        self.location.uri().to_owned()
+    }
+    pub fn location(&self) -> &Location {
+        &self.location
     }
 
     pub fn label(&self) -> &str {
@@ -97,13 +100,13 @@ impl SidebarNode {
     }
 
     fn remote(
-        uri: String,
+        location: Location,
         label: impl Into<String>,
         icon_name: impl Into<String>,
         expandable: bool,
     ) -> Self {
         Self {
-            location: SidebarLocation::from_uri(uri, label, icon_name),
+            location: SidebarLocation::from_location(location, label, icon_name),
             expandable,
             children: Vec::new(),
         }
@@ -136,8 +139,8 @@ struct StoredPreferences {
 
 pub struct SidebarPreferences {
     path: Option<PathBuf>,
-    pins: Vec<PathBuf>,
-    remote_pins: Vec<String>,
+    pins: Vec<Location>,
+    remote_pins: Vec<Location>,
     section_expanded: BTreeMap<String, bool>,
     expanded_locations: BTreeMap<String, bool>,
     default_expanded_section: String,
@@ -203,22 +206,7 @@ impl SidebarPreferences {
                     continue;
                 };
                 match Location::from_uri(uri) {
-                    Ok(location) => match location.local_path() {
-                        // A V2 file URI is already canonical identity. Do not
-                        // canonicalize the path on disk: that would collapse a
-                        // symlink and change the user's saved pin.
-                        Some(path) if !preferences.pins.contains(&path) => {
-                            preferences.pins.push(path)
-                        }
-                        Some(_) => {}
-                        None => {
-                            if preferences.pin_remote(location.uri().to_owned()).is_err() {
-                                preferences
-                                    .recoverable_notices
-                                    .push(RecoverableStateNotice::MalformedRecord);
-                            }
-                        }
-                    },
+                    Ok(location) => preferences.pin_location(location),
                     Err(_) => preferences
                         .recoverable_notices
                         .push(RecoverableStateNotice::MalformedRecord),
@@ -252,11 +240,31 @@ impl SidebarPreferences {
         Ok(preferences)
     }
 
-    pub fn pins(&self) -> &[PathBuf] {
-        &self.pins
+    pub fn pins(&self) -> Vec<PathBuf> {
+        self.pins.iter().filter_map(Location::local_path).collect()
     }
-    pub fn remote_pins(&self) -> &[String] {
-        &self.remote_pins
+    pub fn remote_pins(&self) -> Vec<String> {
+        self.remote_pins
+            .iter()
+            .map(|location| location.uri().to_owned())
+            .collect()
+    }
+    pub fn locations(&self) -> impl Iterator<Item = &Location> {
+        self.pins.iter().chain(self.remote_pins.iter())
+    }
+    pub fn pin_location(&mut self, location: Location) {
+        let pins = if location.local_path().is_some() {
+            &mut self.pins
+        } else {
+            &mut self.remote_pins
+        };
+        if !pins.contains(&location) {
+            pins.push(location);
+        }
+    }
+    pub fn unpin_location(&mut self, location: &Location) {
+        self.pins.retain(|pin| pin != location);
+        self.remote_pins.retain(|pin| pin != location);
     }
     pub fn recoverable_notices(&self) -> &[RecoverableStateNotice] {
         &self.recoverable_notices
@@ -300,39 +308,26 @@ impl SidebarPreferences {
     }
 
     pub fn pin(&mut self, path: PathBuf) {
-        let identity = local_pin_identity(&path);
-        if !self
-            .pins
-            .iter()
-            .any(|pinned| local_pin_identity(pinned) == identity)
-        {
-            self.pins.push(path);
-        }
+        self.pin_location(Location::from_local_path(&path));
     }
 
     pub fn unpin(&mut self, path: &Path) {
-        let identity = local_pin_identity(path);
-        self.pins
-            .retain(|pinned| local_pin_identity(pinned) != identity);
+        self.unpin_location(&Location::from_local_path(path));
     }
 
     pub fn is_pinned(&self, path: &Path) -> bool {
-        let identity = local_pin_identity(path);
-        self.pins
-            .iter()
-            .any(|pinned| local_pin_identity(pinned) == identity)
+        self.pins.contains(&Location::from_local_path(path))
     }
 
     pub fn pin_remote(&mut self, uri: String) -> Result<(), String> {
         let uri = normalized_remote_uri(&uri)?;
-        if !self.remote_pins.contains(&uri) {
-            self.remote_pins.push(uri);
-        }
+        let location = Location::from_uri(&uri).map_err(|error| error.to_string())?;
+        self.pin_location(location);
         Ok(())
     }
 
     pub fn unpin_remote(&mut self, uri: &str) {
-        self.remote_pins.retain(|pinned| pinned != uri);
+        self.remote_pins.retain(|pinned| pinned.uri() != uri);
     }
 
     pub fn save(&self) -> io::Result<()> {
@@ -349,15 +344,8 @@ impl SidebarPreferences {
         let bytes = serde_json::to_vec_pretty(&StoredPreferences {
             schema_version: Some(2),
             locations: self
-                .pins
-                .iter()
-                .map(|path| Location::from_local_path(path).uri().to_owned())
-                .chain(
-                    self.remote_pins
-                        .iter()
-                        .filter_map(|uri| Location::from_uri(uri).ok())
-                        .map(|location| location.uri().to_owned()),
-                )
+                .locations()
+                .map(|location| location.uri().to_owned())
                 .map(serde_json::Value::String)
                 .collect(),
             pins: Vec::new(),
@@ -467,7 +455,6 @@ impl SidebarModel {
             .preferences
             .pins()
             .iter()
-            .filter(|path| path.exists())
             .map(|path| {
                 SidebarNode::local(
                     path.clone(),
@@ -526,22 +513,22 @@ impl SidebarModel {
     fn network_and_online(&self) -> SidebarSection {
         let mut nodes = vec![
             SidebarNode::remote(
-                "network:///".into(),
+                Location::from_uri("network:///").unwrap(),
                 "Browse Network",
                 "network-workgroup-symbolic",
                 true,
             ),
             SidebarNode::remote(
-                "computer:///".into(),
+                Location::from_uri("computer:///").unwrap(),
                 "Online accounts",
                 "folder-remote-symbolic",
                 true,
             ),
         ];
-        nodes.extend(self.preferences.remote_pins().iter().map(|uri| {
+        nodes.extend(self.preferences.remote_pins.iter().map(|location| {
             SidebarNode::remote(
-                uri.clone(),
-                remote_label(uri),
+                location.clone(),
+                remote_label(location.uri()),
                 "folder-remote-symbolic",
                 true,
             )
@@ -584,9 +571,10 @@ impl SidebarModel {
             .into_iter()
             .filter_map(|mount| {
                 let root = mount.root();
+                let location = Location::try_from_file(root.clone()).ok()?;
                 (!is_local_mount_uri(&root.uri())).then(|| {
                     SidebarNode::remote(
-                        root.uri().to_string(),
+                        location,
                         mount.name(),
                         mount_icon_name(&mount, "folder-remote-symbolic"),
                         true,
@@ -618,8 +606,11 @@ impl SidebarModel {
                 .attribute_string("standard::target-uri")
                 .map(|uri| uri.to_string())
                 .unwrap_or_else(|| canonical_child_uri(uri, &info.name()));
+            let Ok(location) = Location::from_uri(&child_uri) else {
+                continue;
+            };
             children.push(SidebarNode::remote(
-                child_uri,
+                location,
                 info.display_name(),
                 icon,
                 true,
@@ -632,10 +623,6 @@ impl SidebarModel {
 
 fn normalized_path(path: PathBuf) -> PathBuf {
     fs::canonicalize(&path).unwrap_or(path)
-}
-
-fn local_pin_identity(path: &Path) -> String {
-    Location::from_local_path(path).uri().to_owned()
 }
 
 fn display_name(path: &Path) -> String {
@@ -845,7 +832,8 @@ mod tests {
             "google-drive://account/root",
             "Google Drive",
             "folder-remote-symbolic",
-        );
+        )
+        .unwrap();
         assert!(location.local_path().is_none());
         assert_eq!(location.uri(), "google-drive://account/root");
     }
@@ -924,7 +912,10 @@ mod tests {
         );
         preferences.save().unwrap();
         let saved: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
-        assert_eq!(saved["locations"], serde_json::json!(["google-drive://account/root"]));
+        assert_eq!(
+            saved["locations"],
+            serde_json::json!(["google-drive://account/root"])
+        );
     }
 
     #[test]
@@ -949,7 +940,8 @@ mod tests {
             "network:///",
             "Browse Network",
             "network-workgroup-symbolic",
-        );
+        )
+        .unwrap();
         let _children = model.children_for_location(&network);
     }
 
@@ -957,7 +949,8 @@ mod tests {
     fn online_provider_root_can_be_enumerated_without_a_gio_critical() {
         let model = SidebarModel::new(SidebarPreferences::in_memory(), PathBuf::from("/tmp"));
         let providers =
-            SidebarLocation::from_uri("computer:///", "Online accounts", "folder-remote-symbolic");
+            SidebarLocation::from_uri("computer:///", "Online accounts", "folder-remote-symbolic")
+                .unwrap();
         let _children = model.children_for_location(&providers);
     }
 

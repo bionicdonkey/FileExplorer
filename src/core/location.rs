@@ -24,6 +24,21 @@ impl fmt::Display for LocationError {
 }
 impl std::error::Error for LocationError {}
 
+/// The sole text-entry boundary: absolute local paths or validated URIs.
+pub struct LocationInput;
+impl LocationInput {
+    pub fn parse(input: &str) -> Result<Location, LocationError> {
+        if input.is_empty() || input.chars().any(char::is_control) {
+            return Err(LocationError::UnsafeLocation);
+        }
+        if Path::new(input).is_absolute() {
+            Ok(Location::from_local_path(Path::new(input)))
+        } else {
+            Location::from_uri(input)
+        }
+    }
+}
+
 /// A requested URI together with the URI ultimately reached by a provider.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedLocation {
@@ -91,6 +106,16 @@ impl Location {
     }
     pub fn local_path(&self) -> Option<PathBuf> {
         self.file.path()
+    }
+
+    pub fn parent(&self) -> Option<Self> {
+        self.file
+            .parent()
+            .and_then(|file| Self::try_from_file(file).ok())
+    }
+
+    pub fn is_within(&self, root: &Self) -> bool {
+        self == root || self.file.has_prefix(&root.file)
     }
 
     /// A concise label suitable for a tab, breadcrumb, or sidebar row.

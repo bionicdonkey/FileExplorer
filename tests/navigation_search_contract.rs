@@ -13,6 +13,104 @@ use zorin_explorer::{
 fn location(uri: &str) -> Location {
     Location::from_uri(uri).unwrap()
 }
+
+#[test]
+fn slice2_location_input_and_session_keep_nonlocal_identity() {
+    use zorin_explorer::core::{
+        application_preferences::{decode_session, encode_session},
+        location::LocationInput,
+    };
+    for uri in ["trash:///", "smb://host/share", "network:///"] {
+        let parsed = LocationInput::parse(uri).unwrap();
+        assert_eq!(parsed.uri(), uri);
+        assert_eq!(
+            decode_session(&encode_session(&[parsed]).unwrap()).unwrap()[0].uri(),
+            uri
+        );
+    }
+    assert_eq!(
+        LocationInput::parse("/tmp/a b").unwrap().uri(),
+        "file:///tmp/a%20b"
+    );
+    assert!(LocationInput::parse("smb://user:password@host/share").is_err());
+    assert!(LocationInput::parse("").is_err());
+}
+
+#[test]
+fn slice2_unmount_cancels_pending_and_preserves_history_for_reconnect() {
+    let mut tab = TabState::new(location("file:///home"));
+    success(&mut tab, "file:///home");
+    success(&mut tab, "smb://host/share/folder");
+    let pending = tab.begin_refresh().unwrap();
+    assert!(!tab.mark_unavailable(&location("smb://other/share")));
+    assert!(tab.mark_unavailable(&location("smb://host/share")));
+    assert!(pending.request.cancellable.is_cancelled());
+    assert!(
+        matches!(&tab.content, TabContent::Unavailable(l) if l.uri() == "smb://host/share/folder")
+    );
+    assert_eq!(
+        tab.history.current().unwrap().uri(),
+        "smb://host/share/folder"
+    );
+    assert_eq!(tab.history.back_target().unwrap().uri(), "file:///home");
+    assert!(tab.directory.is_none());
+    let retry = tab.begin_retry().unwrap();
+    assert_eq!(retry.request.location.uri(), "smb://host/share/folder");
+    assert!(!tab.apply_directory_result(
+        pending.generation,
+        RequestCompletion {
+            id: pending.request.id,
+            outcome: RequestOutcome::Succeeded(snapshot("smb://host/share/folder")),
+        }
+    ));
+    assert!(tab.apply_directory_result(
+        retry.generation,
+        RequestCompletion {
+            id: retry.request.id,
+            outcome: RequestOutcome::Succeeded(snapshot("smb://host/share/folder")),
+        }
+    ));
+    assert_eq!(tab.history.back_target().unwrap().uri(), "file:///home");
+}
+
+#[test]
+fn slice2_picker_requests_remote_locations_and_cancels_on_replacement() {
+    use zorin_explorer::ui::folder_picker::FolderPicker;
+    let repo = Rc::new(ControlledRepository::default());
+    let picker = FolderPicker::new(location("trash:///"), repo.clone());
+    picker.select_location(location("smb://host/one"));
+    picker.select_location(location("smb://host/two"));
+    let (first, first_done) = repo.0.borrow_mut().remove(0);
+    let (second, second_done) = repo.0.borrow_mut().remove(0);
+    assert!(first.cancellable.is_cancelled());
+    assert_eq!(second.location.uri(), "smb://host/two");
+    second_done(RequestCompletion {
+        id: second.id,
+        outcome: RequestOutcome::Succeeded(snapshot("smb://host/two")),
+    });
+    first_done(RequestCompletion {
+        id: first.id,
+        outcome: RequestOutcome::Succeeded(snapshot("smb://host/one")),
+    });
+    assert_eq!(picker.current_location().uri(), "smb://host/two");
+}
+
+#[test]
+fn slice2_first_reconnect_commits_initial_history_only_after_success() {
+    let root = location("smb://host/share");
+    let mut tab = TabState::new(root.clone());
+    tab.mark_unavailable(&root);
+    assert!(tab.history.current().is_none());
+    let request = tab.begin_retry().unwrap();
+    tab.apply_directory_result(
+        request.generation,
+        RequestCompletion {
+            id: request.request.id,
+            outcome: RequestOutcome::Succeeded(snapshot(root.uri())),
+        },
+    );
+    assert_eq!(tab.history.current(), Some(&root));
+}
 fn snapshot(uri: &str) -> DirectorySnapshot {
     let location = location(uri);
     DirectorySnapshot {

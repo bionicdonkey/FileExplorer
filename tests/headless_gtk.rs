@@ -36,8 +36,7 @@ fn slice2_navigation_commits_after_success_and_refresh_restores_selection() {
             ..Default::default()
         },
     );
-    let view =
-        FileView::new_with_repository(Rc::new(RefCell::new("/test".into())), provider.clone());
+    let view = FileView::new_with_repository(root.clone(), provider.clone());
     view.set_options(zorin_explorer::core::ViewOptions {
         view_mode: zorin_explorer::core::ViewMode::DetailedList,
         group_field: zorin_explorer::core::GroupField::None,
@@ -143,7 +142,113 @@ fn slice2_navigation_commits_after_success_and_refresh_restores_selection() {
     }
     assert_eq!(view.section_title(), None);
     assert_eq!(view.current_location().uri(), "smb://host/missing");
+
+    // The same address component is used by the window and folder picker.
+    let bar = zorin_explorer::ui::header::LocationBar::new(&root);
+    let entered = Rc::new(RefCell::new(Vec::new()));
+    bar.connect_location_changed({
+        let entered = entered.clone();
+        move |location| entered.borrow_mut().push(location)
+    });
+    bar.set_uri("smb://host/missing");
+    bar.set_section("Network & online");
+    bar.focus_location();
+    assert_eq!(bar.widget.visible_child_name().as_deref(), Some("entry"));
+    let entry = bar
+        .widget
+        .child_by_name("entry")
+        .unwrap()
+        .downcast::<gtk::Entry>()
+        .unwrap();
+    assert_eq!(
+        entry.text(),
+        "smb://host/missing",
+        "overview editing retains the underlying URI"
+    );
+    entry.set_text("trash:///");
+    entry.emit_activate();
+    assert_eq!(entered.borrow()[0].uri(), "trash:///");
+    entry.set_text("smb://user:secret@host/share");
+    entry.emit_activate();
+    assert_eq!(entered.borrow().len(), 1);
+    assert!(entry.has_css_class("error"));
+
+    fn named_button(widget: &gtk::Widget, label: &str) -> Option<gtk::Button> {
+        if let Some(button) = widget.downcast_ref::<gtk::Button>() {
+            if button.label().as_deref() == Some(label) {
+                return Some(button.clone());
+            }
+        }
+        let mut child = widget.first_child();
+        while let Some(widget) = child {
+            if let Some(button) = named_button(&widget, label) {
+                return Some(button);
+            }
+            child = widget.next_sibling();
+        }
+        None
+    }
+    let removed_root = Location::from_uri("smb://host/").unwrap();
+    view.mark_unavailable(&removed_root);
+    assert!(
+        matches!(&view.tab_state().borrow().content, zorin_explorer::core::navigation::TabContent::Unavailable(location) if location.uri() == "smb://host/missing")
+    );
+    assert_eq!(view.tab_state().borrow().history.back_target(), Some(&root));
+    named_button(view.widget.upcast_ref(), "Reconnect")
+        .unwrap()
+        .emit_clicked();
+    provider.advance(1);
+    while context.pending() {
+        context.iteration(false);
+    }
+    assert!(matches!(
+        view.tab_state().borrow().status,
+        NavigationStatus::Ready
+    ));
+    assert_eq!(view.tab_state().borrow().history.back_target(), Some(&root));
+
+    let activated = Rc::new(RefCell::new(None));
+    view.set_navigation_handler({
+        let activated = activated.clone();
+        move |location| *activated.borrow_mut() = Some(location)
+    });
+    let result_location = Location::from_uri("smb://host/result").unwrap();
+    let result = EntrySnapshot {
+        location: result_location.clone(),
+        display_name: "A remote result".into(),
+        kind: EntryKind::Directory,
+        size: None,
+        modified: None,
+        content_type: None,
+        capabilities: CapabilitySnapshot::default(),
+    };
+    view.show_search_results(vec![zorin_explorer::core::FileItem::from_snapshot(&result)]);
+    view.column_view()
+        .unwrap()
+        .emit_by_name::<()>("activate", &[&0u32]);
+    assert_eq!(*activated.borrow(), Some(result_location));
+
+    let closed = Rc::new(std::cell::Cell::new(false));
+    view.set_close_handler({
+        let closed = closed.clone();
+        move || closed.set(true)
+    });
+    view.mark_unavailable(&removed_root);
+    named_button(view.widget.upcast_ref(), "Close")
+        .unwrap()
+        .emit_clicked();
+    assert!(closed.get());
     view.close();
+
+    let unavailable_local = FileView::new_with_repository(root.clone(), provider.clone());
+    provider.advance(1);
+    while context.pending() {
+        context.iteration(false);
+    }
+    unavailable_local.mark_unavailable(&root);
+    assert!(!unavailable_local.command_availability().can_paste);
+    assert_eq!(unavailable_local.current_location(), root);
+    unavailable_local.close();
 }
 
 fn remote_item() -> zorin_explorer::core::FileItem {

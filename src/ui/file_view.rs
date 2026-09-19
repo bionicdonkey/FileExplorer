@@ -62,40 +62,47 @@ fn command_availability_for_target(
 #[derive(Clone)]
 pub struct FileView {
     pub widget: ScrolledWindow,
-    /// Compatibility local-tab path. It is never used as the current URI
-    /// identity while a remote location is displayed.
-    location: Rc<RefCell<PathBuf>>,
     navigation: NavigationCoordinator,
     on_location_committed: Rc<RefCell<Option<Box<dyn Fn(Location)>>>>,
-    on_navigate: Rc<RefCell<Option<Box<dyn Fn(PathBuf)>>>>,
-    on_uri_navigate: Rc<RefCell<Option<Box<dyn Fn(String)>>>>,
+    on_navigate: Rc<RefCell<Option<Box<dyn Fn(Location)>>>>,
+    on_close: Rc<RefCell<Option<Box<dyn Fn()>>>>,
     on_context_command: Rc<RefCell<Option<Box<dyn Fn(ContextTarget, ContextCommand)>>>>,
     on_options_changed: Rc<RefCell<Option<Box<dyn Fn(ViewOptions)>>>>,
     options: Rc<RefCell<ViewOptions>>,
     selected_target: Rc<RefCell<Option<ContextTarget>>>,
     on_command_availability_changed: Rc<RefCell<Option<Box<dyn Fn(CommandAvailability)>>>>,
     pending_cut: Rc<RefCell<Option<PathBuf>>>,
-    is_quick_access_location: Rc<RefCell<Option<Rc<dyn Fn(&Path) -> bool>>>>,
+    is_quick_access_location: Rc<RefCell<Option<Rc<dyn Fn(&Location) -> bool>>>>,
 }
 
 impl FileView {
-    pub fn new(location: Rc<RefCell<PathBuf>>) -> Self {
-        Self::new_with_repository(
-            location,
-            Rc::new(GioDirectoryRepository::new(
-                glib::MainContext::ref_thread_default(),
-            )),
-        )
+    pub fn new(location: Location) -> Self {
+        Self::from_location(location)
+    }
+
+    pub fn from_location(initial: Location) -> Self {
+        let repository = Rc::new(GioDirectoryRepository::new(
+            glib::MainContext::ref_thread_default(),
+        ));
+        let view = Self::new_with_repository(initial, repository.clone());
+        let widget = view.widget.downgrade();
+        repository.set_mount_operation(move || {
+            let parent = widget
+                .upgrade()
+                .and_then(|widget| widget.root())
+                .and_downcast::<gtk::Window>();
+            gtk::MountOperation::new(parent.as_ref()).upcast()
+        });
+        view
     }
 
     pub fn new_with_repository(
-        location: Rc<RefCell<PathBuf>>,
+        current_location: Location,
         repository: Rc<dyn crate::core::ports::DirectoryRepository>,
     ) -> Self {
         let scroll = ScrolledWindow::new();
         scroll.set_vexpand(true);
         let on_navigate = Rc::new(RefCell::new(None));
-        let current_location = Location::from_local_path(&location.borrow());
         let view = Self {
             widget: scroll,
             navigation: NavigationCoordinator::new(
@@ -103,9 +110,8 @@ impl FileView {
                 repository,
             ),
             on_location_committed: Rc::new(RefCell::new(None)),
-            location,
             on_navigate,
-            on_uri_navigate: Rc::new(RefCell::new(None)),
+            on_close: Rc::new(RefCell::new(None)),
             on_context_command: Rc::new(RefCell::new(None)),
             on_options_changed: Rc::new(RefCell::new(None)),
             options: Rc::new(RefCell::new(ViewOptions::default())),
@@ -151,7 +157,7 @@ impl FileView {
         }
     }
 
-    fn navigate(&self, location: Location) {
+    pub fn navigate(&self, location: Location) {
         let view = self.clone();
         self.navigation.navigate(location, move |accepted| {
             if accepted {
@@ -187,6 +193,18 @@ impl FileView {
         self.navigation.close_tab();
     }
 
+    pub fn set_close_handler(&self, callback: impl Fn() + 'static) {
+        *self.on_close.borrow_mut() = Some(Box::new(callback));
+    }
+
+    pub fn mark_unavailable(&self, root: &Location) {
+        if self.navigation.state.borrow_mut().mark_unavailable(root) {
+            *self.selected_target.borrow_mut() = None;
+            self.notify_command_availability_changed();
+            self.reload();
+        }
+    }
+
     pub fn set_location_committed_handler(&self, callback: impl Fn(Location) + 'static) {
         *self.on_location_committed.borrow_mut() = Some(Box::new(callback));
     }
@@ -204,9 +222,6 @@ impl FileView {
         let succeeded = matches!(state.status, NavigationStatus::Ready);
         drop(state);
         if succeeded {
-            if let Some(path) = location.local_path() {
-                *self.location.borrow_mut() = path;
-            }
             let state = self.navigation.state.borrow();
             *self.selected_target.borrow_mut() = state.directory.as_ref().and_then(|snapshot| {
                 snapshot
@@ -258,23 +273,19 @@ impl FileView {
         }
     }
 
-    pub fn set_navigation_handler<F: Fn(PathBuf) + 'static>(&self, callback: F) {
+    pub fn set_navigation_handler<F: Fn(Location) + 'static>(&self, callback: F) {
         *self.on_navigate.borrow_mut() = Some(Box::new(callback));
-    }
-
-    pub fn set_uri_navigation_handler<F: Fn(String) + 'static>(&self, callback: F) {
-        *self.on_uri_navigate.borrow_mut() = Some(Box::new(callback));
     }
 
     pub fn set_context_handler<F: Fn(ContextTarget, ContextCommand) + 'static>(&self, callback: F) {
         *self.on_context_command.borrow_mut() = Some(Box::new(callback));
     }
 
-    pub fn set_quick_access_predicate<F: Fn(&Path) -> bool + 'static>(&self, predicate: F) {
+    pub fn set_quick_access_predicate<F: Fn(&Location) -> bool + 'static>(&self, predicate: F) {
         *self.is_quick_access_location.borrow_mut() = Some(Rc::new(predicate));
     }
 
-    fn is_quick_access_location(&self, path: &Path) -> bool {
+    fn is_quick_access_location(&self, path: &Location) -> bool {
         self.is_quick_access_location
             .borrow()
             .as_ref()
@@ -290,6 +301,14 @@ impl FileView {
     }
 
     pub fn command_availability(&self) -> CommandAvailability {
+        if matches!(
+            self.navigation.state.borrow().content,
+            TabContent::Unavailable(_)
+        ) {
+            let mut availability = CommandAvailability::for_selection(&[], None);
+            availability.disabled_reason = Some("This location is unavailable");
+            return availability;
+        }
         let selected_target = self.selected_target();
         command_availability_for_target(selected_target.as_ref(), &self.current_location())
     }
@@ -316,6 +335,12 @@ impl FileView {
     }
 
     pub fn dispatch_context_command(&self, target: ContextTarget, command: ContextCommand) {
+        if matches!(
+            self.navigation.state.borrow().content,
+            TabContent::Unavailable(_)
+        ) {
+            return;
+        }
         if !CommandAvailability::for_target(&target).allows(command) {
             return;
         }
@@ -340,10 +365,6 @@ impl FileView {
 
     pub fn options(&self) -> ViewOptions {
         self.options.borrow().clone()
-    }
-
-    pub fn location(&self) -> PathBuf {
-        self.location.borrow().clone()
     }
 
     pub fn uri(&self) -> Option<String> {
@@ -439,6 +460,27 @@ impl FileView {
         let state = self.navigation.state.borrow().clone();
         let options = self.options();
         let mut items = match state.content {
+            TabContent::Unavailable(location)
+                if !matches!(state.status, NavigationStatus::Loading(_)) =>
+            {
+                let content = GtkBox::new(Orientation::Vertical, 12);
+                content.append(&Label::new(Some("This location is unavailable")));
+                content.append(&Label::new(Some(&location.display_name())));
+                let reconnect = Button::with_label("Reconnect");
+                let view = self.clone();
+                reconnect.connect_clicked(move |_| view.refresh());
+                content.append(&reconnect);
+                let close = Button::with_label("Close");
+                let handler = self.on_close.clone();
+                close.connect_clicked(move |_| {
+                    if let Some(callback) = handler.borrow().as_ref() {
+                        callback();
+                    }
+                });
+                content.append(&close);
+                self.widget.set_child(Some(&content));
+                return;
+            }
             TabContent::SectionOverview { section, .. } => {
                 self.render_section_overview(&section);
                 self.show_error();
@@ -563,16 +605,11 @@ impl FileView {
     }
 
     fn open_sidebar_location(&self, location: &SidebarLocation) {
-        match location.local_path() {
-            Some(path) => {
-                if let Some(callback) = self.on_navigate.borrow().as_ref() {
-                    callback(path.to_path_buf());
-                }
-            }
-            None => {
-                if let Some(callback) = self.on_uri_navigate.borrow().as_ref() {
-                    callback(location.uri());
-                }
+        if let Ok(location) = Location::from_uri(&location.uri()) {
+            if let Some(callback) = self.on_navigate.borrow().as_ref() {
+                callback(location);
+            } else {
+                self.navigate(location);
             }
         }
     }
@@ -1209,7 +1246,7 @@ fn context_command_label_for(
     view: &FileView,
 ) -> &'static str {
     if command == ContextCommand::ToggleQuickAccess
-        && target_local_path(target).is_some_and(|path| view.is_quick_access_location(&path))
+        && target_location(target).is_some_and(|location| view.is_quick_access_location(&location))
     {
         "Unpin from Quick access"
     } else {
@@ -1459,10 +1496,8 @@ fn file_target_from_row(row: &ListRow) -> Option<ContextTarget> {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
     use std::fs;
     use std::path::PathBuf;
-    use std::rc::Rc;
 
     use gio::prelude::FileExt;
     use gtk::prelude::{ListModelExt, WidgetExt};
@@ -1488,7 +1523,7 @@ mod tests {
         assert_eq!(state.location.uri(), "smb://server/share");
         state.restore_directory();
         assert_eq!(state.location.uri(), "smb://server/share");
-        assert!(matches!(state.content, TabContent::Directory(_)));
+        assert!(matches!(state.content, TabContent::Unavailable(_)));
     }
 
     #[test]
@@ -1511,10 +1546,10 @@ mod tests {
 
     #[test]
     #[ignore = "requires a GTK desktop session"]
-    fn remote_current_location_does_not_replace_the_local_compatibility_path() {
+    fn remote_current_location_has_no_local_compatibility_path() {
         gtk::init().unwrap();
         let local = PathBuf::from("/tmp");
-        let view = FileView::new(Rc::new(RefCell::new(local.clone())));
+        let view = FileView::new(Location::from_local_path(&local));
 
         view.set_uri("smb://host/share".into());
 
@@ -1540,7 +1575,7 @@ mod tests {
             },
         );
         assert_eq!(view.current_location().uri(), "smb://host/share");
-        assert_eq!(view.location(), local);
+        assert!(view.current_location().local_path().is_none());
         assert_eq!(view.command_availability().can_paste, false);
     }
 
@@ -1646,7 +1681,7 @@ mod tests {
     #[ignore = "requires a GTK desktop session"]
     fn setting_icon_grid_replaces_the_detail_list_renderer() {
         gtk::init().expect("GTK should initialize for widget tests");
-        let view = FileView::new(Rc::new(RefCell::new(PathBuf::from("/tmp"))));
+        let view = FileView::new(Location::from_uri("file:///tmp").unwrap());
 
         view.set_options(ViewOptions {
             view_mode: ViewMode::IconGrid,
@@ -1660,7 +1695,7 @@ mod tests {
     #[ignore = "requires a GTK desktop session"]
     fn icon_grid_requires_double_click_to_activate_an_item() {
         gtk::init().expect("GTK should initialize for widget tests");
-        let view = FileView::new(Rc::new(RefCell::new(PathBuf::from("/tmp"))));
+        let view = FileView::new(Location::from_uri("file:///tmp").unwrap());
         let grid = view.grid_view(&[], &ViewOptions::default());
 
         assert!(!grid.activates_on_single_click());
@@ -1670,7 +1705,7 @@ mod tests {
     #[ignore = "requires a GTK desktop session"]
     fn list_modes_build_four_reorderable_resizable_columns() {
         gtk::init().expect("GTK should initialize for widget tests");
-        let view = FileView::new(Rc::new(RefCell::new(PathBuf::from("/tmp"))));
+        let view = FileView::new(Location::from_uri("file:///tmp").unwrap());
 
         for mode in [ViewMode::DetailedList, ViewMode::CompactList] {
             view.set_options(ViewOptions {
@@ -1687,7 +1722,7 @@ mod tests {
     #[ignore = "requires a GTK desktop session"]
     fn file_scroller_relies_on_the_window_for_its_right_inset() {
         gtk::init().expect("GTK should initialize for widget tests");
-        let view = FileView::new(Rc::new(RefCell::new(PathBuf::from("/tmp"))));
+        let view = FileView::new(Location::from_uri("file:///tmp").unwrap());
 
         assert_eq!(view.widget.margin_end(), 0);
     }
@@ -1821,46 +1856,25 @@ fn format_modified(modified: std::time::SystemTime) -> String {
     }
 }
 
-fn activate_path(view: &FileView, path: PathBuf) {
-    if path.is_dir() {
-        if let Some(callback) = view.on_navigate.borrow().as_ref() {
-            callback(path);
-        } else {
-            view.set_location(path);
-        }
-    } else {
-        open_with_default_application(&path);
-    }
-}
-
 fn activate_item(view: &FileView, item: FileItem) {
     let uri = item.location().uri();
     if item.is_dir() {
-        if let Some(path) = item.local_path() {
-            activate_path(view, path);
-        } else if let Some(callback) = view.on_uri_navigate.borrow().as_ref() {
-            callback(uri.to_owned());
+        if let Some(callback) = view.on_navigate.borrow().as_ref() {
+            callback(item.location().clone());
         } else {
-            view.set_uri(uri.to_owned());
+            view.navigate(item.location().clone());
         }
     } else {
         let _ = gio::AppInfo::launch_default_for_uri(uri, None::<&gio::AppLaunchContext>);
     }
 }
 
-fn target_local_path(target: &ContextTarget) -> Option<PathBuf> {
+fn target_location(target: &ContextTarget) -> Option<Location> {
     match target {
-        ContextTarget::File(item) | ContextTarget::Folder(item) => item.local_path(),
+        ContextTarget::File(item) | ContextTarget::Folder(item) => Some(item.location().clone()),
         ContextTarget::Background(location) | ContextTarget::SidebarLocation(location) => {
-            location.local_path()
+            Some(location.clone())
         }
         ContextTarget::Tab => None,
-    }
-}
-
-fn open_with_default_application(path: &std::path::Path) {
-    let uri = gio::File::for_path(path).uri();
-    if gio::AppInfo::launch_default_for_uri(&uri, None::<&gio::AppLaunchContext>).is_err() {
-        let _ = std::process::Command::new("xdg-open").arg(path).spawn();
     }
 }

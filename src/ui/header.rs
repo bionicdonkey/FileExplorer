@@ -7,7 +7,7 @@ use gtk::{
     Box as GtkBox, Button, Entry, GestureClick, Image, Label, Orientation, Separator, Stack,
 };
 
-use crate::core::location::Location;
+use crate::core::location::{Location, LocationInput};
 use crate::ui::context_menu::{configure_command_button, CommandAvailability, ContextCommand};
 
 #[derive(Clone, Copy)]
@@ -36,16 +36,16 @@ pub struct LocationBar {
     entry: Entry,
     breadcrumbs: GtkBox,
     stack: Stack,
-    on_navigate: Rc<RefCell<Option<Box<dyn Fn(PathBuf)>>>>,
+    on_navigate: Rc<RefCell<Option<Box<dyn Fn(Location)>>>>,
 }
 
 impl LocationBar {
-    pub fn new(initial: &std::path::Path) -> Self {
+    pub fn new(initial: &Location) -> Self {
         let entry = Entry::builder().hexpand(true).build();
         entry.set_tooltip_text(Some("Location (Ctrl+L)"));
         entry.add_css_class("monospace");
         entry.add_css_class("location-entry");
-        entry.set_text(&initial.display().to_string());
+        entry.set_text(initial.uri());
         let breadcrumbs = GtkBox::new(Orientation::Horizontal, 2);
         breadcrumbs.set_hexpand(true);
         breadcrumbs.add_css_class("location-bar");
@@ -76,19 +76,30 @@ impl LocationBar {
             stack,
             on_navigate,
         };
-        bar.render_breadcrumbs(initial);
+        bar.set_uri(initial.uri());
         bar
     }
 
-    pub fn connect_location_changed<F: Fn(PathBuf) + 'static>(&self, callback: F) {
+    pub fn connect_location_changed<F: Fn(Location) + 'static>(&self, callback: F) {
         let stack = self.stack.clone();
         self.entry.connect_activate(move |entry| {
-            callback(PathBuf::from(entry.text().as_str()));
-            stack.set_visible_child_name("breadcrumbs");
+            match LocationInput::parse(entry.text().as_str()) {
+                Ok(location) => {
+                    entry.remove_css_class("error");
+                    callback(location);
+                    stack.set_visible_child_name("breadcrumbs");
+                }
+                Err(_) => {
+                    entry.add_css_class("error");
+                    entry.set_tooltip_text(Some(
+                        "Enter an absolute path or a URI without credentials",
+                    ));
+                }
+            }
         });
     }
 
-    pub fn set_navigation_handler<F: Fn(PathBuf) + 'static>(&self, callback: F) {
+    pub fn set_navigation_handler<F: Fn(Location) + 'static>(&self, callback: F) {
         *self.on_navigate.borrow_mut() = Some(Box::new(callback));
         self.render_breadcrumbs_from_entry();
     }
@@ -105,8 +116,13 @@ impl LocationBar {
         self.stack.set_visible_child_name("breadcrumbs");
     }
 
+    pub fn focus_location(&self) {
+        self.stack.set_visible_child_name("entry");
+        self.entry.grab_focus();
+        self.entry.select_region(0, -1);
+    }
+
     pub fn set_section(&self, title: &str) {
-        self.entry.set_text(title);
         while let Some(child) = self.breadcrumbs.first_child() {
             self.breadcrumbs.remove(&child);
         }
@@ -121,8 +137,9 @@ impl LocationBar {
     }
 
     fn render_breadcrumbs_from_entry(&self) {
-        let path = PathBuf::from(self.entry.text().as_str());
-        self.render_breadcrumbs(&path);
+        if let Ok(location) = LocationInput::parse(self.entry.text().as_str()) {
+            self.set_uri(location.uri());
+        }
     }
 
     fn render_breadcrumbs(&self, path: &std::path::Path) {
@@ -189,37 +206,59 @@ impl LocationBar {
     }
 
     fn render_uri_breadcrumbs(&self, uri: &str) {
+        if let Ok(location) = Location::from_uri(uri) {
+            if let Some(path) = location.local_path() {
+                self.render_breadcrumbs(&path);
+                return;
+            }
+        }
         while let Some(child) = self.breadcrumbs.first_child() {
             self.breadcrumbs.remove(&child);
         }
 
-        let (base, remaining) = match uri.split_once("://") {
-            Some((scheme, rest)) => (format!("{scheme}://"), rest),
-            None => (String::new(), uri),
+        let Ok(location) = Location::from_uri(uri) else {
+            return;
         };
-        let segments = remaining
-            .split('/')
-            .filter(|segment| !segment.is_empty())
-            .collect::<Vec<_>>();
-        let root = Button::with_label(if base.is_empty() { "/" } else { &base });
-        root.add_css_class("flat");
-        root.add_css_class("breadcrumb-segment");
-        if segments.is_empty() {
-            root.add_css_class("breadcrumb-current");
+        // Provider parent handles preserve escaping and provider-specific roots.
+        // Show compact labels immediately, then update from asynchronous metadata.
+        let mut chain = vec![location];
+        while chain.len() < 8 {
+            let Some(parent) = chain.last().and_then(Location::parent) else {
+                break;
+            };
+            if chain.contains(&parent) {
+                break;
+            }
+            chain.push(parent);
         }
-        self.breadcrumbs.append(&root);
-
-        for (index, segment) in segments.iter().enumerate() {
-            let separator = Label::new(Some("/"));
-            separator.add_css_class("breadcrumb-separator");
-            self.breadcrumbs.append(&separator);
-            let button = Button::with_label(segment);
+        chain.reverse();
+        for (index, location) in chain.iter().enumerate() {
+            if index > 0 {
+                self.breadcrumbs.append(&Label::new(Some("/")));
+            }
+            let button = Button::with_label(&location.display_name());
             button.add_css_class("flat");
             button.add_css_class("breadcrumb-segment");
-            if index + 1 == segments.len() {
+            let current = index + 1 == chain.len();
+            if current {
                 button.add_css_class("breadcrumb-current");
             }
+            self.connect_location_breadcrumb(&button, location.clone(), current);
             self.breadcrumbs.append(&button);
+            let weak = button.downgrade();
+            gio::File::for_uri(location.uri()).query_info_async(
+                "standard::display-name",
+                gio::FileQueryInfoFlags::NONE,
+                glib::Priority::DEFAULT,
+                gio::Cancellable::NONE,
+                move |result| {
+                    if let (Some(button), Ok(info)) = (weak.upgrade(), result) {
+                        if !info.display_name().is_empty() {
+                            button.set_label(&info.display_name());
+                        }
+                    }
+                },
+            );
         }
         let trailing = Label::new(None);
         trailing.set_hexpand(true);
@@ -227,12 +266,16 @@ impl LocationBar {
     }
 
     fn connect_breadcrumb(&self, button: &Button, path: PathBuf, edit_after: bool) {
+        self.connect_location_breadcrumb(button, Location::from_local_path(&path), edit_after);
+    }
+
+    fn connect_location_breadcrumb(&self, button: &Button, location: Location, edit_after: bool) {
         let handler = self.on_navigate.clone();
         let stack = self.stack.clone();
         let entry = self.entry.clone();
         button.connect_clicked(move |_| {
             if let Some(callback) = handler.borrow().as_ref() {
-                callback(path.clone());
+                callback(location.clone());
             }
             if edit_after {
                 stack.set_visible_child_name("entry");
@@ -259,7 +302,7 @@ pub struct HeaderControls {
 }
 
 impl HeaderControls {
-    pub fn new(location: Rc<RefCell<PathBuf>>) -> Self {
+    pub fn new(location: Rc<RefCell<Location>>) -> Self {
         let widget = GtkBox::new(Orientation::Horizontal, 6);
         widget.set_margin_top(6);
         widget.set_margin_bottom(6);
@@ -332,11 +375,15 @@ impl HeaderControls {
         }
     }
 
-    pub fn connect_location_changed<F: Fn(PathBuf) + 'static>(&self, callback: F) {
+    pub fn connect_location_changed<F: Fn(Location) + 'static>(&self, callback: F) {
         self.location_bar.connect_location_changed(callback);
     }
 
-    pub fn set_navigation_handler<F: Fn(PathBuf) + 'static>(&self, callback: F) {
+    pub fn focus_location(&self) {
+        self.location_bar.focus_location();
+    }
+
+    pub fn set_navigation_handler<F: Fn(Location) + 'static>(&self, callback: F) {
         self.location_bar.set_navigation_handler(callback);
     }
 
@@ -392,7 +439,6 @@ impl HeaderControls {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
-    use std::path::PathBuf;
     use std::rc::Rc;
 
     use gtk::prelude::*;
@@ -405,7 +451,9 @@ mod tests {
     #[ignore = "requires a GTK desktop session"]
     fn toolbar_actions_follow_the_shared_availability_query() {
         gtk::init().unwrap();
-        let header = HeaderControls::new(Rc::new(RefCell::new(PathBuf::from("/tmp"))));
+        let header = HeaderControls::new(Rc::new(RefCell::new(
+            crate::core::Location::from_uri("file:///tmp").unwrap(),
+        )));
         let parent = gio::File::for_uri("smb://host/share");
         let info = gio::FileInfo::new();
         info.set_name("report.txt");

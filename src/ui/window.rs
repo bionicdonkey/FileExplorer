@@ -30,7 +30,7 @@ use crate::ui::tabs::TabStrip;
 
 struct TabData {
     view: FileView,
-    location: Rc<RefCell<PathBuf>>,
+    location: Rc<RefCell<Location>>,
     page: TabPage,
 }
 
@@ -53,14 +53,10 @@ pub struct ExplorerWindow {
 
 impl ExplorerWindow {
     pub fn new(app: &Application) -> Self {
-        Self::new_at(
-            app,
-            Location::home().local_path().expect("home is local"),
-            true,
-        )
+        Self::new_at(app, Location::home(), true)
     }
 
-    fn new_at(app: &Application, initial: PathBuf, restore_session: bool) -> Self {
+    fn new_at(app: &Application, initial: Location, restore_session: bool) -> Self {
         let window = ApplicationWindow::builder()
             .application(app)
             .title("Zorin Explorer")
@@ -128,12 +124,7 @@ impl ExplorerWindow {
                         for notice in session.notices {
                             eprintln!("Saved tabs recovery notice: {notice:?}");
                         }
-                        session
-                            .locations
-                            .into_iter()
-                            .filter_map(|location| location.local_path())
-                            .filter(|path| path.is_dir())
-                            .collect::<Vec<_>>()
+                        session.locations
                     }
                     Err(error) => {
                         eprintln!("Saved tabs could not be recovered: {error}");
@@ -158,10 +149,12 @@ impl ExplorerWindow {
         let clipboard: Rc<RefCell<Option<FileClipboard>>> = Rc::new(RefCell::new(None));
         for path in startup_paths {
             let location = Rc::new(RefCell::new(path.clone()));
-            let view = FileView::new(location.clone());
-            view.set_options(preferences.borrow().options_for(&path, &[]));
+            let view = FileView::from_location(path.clone());
+            if let Some(path) = path.local_path() {
+                view.set_options(preferences.borrow().options_for(&path, &[]));
+            }
             let page = tabs.view.append(&view.widget);
-            page.set_title(&tab_title(&path));
+            page.set_title(&path.display_name());
             tabs_data.borrow_mut().push(TabData {
                 view,
                 location,
@@ -248,25 +241,9 @@ impl ExplorerWindow {
                 ExplorerWindow::new_at(&sidebar_context_app, path, false).present()
             }
             SidebarAction::OpenInTerminal(path) => open_terminal(&path),
-            SidebarAction::OpenUri(uri) => {
-                let sidebar = sidebar_holder_actions.borrow().clone();
-                if let (Some(index), Some(sidebar)) = (
-                    selected_index(&sidebar_context_tabs, &sidebar_context_data),
-                    sidebar,
-                ) {
-                    navigate_uri_tab(
-                        index,
-                        uri,
-                        &sidebar_context_data,
-                        &sidebar_context_tabs,
-                        &sidebar_context_header,
-                        &sidebar,
-                    );
-                }
-            }
             SidebarAction::Pin(path) => {
                 let mut model = sidebar_model_actions.borrow_mut();
-                model.preferences_mut().pin(path);
+                model.preferences_mut().pin_location(path);
                 let _ = model.preferences().save();
                 drop(model);
                 if let Some(sidebar) = sidebar_holder_actions.borrow().as_ref() {
@@ -275,7 +252,7 @@ impl ExplorerWindow {
             }
             SidebarAction::Unpin(path) => {
                 let mut model = sidebar_model_actions.borrow_mut();
-                model.preferences_mut().unpin(&path);
+                model.preferences_mut().unpin_location(&path);
                 let _ = model.preferences().save();
                 drop(model);
                 if let Some(sidebar) = sidebar_holder_actions.borrow().as_ref() {
@@ -287,27 +264,24 @@ impl ExplorerWindow {
                 sidebar_model_actions.clone(),
                 sidebar_holder_actions.clone(),
             ),
-            SidebarAction::UnpinRemote(uri) => {
-                let mut model = sidebar_model_actions.borrow_mut();
-                model.preferences_mut().unpin_remote(&uri);
-                let _ = model.preferences().save();
-                drop(model);
-                if let Some(sidebar) = sidebar_holder_actions.borrow().as_ref() {
-                    sidebar.refresh();
-                }
-            }
             SidebarAction::Unmount(uri) => {
-                let mount = sidebar_model_actions.borrow().mount_for_uri(&uri);
+                let mount = sidebar_model_actions.borrow().mount_for_uri(uri.uri());
                 if let Some(mount) = mount {
                     let operation = gtk::MountOperation::new(Some(&sidebar_window));
                     let keep_operation = operation.clone();
+                    let cancellable = gio::Cancellable::new();
+                    let cancel_on_destroy = cancellable.clone();
+                    let cancel_handler =
+                        sidebar_window.connect_destroy(move |_| cancel_on_destroy.cancel());
+                    let operation_window = sidebar_window.clone();
                     let sidebar = sidebar_holder_actions.clone();
                     mount.unmount_with_operation(
                         gio::MountUnmountFlags::NONE,
                         Some(&operation),
-                        gio::Cancellable::NONE,
+                        Some(&cancellable),
                         move |_| {
                             let _keep_operation_alive = &keep_operation;
+                            operation_window.disconnect(cancel_handler);
                             if let Some(sidebar) = sidebar.borrow().as_ref() {
                                 sidebar.refresh();
                             }
@@ -319,7 +293,24 @@ impl ExplorerWindow {
                 open_operations_tab(&sidebar_context_tabs, sidebar_context_operations.clone())
             }
         });
-        sidebar.set_active_path(&initial);
+        sidebar.set_active_location(
+            tabs_data
+                .borrow()
+                .first()
+                .map(|tab| tab.view.current_location())
+                .unwrap_or(initial),
+        );
+        let mounted_tabs = Rc::downgrade(&tabs_data);
+        gio::VolumeMonitor::get().connect_mount_removed(move |_, mount| {
+            if let (Some(data), Ok(root)) = (
+                mounted_tabs.upgrade(),
+                Location::try_from_file(mount.root()),
+            ) {
+                for tab in data.borrow().iter() {
+                    tab.view.mark_unavailable(&root);
+                }
+            }
+        });
         sidebar.set_operation_manager(operations.clone());
         *sidebar_holder.borrow_mut() = Some(sidebar.clone());
 
@@ -430,8 +421,17 @@ impl ExplorerWindow {
         let shortcut_data = tabs_data.clone();
         let shortcut_tabs = tabs.view.clone();
         let shortcut_preferences = preferences.clone();
+        let shortcut_header = header_controls.clone();
         let shortcuts = gtk::EventControllerKey::new();
         shortcuts.connect_key_pressed(move |_, key, _, modifiers| {
+            if key
+                .to_unicode()
+                .is_some_and(|key| key.eq_ignore_ascii_case(&'l'))
+                && modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK)
+            {
+                shortcut_header.focus_location();
+                return glib::Propagation::Stop;
+            }
             if key
                 .to_unicode()
                 .is_some_and(|key| key.eq_ignore_ascii_case(&'h'))
@@ -481,10 +481,12 @@ impl ExplorerWindow {
         new_tab.connect_clicked(move |_| {
             let path = new_tab_location(&new_application_preferences.borrow());
             let location = Rc::new(RefCell::new(path.clone()));
-            let view = FileView::new(location.clone());
-            view.set_options(new_preferences.borrow().options_for(&path, &[]));
+            let view = FileView::from_location(path.clone());
+            if let Some(path) = path.local_path() {
+                view.set_options(new_preferences.borrow().options_for(&path, &[]));
+            }
             let page = new_tabs.append(&view.widget);
-            page.set_title(&tab_title(&path));
+            page.set_title(&path.display_name());
             new_data.borrow_mut().push(TabData {
                 view,
                 location,
@@ -513,12 +515,7 @@ impl ExplorerWindow {
             let locations = session_data
                 .borrow()
                 .iter()
-                .filter(|tab| tab.view.uri().is_none())
-                .map(|tab| {
-                    gio::File::for_path(&*tab.location.borrow())
-                        .uri()
-                        .to_string()
-                })
+                .map(|tab| tab.view.current_location())
                 .collect::<Vec<_>>();
             let _ = session_preferences.borrow().save_session(&locations);
         });
@@ -599,15 +596,11 @@ impl ExplorerWindow {
                 } else if let Some(uri) = tab.view.uri() {
                     select_header.set_uri(&uri);
                 } else {
-                    select_header.set_location(&tab.location.borrow());
+                    select_header.set_uri(tab.view.current_location().uri());
                 }
                 select_header.set_file_action_availability(&tab.view.command_availability());
                 if tab.view.section_title().is_none() {
-                    sync_sidebar_for_tab(
-                        &select_sidebar,
-                        &tab.location.borrow(),
-                        tab.view.uri().is_some(),
-                    );
+                    select_sidebar.set_active_location(tab.view.current_location());
                 }
             }
         });
@@ -742,19 +735,17 @@ fn handle_navigation_action(
         NavigationAction::Back => view.go_back(),
         NavigationAction::Forward => view.go_forward(),
         NavigationAction::Up => {
-            if let Some(parent) = gio::File::for_uri(view.current_location().uri()).parent() {
-                view.set_uri(parent.uri().to_string());
+            if let Some(parent) = view.current_location().parent() {
+                view.navigate(parent);
             }
         }
         NavigationAction::Refresh => view.refresh(),
     }
 }
 
-fn new_tab_location(preferences: &ApplicationPreferences) -> PathBuf {
-    gio::File::for_uri(&preferences.new_tab_location)
-        .path()
-        .filter(|path| path.is_dir())
-        .unwrap_or_else(|| Location::home().local_path().expect("home is local"))
+fn new_tab_location(preferences: &ApplicationPreferences) -> Location {
+    crate::core::location::LocationInput::parse(&preferences.new_tab_location)
+        .unwrap_or_else(|_| Location::home())
 }
 
 fn wire_tab(
@@ -774,6 +765,9 @@ fn wire_tab(
         .find(|tab| tab.page == page)
         .map(|tab| tab.view.clone())
         .expect("a tab page should have corresponding tab data");
+    let close_tabs = tabs.clone();
+    let close_page = page.clone();
+    view.set_close_handler(move || close_tabs.close_page(&close_page));
     let committed_data = Rc::downgrade(data);
     let committed_page = page.clone();
     let committed_tabs = tabs.clone();
@@ -792,6 +786,9 @@ fn wire_tab(
         let Some(view) = view else {
             return;
         };
+        if let Some(tab) = data.borrow().iter().find(|tab| tab.page == committed_page) {
+            *tab.location.borrow_mut() = location.clone();
+        }
         if let Some(path) = location.local_path() {
             view.set_options(committed_preferences.borrow().options_for(&path, &[]));
         }
@@ -805,13 +802,17 @@ fn wire_tab(
                 committed_sidebar.set_active_path(&path);
             } else {
                 committed_header.set_uri(location.uri());
-                committed_sidebar.clear_active_path();
+                committed_sidebar.set_active_location(location.clone());
             }
         }
     });
     let quick_access_model = sidebar.model();
     view.set_quick_access_predicate(move |path| {
-        quick_access_model.borrow().preferences().is_pinned(path)
+        quick_access_model
+            .borrow()
+            .preferences()
+            .locations()
+            .any(|pin| pin == path)
     });
     let availability_tabs = tabs.clone();
     let availability_page = page.clone();
@@ -832,7 +833,7 @@ fn wire_tab(
             .borrow()
             .iter()
             .find(|tab| tab.page == options_page)
-            .map(|tab| tab.location.borrow().clone());
+            .and_then(|tab| tab.view.current_location().local_path());
         if let Some(path) = path {
             persist_options(&mut options_preferences.borrow_mut(), &path, options);
         }
@@ -864,30 +865,6 @@ fn wire_tab(
         }
     });
 
-    let uri_navigation_data = data.clone();
-    let uri_navigation_tabs = tabs.clone();
-    let uri_navigation_header = header.clone();
-    let uri_navigation_page = page.clone();
-    let uri_navigation_sidebar = sidebar.clone();
-    view.set_uri_navigation_handler(move |uri| {
-        let index = {
-            uri_navigation_data
-                .borrow()
-                .iter()
-                .position(|tab| tab.page == uri_navigation_page)
-        };
-        if let Some(index) = index {
-            navigate_uri_tab(
-                index,
-                uri,
-                &uri_navigation_data,
-                &uri_navigation_tabs,
-                &uri_navigation_header,
-                &uri_navigation_sidebar,
-            );
-        }
-    });
-
     let command_data = data.clone();
     let command_tabs = tabs.clone();
     let command_header = header.clone();
@@ -902,7 +879,7 @@ fn wire_tab(
         let path = target_path(&target);
         match command {
             ContextCommand::OpenInNewTab => {
-                if let Some(path) = path {
+                if let Some(path) = target_location(&target) {
                     add_tab_at(
                         path,
                         &command_data,
@@ -917,7 +894,7 @@ fn wire_tab(
                 }
             }
             ContextCommand::OpenInNewWindow => {
-                if let Some(path) = path {
+                if let Some(path) = target_location(&target) {
                     ExplorerWindow::new_at(&command_app, path, false).present();
                 }
             }
@@ -973,7 +950,7 @@ fn wire_tab(
                     .borrow()
                     .iter()
                     .find(|tab| tab.page == command_page)
-                    .map(|tab| tab.location.borrow().clone());
+                    .and_then(|tab| tab.view.current_location().local_path());
                 if let (Some(clipboard), Some(destination)) =
                     (command_clipboard.borrow().clone(), destination)
                 {
@@ -1054,7 +1031,7 @@ fn wire_tab(
                     PropertiesDialog::present(
                         command_view.widget.root().and_downcast_ref::<gtk::Window>(),
                         path,
-                        move || refresh.set_location(refresh.location()),
+                        move || refresh.refresh(),
                     );
                 }
             }
@@ -1173,6 +1150,16 @@ fn target_path(target: &ContextTarget) -> Option<PathBuf> {
     }
 }
 
+fn target_location(target: &ContextTarget) -> Option<Location> {
+    match target {
+        ContextTarget::File(item) | ContextTarget::Folder(item) => Some(item.location().clone()),
+        ContextTarget::SidebarLocation(location) | ContextTarget::Background(location) => {
+            Some(location.clone())
+        }
+        ContextTarget::Tab => None,
+    }
+}
+
 fn context_command_for_file_action(action: FileAction) -> ContextCommand {
     match action {
         FileAction::Cut => ContextCommand::Cut,
@@ -1225,7 +1212,7 @@ fn dispatch_active_file_command(
 }
 
 fn add_tab_at(
-    path: PathBuf,
+    path: Location,
     data: &Rc<RefCell<Vec<TabData>>>,
     tabs: &TabView,
     header: &HeaderControls,
@@ -1236,10 +1223,12 @@ fn add_tab_at(
     operations: &OperationManager,
 ) {
     let location = Rc::new(RefCell::new(path.clone()));
-    let view = FileView::new(location.clone());
-    view.set_options(preferences.borrow().options_for(&path, &[]));
+    let view = FileView::from_location(path.clone());
+    if let Some(path) = path.local_path() {
+        view.set_options(preferences.borrow().options_for(&path, &[]));
+    }
     let page = tabs.append(&view.widget);
-    page.set_title(&tab_title(&path));
+    page.set_title(&path.display_name());
     data.borrow_mut().push(TabData {
         view,
         location,
@@ -1321,7 +1310,7 @@ fn perform_search(
         let tab = &data[index];
         let snapshot = (
             tab.view.clone(),
-            tab.location.borrow().clone(),
+            tab.view.current_location().local_path().unwrap_or_default(),
             tab.view.uri().is_some(),
         );
         snapshot
@@ -1464,10 +1453,23 @@ fn choose_destination(
         &parent,
         title,
         action_label,
-        view.location(),
+        view.current_location(),
         sidebar_model,
         operations.clone(),
         move |destination| {
+            let Some(destination) = destination.local_path() else {
+                if let Some(parent) = reload.widget.root().and_downcast::<gtk::Window>() {
+                    let dialog = adw::MessageDialog::new(
+                        Some(&parent),
+                        Some("Destination unavailable for this operation"),
+                        Some("This copy or move operation currently requires a local destination."),
+                    );
+                    dialog.add_response("close", "Close");
+                    dialog.connect_response(None, |dialog, _| dialog.close());
+                    dialog.present();
+                }
+                return;
+            };
             start_transfer(
                 &reload,
                 source.clone(),
@@ -1578,7 +1580,7 @@ fn schedule_refresh(view: FileView, operations: OperationManager, operation_id: 
         ) {
             return glib::ControlFlow::Continue;
         }
-        view.set_location(view.location());
+        view.refresh();
         if let crate::core::OperationState::Failed(error) = record.state {
             show_operation_error(&view, &error);
         }
@@ -1644,7 +1646,7 @@ fn show_close_operations_dialog(parent: &ApplicationWindow, operations: Operatio
 
 fn navigate_tab(
     index: usize,
-    path: PathBuf,
+    path: Location,
     data: &Rc<RefCell<Vec<TabData>>>,
     _tabs: &TabView,
     _header: &HeaderControls,
@@ -1653,26 +1655,11 @@ fn navigate_tab(
     _record_history: bool,
 ) {
     if let Some(tab) = data.borrow().get(index) {
-        tab.view.set_location(path);
+        tab.view.navigate(path);
     }
 }
 
-fn navigate_uri_tab(
-    index: usize,
-    uri: String,
-    data: &Rc<RefCell<Vec<TabData>>>,
-    _tabs: &TabView,
-    _header: &HeaderControls,
-    _sidebar: &Sidebar,
-) {
-    if let Some(tab) = data.borrow().get(index) {
-        tab.view.set_uri(uri);
-    }
-}
-
-/// Reinstates the location hidden behind a virtual sidebar overview. A remote
-/// location has no local history entry, so it must be restored from FileView's
-/// retained URI rather than the tab's last local path.
+/// Reinstates the URI location hidden behind a virtual sidebar overview.
 fn restore_underlying_location(
     index: usize,
     data: &Rc<RefCell<Vec<TabData>>>,
@@ -1684,40 +1671,21 @@ fn restore_underlying_location(
     let Some(tab) = data_ref.get(index) else {
         return;
     };
-    if let Some(uri) = tab.view.uri() {
-        tab.page.set_title(&uri_title(&uri));
-        if tabs
-            .selected_page()
-            .as_ref()
-            .is_some_and(|page| *page == tab.page)
-        {
-            header.set_uri(&uri);
-            sidebar.clear_active_path();
-        }
-    } else {
-        let path = tab.location.borrow();
-        tab.page.set_title(&tab_title(&path));
-        if tabs
-            .selected_page()
-            .as_ref()
-            .is_some_and(|page| *page == tab.page)
-        {
-            header.set_location(&path);
-            sidebar.set_active_path(&path);
-        }
+    let location = tab.view.current_location();
+    tab.page.set_title(&location.display_name());
+    if tabs
+        .selected_page()
+        .as_ref()
+        .is_some_and(|page| *page == tab.page)
+    {
+        header.set_uri(location.uri());
+        sidebar.set_active_location(location);
     }
 }
 
+#[cfg(test)]
 fn sidebar_path_for_tab(path: &Path, is_remote: bool) -> Option<PathBuf> {
     (!is_remote).then(|| path.to_path_buf())
-}
-
-fn sync_sidebar_for_tab(sidebar: &Sidebar, path: &Path, is_remote: bool) {
-    if let Some(path) = sidebar_path_for_tab(path, is_remote) {
-        sidebar.set_active_path(&path);
-    } else {
-        sidebar.clear_active_path();
-    }
 }
 
 fn selected_index(tabs: &TabView, data: &Rc<RefCell<Vec<TabData>>>) -> Option<usize> {
@@ -1741,22 +1709,6 @@ fn remove_matching<T>(items: &RefCell<Vec<T>>, matches: impl Fn(&T) -> bool) -> 
     } else {
         false
     }
-}
-
-fn tab_title(path: &std::path::Path) -> String {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| "/".into())
-}
-
-fn uri_title(uri: &str) -> String {
-    uri.trim_end_matches('/')
-        .rsplit('/')
-        .next()
-        .filter(|segment| !segment.is_empty())
-        .unwrap_or(uri)
-        .to_owned()
 }
 
 fn content_right_inset() -> i32 {
@@ -2084,9 +2036,11 @@ fn update_active_options(
         "View:Toggle hidden files" => options.show_hidden = !options.show_hidden,
         _ => return,
     }
-    let path = tab.location.borrow().clone();
+    let path = tab.view.current_location().local_path();
     tab.view.set_options(options.clone());
-    persist_options(&mut preferences.borrow_mut(), &path, options);
+    if let Some(path) = path {
+        persist_options(&mut preferences.borrow_mut(), &path, options);
+    }
 }
 
 fn reset_active_options(
@@ -2097,7 +2051,9 @@ fn reset_active_options(
     let Some(index) = selected_index(tabs, data) else {
         return;
     };
-    let path = data.borrow()[index].location.borrow().clone();
+    let Some(path) = data.borrow()[index].view.current_location().local_path() else {
+        return;
+    };
     let options = {
         let mut preferences = preferences.borrow_mut();
         preferences.clear(&path);
@@ -2129,7 +2085,7 @@ mod tests {
     };
     use crate::core::sidebar_model::SidebarSection;
     use crate::core::{
-        SidebarModel, SidebarPreferences, SortField, ViewOptions, ViewPreferencesStore,
+        Location, SidebarModel, SidebarPreferences, SortField, ViewOptions, ViewPreferencesStore,
     };
     use crate::ui::context_menu::ContextCommand;
     use crate::ui::file_view::FileView;
@@ -2167,7 +2123,7 @@ mod tests {
         gtk::init().expect("GTK should initialize for widget tests");
         let path = PathBuf::from("/tmp");
         let location = Rc::new(RefCell::new(path.clone()));
-        let view = FileView::new(location.clone());
+        let view = FileView::new(Location::from_local_path(&location.borrow()));
         commit_remote_location(&view);
         view.show_section_overview(SidebarSection {
             title: "Network & online".into(),
@@ -2179,10 +2135,12 @@ mod tests {
         page.set_title("Network & online");
         let data = Rc::new(RefCell::new(vec![TabData {
             view: view.clone(),
-            location,
+            location: Rc::new(RefCell::new(view.current_location())),
             page: page.clone(),
         }]));
-        let header = HeaderControls::new(Rc::new(RefCell::new(PathBuf::from("/tmp"))));
+        let header = HeaderControls::new(Rc::new(RefCell::new(
+            crate::core::Location::from_uri("file:///tmp").unwrap(),
+        )));
         header.set_section("Network & online");
         let window = Window::new();
         let sidebar = Sidebar::new(
@@ -2207,7 +2165,7 @@ mod tests {
 
         assert_eq!(view.section_title(), None);
         assert_eq!(view.uri().as_deref(), Some("smb://server/share"));
-        assert_eq!(page.title(), "share");
+        assert_eq!(page.title(), "smb://server/…");
         assert_eq!(header.displayed_location_text(), "smb://server/share");
         assert_eq!(sidebar.active_navigation_selection(), (None, None));
     }
@@ -2218,7 +2176,7 @@ mod tests {
         gtk::init().expect("GTK should initialize for widget tests");
         let path = PathBuf::from("/tmp");
         let location = Rc::new(RefCell::new(path.clone()));
-        let view = FileView::new(location.clone());
+        let view = FileView::new(Location::from_local_path(&location.borrow()));
         commit_remote_location(&view);
         let model = Rc::new(RefCell::new(SidebarModel::new(
             SidebarPreferences::in_memory(),
@@ -2242,10 +2200,12 @@ mod tests {
         tabs.set_selected_page(&page);
         let data = Rc::new(RefCell::new(vec![TabData {
             view: view.clone(),
-            location,
+            location: Rc::new(RefCell::new(view.current_location())),
             page,
         }]));
-        let header = HeaderControls::new(Rc::new(RefCell::new(PathBuf::from("/tmp"))));
+        let header = HeaderControls::new(Rc::new(RefCell::new(
+            crate::core::Location::from_uri("file:///tmp").unwrap(),
+        )));
         let window = Window::new();
         let sidebar = Sidebar::new(model, &window, |_| {});
 
@@ -2287,7 +2247,7 @@ mod tests {
         gtk::init().expect("GTK should initialize for widget tests");
         let path = PathBuf::from("/tmp");
         let location = Rc::new(RefCell::new(path.clone()));
-        let view = FileView::new(location.clone());
+        let view = FileView::new(Location::from_local_path(&location.borrow()));
         commit_remote_location(&view);
         view.show_search_results(vec![]);
         let tabs = adw::TabView::new();
@@ -2295,10 +2255,12 @@ mod tests {
         tabs.set_selected_page(&page);
         let data = Rc::new(RefCell::new(vec![TabData {
             view: view.clone(),
-            location,
+            location: Rc::new(RefCell::new(view.current_location())),
             page,
         }]));
-        let header = HeaderControls::new(Rc::new(RefCell::new(PathBuf::from("/tmp"))));
+        let header = HeaderControls::new(Rc::new(RefCell::new(
+            crate::core::Location::from_uri("file:///tmp").unwrap(),
+        )));
         let window = Window::new();
         let sidebar = Sidebar::new(
             Rc::new(RefCell::new(SidebarModel::new(

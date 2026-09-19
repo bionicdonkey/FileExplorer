@@ -1,449 +1,322 @@
-use std::cell::RefCell;
-use std::path::{Path, PathBuf};
-use std::rc::Rc;
-
-use adw::prelude::*;
-use adw::{HeaderBar, ToolbarView};
-use gtk::{
-    Box as GtkBox, Button, Image, Label, ListBox, ListBoxRow, Orientation, Paned, ScrolledWindow,
-    SelectionMode, Separator,
+use crate::application::navigation::NavigationCoordinator;
+use crate::core::{
+    contracts::EntryKind,
+    navigation::{NavigationStatus, TabState},
+    Location, OperationManager, SidebarModel,
 };
-
-use crate::core::location::Location;
-use crate::core::navigation::NavigationHistory;
-use crate::core::operations::FileOperations;
-use crate::core::{OperationManager, OperationState, SidebarLocation, SidebarModel};
+use crate::infrastructure::gio_directory::GioDirectoryRepository;
 use crate::ui::header::LocationBar;
+use adw::prelude::*;
+use gtk::{Box as GtkBox, Button, Label, ListBox, ListBoxRow, Orientation, ScrolledWindow};
+use std::{cell::RefCell, rc::Rc};
 
-/// An in-process folder picker built from this app's own widgets, so
-/// choosing a destination never hands off to an external file manager. The
-/// shortcuts pane mirrors the real sidebar (same sections, pins, devices,
-/// and network locations); remote/GVfs entries are shown for consistency
-/// but disabled, since copy/move only supports local destinations.
-///
-/// Built on `adw::Dialog` + `adw::ToolbarView` (the same composition the
-/// main window uses), not the deprecated `gtk::Dialog` action-area, so the
-/// chrome (header bar, rounded corners, bottom action bar) matches the rest
-/// of the app instead of looking like an unstyled GTK3-era dialog.
-pub fn pick_folder<F: Fn(PathBuf) + 'static>(
+/// A destination picker sharing the URI navigation and cancellation contract.
+#[derive(Clone)]
+pub struct FolderPicker {
+    navigation: NavigationCoordinator,
+    render: Rc<dyn Fn()>,
+}
+impl FolderPicker {
+    pub fn new(
+        initial: Location,
+        repository: Rc<dyn crate::core::ports::DirectoryRepository>,
+    ) -> Self {
+        Self {
+            navigation: NavigationCoordinator::new(
+                Rc::new(RefCell::new(TabState::new(initial))),
+                repository,
+            ),
+            render: Rc::new(|| {}),
+        }
+    }
+    pub fn current_location(&self) -> Location {
+        self.navigation.state.borrow().location.clone()
+    }
+    pub fn select_location(&self, location: Location) {
+        let render = self.render.clone();
+        self.navigation.navigate(location, move |accepted| {
+            if accepted {
+                render();
+            }
+        });
+        (self.render)();
+    }
+}
+
+pub fn pick_folder<F: Fn(Location) + 'static>(
     parent: &impl IsA<gtk::Widget>,
     title: &str,
     action_label: &str,
-    initial: PathBuf,
+    initial: Location,
     sidebar_model: Rc<RefCell<SidebarModel>>,
     operations: OperationManager,
     on_selected: F,
-) {
+) -> FolderPicker {
     let dialog = adw::Dialog::new();
     dialog.set_title(title);
     dialog.set_content_width(760);
     dialog.set_content_height(520);
-
-    let toolbar_view = ToolbarView::new();
-    let titlebar = HeaderBar::new();
-    titlebar.set_show_start_title_buttons(false);
-    titlebar.set_show_end_title_buttons(false);
+    let toolbar_view = adw::ToolbarView::new();
+    let titlebar = adw::HeaderBar::new();
     titlebar.set_title_widget(Some(&Label::new(Some(title))));
     toolbar_view.add_top_bar(&titlebar);
-
-    let start = if initial.is_dir() {
-        initial
-    } else {
-        Location::home().local_path().expect("home is local")
-    };
-    let location = Rc::new(RefCell::new(start.clone()));
-    let selected: Rc<RefCell<Option<PathBuf>>> = Rc::new(RefCell::new(None));
-    let history = Rc::new(RefCell::new(NavigationHistory::new()));
-    history
-        .borrow_mut()
-        .push(crate::core::Location::from_local_path(&start));
-    let listed_folders: Rc<RefCell<Vec<PathBuf>>> = Rc::new(RefCell::new(Vec::new()));
-
-    let content = GtkBox::new(Orientation::Vertical, 0);
-
+    let content = GtkBox::new(Orientation::Vertical, 8);
     let toolbar = GtkBox::new(Orientation::Horizontal, 6);
-    toolbar.set_margin_top(8);
-    toolbar.set_margin_bottom(8);
-    toolbar.set_margin_start(8);
-    toolbar.set_margin_end(8);
     let back = Button::from_icon_name("go-previous-symbolic");
-    back.add_css_class("flat");
-    back.set_tooltip_text(Some("Go back"));
     let forward = Button::from_icon_name("go-next-symbolic");
-    forward.add_css_class("flat");
-    forward.set_tooltip_text(Some("Go forward"));
     let up = Button::from_icon_name("go-up-symbolic");
-    up.add_css_class("flat");
-    up.set_tooltip_text(Some("Go up"));
-
-    // Shares HeaderControls' breadcrumb/location-entry implementation (same
-    // CSS classes, same double-click-to-edit interaction) instead of a second
-    // copy, so a fix to one applies to both.
-    let location_bar = LocationBar::new(&location.borrow());
-
     let new_folder = Button::from_icon_name("folder-new-symbolic");
-    new_folder.add_css_class("flat");
     new_folder.set_tooltip_text(Some("New Folder"));
+    let location_bar = LocationBar::new(&initial);
     for button in [&back, &forward, &up] {
         toolbar.append(button);
     }
     toolbar.append(&location_bar.widget);
     toolbar.append(&new_folder);
     content.append(&toolbar);
-    content.append(&Separator::new(Orientation::Horizontal));
-
-    // A Paned (same as the main window's sidebar split) rather than a fixed
-    // Box: the shortcuts pane defaults narrower and the user can drag it
-    // wider if a location's name needs the room, instead of a fixed width
-    // that's permanently too wide for what's usually shown here.
-    let body = Paned::new(Orientation::Horizontal);
+    let body = gtk::Paned::new(Orientation::Horizontal);
     body.set_vexpand(true);
-    body.set_position(160);
-    body.set_shrink_start_child(false);
-    body.set_shrink_end_child(false);
-
-    // No `explorer-sidebar` class here: that class's only rule is a 220px
-    // min-width meant for the main window's sidebar, and it would silently
-    // override `set_position(160)` above by forcing this pane no narrower
-    // than 220px.
-    let shortcuts = GtkBox::new(Orientation::Vertical, 2);
-    shortcuts.set_margin_top(4);
-    shortcuts.set_margin_bottom(4);
-    shortcuts.set_margin_start(4);
-    shortcuts.set_margin_end(4);
+    body.set_position(180);
+    let shortcuts = GtkBox::new(Orientation::Vertical, 4);
     let shortcuts_scroll = ScrolledWindow::new();
     shortcuts_scroll.set_child(Some(&shortcuts));
-    shortcuts_scroll.set_width_request(120);
-    shortcuts_scroll.set_hscrollbar_policy(gtk::PolicyType::Never);
     body.set_start_child(Some(&shortcuts_scroll));
-
-    let folder_list = ListBox::new();
-    folder_list.set_selection_mode(SelectionMode::Single);
-    folder_list.set_activate_on_single_click(false);
-    let folder_scroll = ScrolledWindow::new();
-    folder_scroll.set_child(Some(&folder_list));
-    folder_scroll.set_hexpand(true);
-    body.set_end_child(Some(&folder_scroll));
+    let list = ListBox::new();
+    list.set_activate_on_single_click(false);
+    list.set_selection_mode(gtk::SelectionMode::Single);
+    let scroll = ScrolledWindow::new();
+    scroll.set_child(Some(&list));
+    body.set_end_child(Some(&scroll));
     content.append(&body);
+    let destination = Label::new(None);
+    destination.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+    content.append(&destination);
+    let select = Button::with_label(action_label);
+    select.add_css_class("suggested-action");
+    let cancel = Button::with_label("Cancel");
+    let footer = GtkBox::new(Orientation::Horizontal, 8);
+    footer.append(&cancel);
+    footer.append(&select);
+    toolbar_view.add_bottom_bar(&footer);
+    toolbar_view.set_content(Some(&content));
+    dialog.set_child(Some(&toolbar_view));
 
-    // The one line that always answers "where exactly will this go" before
-    // the user commits -- updated on every navigation and every selection.
-    let destination_label = Label::new(None);
-    destination_label.add_css_class("picker-destination");
-    destination_label.set_xalign(0.0);
-    destination_label.set_hexpand(true);
-    destination_label.set_ellipsize(gtk::pango::EllipsizeMode::Start);
-
-    let navigate: Rc<dyn Fn(PathBuf, bool)> = {
-        let location = location.clone();
-        let history = history.clone();
+    let repository = Rc::new(GioDirectoryRepository::new(
+        glib::MainContext::ref_thread_default(),
+    ));
+    let mount_parent = parent.clone().upcast::<gtk::Widget>().downgrade();
+    repository.set_mount_operation(move || {
+        let parent = mount_parent
+            .upgrade()
+            .and_then(|widget| widget.root())
+            .and_downcast::<gtk::Window>();
+        gtk::MountOperation::new(parent.as_ref()).upcast()
+    });
+    let mut picker = FolderPicker::new(initial.clone(), repository);
+    let state = picker.navigation.state.clone();
+    let folders = Rc::new(RefCell::new(Vec::<Location>::new()));
+    let selected = Rc::new(RefCell::new(None::<Location>));
+    let render: Rc<dyn Fn()> = {
+        let state = state.clone();
+        let list = list.clone();
+        let folders = folders.clone();
         let selected = selected.clone();
-        let location_bar = location_bar.clone();
+        let destination = destination.clone();
+        let select = select.clone();
         let back = back.clone();
         let forward = forward.clone();
         let up = up.clone();
-        let folder_list = folder_list.clone();
-        let listed_folders = listed_folders.clone();
-        let destination_label = destination_label.clone();
-        Rc::new(move |path: PathBuf, record_history: bool| {
-            if !path.is_dir() {
-                return;
+        let location_bar = location_bar.clone();
+        let new_folder = new_folder.clone();
+        Rc::new(move || {
+            let snapshot = state.borrow().clone();
+            select.set_sensitive(matches!(snapshot.status, NavigationStatus::Ready));
+            new_folder.set_sensitive(
+                matches!(snapshot.status, NavigationStatus::Ready)
+                    && snapshot.location.local_path().is_some(),
+            );
+            back.set_sensitive(snapshot.history.can_go_back());
+            forward.set_sensitive(snapshot.history.can_go_forward());
+            up.set_sensitive(snapshot.location.parent().is_some());
+            match snapshot.status {
+                NavigationStatus::Loading(_) => {
+                    destination.set_text("Loading folder…");
+                    return;
+                }
+                NavigationStatus::Failed { .. } => {
+                    destination
+                        .set_text("This location could not be opened. Enter a location to retry.");
+                    return;
+                }
+                _ => {}
             }
-            *location.borrow_mut() = path.clone();
+            while let Some(row) = list.row_at_index(0) {
+                list.remove(&row);
+            }
             *selected.borrow_mut() = None;
-            if record_history {
-                history
-                    .borrow_mut()
-                    .push(crate::core::Location::from_local_path(&path));
+            folders.borrow_mut().clear();
+            if let Some(snapshot) = snapshot.directory {
+                let mut entries = snapshot
+                    .entries
+                    .into_iter()
+                    .filter(|entry| {
+                        entry.kind == EntryKind::Directory && !entry.display_name.starts_with('.')
+                    })
+                    .collect::<Vec<_>>();
+                entries.sort_by(|left, right| left.display_name.cmp(&right.display_name));
+                for entry in entries {
+                    let row = ListBoxRow::new();
+                    let row_content = GtkBox::new(Orientation::Horizontal, 8);
+                    row_content.set_margin_top(6);
+                    row_content.set_margin_bottom(6);
+                    row_content.set_margin_start(8);
+                    row_content.set_margin_end(8);
+                    row_content.append(&gtk::Image::from_icon_name("folder-symbolic"));
+                    row_content.append(&Label::new(Some(&entry.display_name)));
+                    row.set_child(Some(&row_content));
+                    folders.borrow_mut().push(entry.location);
+                    list.append(&row);
+                }
             }
-            location_bar.set_location(&path);
-            back.set_sensitive(history.borrow().can_go_back());
-            forward.set_sensitive(history.borrow().can_go_forward());
-            up.set_sensitive(path.parent().is_some());
-            while let Some(row) = folder_list.row_at_index(0) {
-                folder_list.remove(&row);
-            }
-            let mut folders = listed_folders.borrow_mut();
-            *folders = subfolders(&path);
-            for folder in folders.iter() {
-                folder_list.append(&folder_row(folder));
-            }
-            destination_label.set_text(&format!("Destination: {}", path.display()));
+            location_bar.set_uri(snapshot.location.uri());
+            destination.set_text(&format!("Destination: {}", snapshot.location.uri()));
         })
     };
+    picker.render = render;
     location_bar.set_navigation_handler({
-        let navigate = navigate.clone();
-        move |path| navigate(path, true)
+        let picker = picker.clone();
+        move |location| picker.select_location(location)
     });
     location_bar.connect_location_changed({
-        let navigate = navigate.clone();
-        move |path| navigate(path, true)
+        let picker = picker.clone();
+        move |location| picker.select_location(location)
     });
-
-    // Connected once: row creation/removal happens inside `navigate`, but the
-    // ListBox itself persists, so these must not be reconnected on refresh.
-    folder_list.connect_row_selected({
+    list.connect_row_selected({
         let selected = selected.clone();
-        let listed_folders = listed_folders.clone();
-        let location = location.clone();
-        let destination_label = destination_label.clone();
+        let folders = folders.clone();
+        let state = state.clone();
         move |_, row| {
-            *selected.borrow_mut() = row
-                .map(|row| row.index())
-                .and_then(|index| listed_folders.borrow().get(index as usize).cloned());
+            *selected.borrow_mut() =
+                row.and_then(|row| folders.borrow().get(row.index() as usize).cloned());
             let target = selected
                 .borrow()
                 .clone()
-                .unwrap_or_else(|| location.borrow().clone());
-            destination_label.set_text(&format!("Destination: {}", target.display()));
+                .unwrap_or_else(|| state.borrow().location.clone());
+            destination.set_text(&format!("Destination: {}", target.uri()));
         }
     });
-    folder_list.connect_row_activated({
-        let listed_folders = listed_folders.clone();
-        let navigate = navigate.clone();
-        // `if let Some(x) = refcell.borrow()... { }` keeps the borrow alive for
-        // the whole body (a temporary-lifetime-extension gotcha), so `navigate`
-        // below would re-borrow `listed_folders` while this one is still held.
-        // Bind the owned value first so the borrow ends before `navigate` runs.
+    list.connect_row_activated({
+        let picker = picker.clone();
         move |_, row| {
-            let path = listed_folders.borrow().get(row.index() as usize).cloned();
-            if let Some(path) = path {
-                navigate(path, true);
+            let location = folders.borrow().get(row.index() as usize).cloned();
+            if let Some(location) = location {
+                picker.select_location(location);
             }
         }
     });
-
     for section in sidebar_model.borrow().sections() {
-        if section.nodes.is_empty() {
-            continue;
-        }
-        let heading = Label::new(Some(&section.title));
-        heading.add_css_class("heading");
-        heading.add_css_class("dim-label");
-        heading.set_xalign(0.0);
-        heading.set_margin_top(10);
-        heading.set_margin_start(6);
-        shortcuts.append(&heading);
+        shortcuts.append(&Label::new(Some(&section.title)));
         for node in section.nodes {
-            shortcuts.append(&shortcut_button(&node.location, &navigate));
+            let button = Button::with_label(node.location.label());
+            let location = node.location.location().clone();
+            let picker = picker.clone();
+            button.connect_clicked(move |_| picker.select_location(location.clone()));
+            shortcuts.append(&button);
         }
     }
-
-    // Same temporary-lifetime-extension pitfall as above: bind the owned
-    // path first so the RefCell borrow ends before `navigate` re-borrows it.
-    back.connect_clicked({
-        let history = history.clone();
-        let navigate = navigate.clone();
-        move |_| {
-            let path = history
-                .borrow_mut()
-                .back()
-                .and_then(crate::core::Location::local_path);
-            if let Some(path) = path {
-                navigate(path, false);
+    for (button, backwards) in [(&back, true), (&forward, false)] {
+        let picker = picker.clone();
+        button.connect_clicked(move |_| {
+            let render = picker.render.clone();
+            if backwards {
+                picker.navigation.back(move |accepted| {
+                    if accepted {
+                        render();
+                    }
+                });
+            } else {
+                picker.navigation.forward(move |accepted| {
+                    if accepted {
+                        render();
+                    }
+                });
             }
-        }
-    });
-    forward.connect_clicked({
-        let history = history.clone();
-        let navigate = navigate.clone();
-        move |_| {
-            let path = history
-                .borrow_mut()
-                .forward()
-                .and_then(crate::core::Location::local_path);
-            if let Some(path) = path {
-                navigate(path, false);
-            }
-        }
-    });
+            (picker.render)();
+        });
+    }
     up.connect_clicked({
-        let location = location.clone();
-        let navigate = navigate.clone();
+        let picker = picker.clone();
+        let state = state.clone();
         move |_| {
-            let parent = location.borrow().parent().map(Path::to_path_buf);
+            let parent = state.borrow().location.parent();
             if let Some(parent) = parent {
-                navigate(parent, true);
+                picker.select_location(parent);
             }
         }
     });
     new_folder.connect_clicked({
-        let location = location.clone();
-        let navigate = navigate.clone();
-        let error_label = destination_label.clone();
+        let picker = picker.clone();
+        let state = state.clone();
         move |_| {
-            let parent = location.borrow().clone();
-            if let Ok(id) = FileOperations::create_folder(&operations, &parent, "New Folder") {
+            let Some(parent) = state.borrow().location.local_path() else {
+                return;
+            };
+            if let Ok(id) = crate::core::operations::FileOperations::create_folder(
+                &operations,
+                &parent,
+                "New Folder",
+            ) {
                 let operations = operations.clone();
-                let navigate = navigate.clone();
-                let error_label = error_label.clone();
+                let picker = picker.clone();
+                let state = state.clone();
                 glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-                    let Some(record) = operations.records().into_iter().find(|r| r.id == id) else {
+                    if matches!(state.borrow().status, NavigationStatus::Closed) {
+                        return glib::ControlFlow::Break;
+                    }
+                    let Some(record) = operations
+                        .records()
+                        .into_iter()
+                        .find(|record| record.id == id)
+                    else {
                         return glib::ControlFlow::Break;
                     };
                     if record.finished_at.is_none() {
                         return glib::ControlFlow::Continue;
                     }
-                    if record.state == OperationState::Completed {
-                        navigate(parent.join("New Folder"), true);
-                    } else {
-                        error_label.set_text(
-                            "The folder could not be created. See File operations for details.",
-                        );
+                    if record.state == crate::core::OperationState::Completed {
+                        picker
+                            .select_location(Location::from_local_path(&parent.join("New Folder")));
                     }
                     glib::ControlFlow::Break
                 });
             }
         }
     });
-
-    // Same pitfall: `location.borrow()` must not still be a live temporary
-    // when `navigate` tries to re-borrow `location`, so bind it first.
-    let start_path = location.borrow().clone();
-    navigate(start_path, false);
-
-    toolbar_view.set_content(Some(&content));
-
-    toolbar_view.set_bottom_bar_style(adw::ToolbarStyle::RaisedBorder);
-    let footer = GtkBox::new(Orientation::Horizontal, 12);
-    footer.set_margin_top(8);
-    footer.set_margin_bottom(8);
-    footer.set_margin_start(12);
-    footer.set_margin_end(12);
-    footer.append(&destination_label);
-    let actions = GtkBox::new(Orientation::Horizontal, 8);
-    let cancel_button = Button::with_label("Cancel");
-    let select_button = Button::with_label(action_label);
-    select_button.add_css_class("suggested-action");
-    actions.append(&cancel_button);
-    actions.append(&select_button);
-    footer.append(&actions);
-    toolbar_view.add_bottom_bar(&footer);
-
-    dialog.set_child(Some(&toolbar_view));
-
-    cancel_button.connect_clicked({
+    cancel.connect_clicked({
         let dialog = dialog.clone();
         move |_| {
             dialog.close();
         }
     });
-    select_button.connect_clicked({
+    select.connect_clicked({
         let dialog = dialog.clone();
         move |_| {
-            let chosen = selected
+            if !matches!(state.borrow().status, NavigationStatus::Ready) {
+                return;
+            }
+            let location = selected
                 .borrow()
                 .clone()
-                .unwrap_or_else(|| location.borrow().clone());
-            on_selected(chosen);
+                .unwrap_or_else(|| state.borrow().location.clone());
+            on_selected(location);
             dialog.close();
         }
     });
-
+    dialog.connect_closed({
+        let picker = picker.clone();
+        move |_| picker.navigation.close_tab()
+    });
+    picker.select_location(initial);
     dialog.present(parent);
-}
-
-fn folder_row(path: &Path) -> ListBoxRow {
-    let row = ListBoxRow::new();
-    row.add_css_class("picker-folder-row");
-    let content = GtkBox::new(Orientation::Horizontal, 8);
-    content.set_margin_top(6);
-    content.set_margin_bottom(6);
-    content.set_margin_start(8);
-    content.set_margin_end(8);
-    // A plain folder glyph, not the curated Documents/Downloads/etc. icon
-    // table -- these are arbitrary subfolders being browsed, not the
-    // sidebar's pinned locations, so a folder named "Downloads" here isn't
-    // necessarily *the* Downloads folder. Matches sidebar_model's
-    // local_children(), which draws the same distinction.
-    let icon = Image::from_icon_name("folder-symbolic");
-    icon.set_pixel_size(18);
-    icon.add_css_class("sidebar-location-icon");
-    let name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("")
-        .to_owned();
-    let label = Label::new(Some(&name));
-    label.set_xalign(0.0);
-    label.set_hexpand(true);
-    label.set_ellipsize(gtk::pango::EllipsizeMode::End);
-    content.append(&icon);
-    content.append(&label);
-    row.set_child(Some(&content));
-    row
-}
-
-/// A single sidebar row. Local locations navigate the picker; remote/GVfs
-/// locations are shown (for parity with the real sidebar) but disabled,
-/// since this app's copy/move pipeline only supports local destinations.
-fn shortcut_button(location: &SidebarLocation, navigate: &Rc<dyn Fn(PathBuf, bool)>) -> Button {
-    let button = Button::new();
-    button.add_css_class("flat");
-    button.add_css_class("sidebar-location");
-    let content = GtkBox::new(Orientation::Horizontal, 8);
-    content.set_margin_top(4);
-    content.set_margin_bottom(4);
-    content.set_margin_start(4);
-    content.set_margin_end(4);
-    let icon = Image::from_icon_name(location.icon_name());
-    icon.set_pixel_size(18);
-    icon.add_css_class("sidebar-location-icon");
-    let label = Label::new(Some(location.label()));
-    label.set_xalign(0.0);
-    label.set_hexpand(true);
-    label.set_ellipsize(gtk::pango::EllipsizeMode::End);
-    content.append(&icon);
-    content.append(&label);
-    button.set_child(Some(&content));
-    match location.local_path() {
-        Some(path) => {
-            let path = path.to_path_buf();
-            let navigate = navigate.clone();
-            button.connect_clicked(move |_| navigate(path.clone(), true));
-        }
-        None => {
-            button.set_sensitive(false);
-            button.set_tooltip_text(Some(
-                "Remote locations aren't supported as a destination yet",
-            ));
-        }
-    }
-    button
-}
-
-fn subfolders(path: &Path) -> Vec<PathBuf> {
-    let mut folders = std::fs::read_dir(path)
-        .map(|entries| {
-            entries
-                .flatten()
-                .filter(|entry| entry.path().is_dir())
-                .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
-                .map(|entry| entry.path())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    folders.sort_by(|left, right| left.file_name().cmp(&right.file_name()));
-    folders
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn subfolders_are_sorted_and_exclude_hidden_and_files() {
-        let temporary = tempfile::tempdir().unwrap();
-        std::fs::create_dir(temporary.path().join("b")).unwrap();
-        std::fs::create_dir(temporary.path().join("a")).unwrap();
-        std::fs::create_dir(temporary.path().join(".hidden")).unwrap();
-        std::fs::write(temporary.path().join("file.txt"), "x").unwrap();
-
-        let found = subfolders(temporary.path());
-
-        assert_eq!(
-            found,
-            vec![temporary.path().join("a"), temporary.path().join("b")]
-        );
-    }
+    picker
 }

@@ -122,9 +122,9 @@ fn new_tab_location_display(uri: &str) -> String {
 
 fn choose_new_tab_location(button: &Button, preferences: Rc<RefCell<ApplicationPreferences>>, label: Label, sidebar_model: Rc<RefCell<SidebarModel>>, operations: OperationManager) {
     let Some(parent) = button.root().and_downcast::<gtk::Window>() else { return; };
-    let initial = gio::File::for_uri(&preferences.borrow().new_tab_location).path().unwrap_or_default();
+    let initial = crate::core::Location::from_uri(&preferences.borrow().new_tab_location).unwrap_or_else(|_| crate::core::Location::home());
     crate::ui::folder_picker::pick_folder(&parent, "New Tabs Open To", "Select", initial, sidebar_model, operations, move |path| {
-        let uri = gio::File::for_path(&path).uri().to_string();
+        let uri = path.uri().to_owned();
         preferences.borrow_mut().new_tab_location = uri.clone();
         let _ = preferences.borrow().save();
         label.set_text(&new_tab_location_display(&uri));

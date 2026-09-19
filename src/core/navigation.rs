@@ -281,6 +281,33 @@ impl TabState {
         self.retry = None;
         self.status = NavigationStatus::Closed;
     }
+    /// A removed mount invalidates its listing, never its tab identity/history.
+    pub fn mark_unavailable(&mut self, root: &Location) -> bool {
+        if matches!(self.status, NavigationStatus::Closed) || !self.location.is_within(root) {
+            return false;
+        }
+        self.cancel_pending();
+        self.directory = None;
+        self.selection_keys.clear();
+        self.content = TabContent::Unavailable(self.location.clone());
+        self.retry = Some((
+            self.location.clone(),
+            if self.history.current().is_some() {
+                HistoryCommit::Replace
+            } else {
+                HistoryCommit::Push
+            },
+        ));
+        self.status = NavigationStatus::Failed {
+            location: self.location.clone(),
+            error: OperationError::new(
+                OperationErrorKind::MountUnavailable,
+                Some(&self.location),
+                None,
+            ),
+        };
+        true
+    }
     pub fn show_section(&mut self, section: SidebarSection) {
         self.cancel_pending();
         self.status = if self.directory.is_some() {
@@ -294,6 +321,10 @@ impl TabState {
         };
     }
     pub fn restore_directory(&mut self) {
-        self.content = TabContent::Directory(self.location.clone());
+        self.content = if self.directory.is_some() {
+            TabContent::Directory(self.location.clone())
+        } else {
+            TabContent::Unavailable(self.location.clone())
+        };
     }
 }
