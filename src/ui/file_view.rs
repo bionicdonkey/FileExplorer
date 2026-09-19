@@ -199,7 +199,9 @@ impl FileView {
 
     pub fn mark_unavailable(&self, root: &Location) {
         if self.navigation.state.borrow_mut().mark_unavailable(root) {
-            *self.selected_target.borrow_mut() = None;
+            if !self.navigation.state.borrow().has_available_directory() {
+                *self.selected_target.borrow_mut() = None;
+            }
             self.notify_command_availability_changed();
             self.reload();
         }
@@ -301,10 +303,7 @@ impl FileView {
     }
 
     pub fn command_availability(&self) -> CommandAvailability {
-        if matches!(
-            self.navigation.state.borrow().content,
-            TabContent::Unavailable(_)
-        ) {
+        if !self.navigation.state.borrow().has_available_directory() {
             let mut availability = CommandAvailability::for_selection(&[], None);
             availability.disabled_reason = Some("This location is unavailable");
             return availability;
@@ -335,10 +334,7 @@ impl FileView {
     }
 
     pub fn dispatch_context_command(&self, target: ContextTarget, command: ContextCommand) {
-        if matches!(
-            self.navigation.state.borrow().content,
-            TabContent::Unavailable(_)
-        ) {
+        if !self.navigation.state.borrow().has_available_directory() {
             return;
         }
         if !CommandAvailability::for_target(&target).allows(command) {

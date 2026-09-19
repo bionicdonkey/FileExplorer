@@ -302,6 +302,20 @@ pub struct HeaderControls {
 }
 
 impl HeaderControls {
+    /// Switching tabs always restores the edit URI before an overview label.
+    pub fn set_tab_content(&self, content: &crate::core::navigation::TabContent) {
+        use crate::core::navigation::TabContent;
+        let location = match content {
+            TabContent::Directory(location) | TabContent::Unavailable(location) => location,
+            TabContent::SectionOverview { underlying, .. }
+            | TabContent::Search { underlying, .. } => underlying,
+        };
+        self.set_uri(location.uri());
+        if let TabContent::SectionOverview { section, .. } = content {
+            self.set_section(&section.title);
+        }
+    }
+
     pub fn new(location: Rc<RefCell<Location>>) -> Self {
         let widget = GtkBox::new(Orientation::Horizontal, 6);
         widget.set_margin_top(6);

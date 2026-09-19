@@ -142,6 +142,10 @@ impl TabState {
     pub fn has_pending_navigation(&self) -> bool {
         self.pending.is_some()
     }
+    /// Overlays do not change whether the retained directory is available.
+    pub fn has_available_directory(&self) -> bool {
+        self.directory.is_some() && !matches!(self.status, NavigationStatus::Closed)
+    }
     pub fn begin_retry(&mut self) -> Option<NavigationRequest> {
         let (location, commit) = self.retry.clone()?;
         self.begin(location, commit)
@@ -283,30 +287,47 @@ impl TabState {
     }
     /// A removed mount invalidates its listing, never its tab identity/history.
     pub fn mark_unavailable(&mut self, root: &Location) -> bool {
-        if matches!(self.status, NavigationStatus::Closed) || !self.location.is_within(root) {
+        if matches!(self.status, NavigationStatus::Closed) {
             return false;
         }
-        self.cancel_pending();
-        self.directory = None;
-        self.selection_keys.clear();
-        self.content = TabContent::Unavailable(self.location.clone());
-        self.retry = Some((
-            self.location.clone(),
-            if self.history.current().is_some() {
-                HistoryCommit::Replace
-            } else {
-                HistoryCommit::Push
-            },
-        ));
-        self.status = NavigationStatus::Failed {
-            location: self.location.clone(),
-            error: OperationError::new(
-                OperationErrorKind::MountUnavailable,
-                Some(&self.location),
-                None,
-            ),
+        let current_affected = self.location.is_within(root);
+        let pending_affected = self
+            .pending
+            .as_ref()
+            .filter(|pending| pending.request.location.is_within(root))
+            .cloned();
+        if current_affected {
+            self.directory = None;
+            self.selection_keys.clear();
+            self.content = TabContent::Unavailable(self.location.clone());
+        }
+        let retry = if let Some(pending) = &pending_affected {
+            self.cancel_pending();
+            Some((pending.request.location.clone(), pending.commit))
+        } else if current_affected && self.pending.is_none() {
+            Some((
+                self.location.clone(),
+                if self.history.current().is_some() {
+                    HistoryCommit::Replace
+                } else {
+                    HistoryCommit::Push
+                },
+            ))
+        } else {
+            None
         };
-        true
+        if let Some((location, commit)) = retry {
+            self.retry = Some((location.clone(), commit));
+            self.status = NavigationStatus::Failed {
+                error: OperationError::new(
+                    OperationErrorKind::MountUnavailable,
+                    Some(&location),
+                    None,
+                ),
+                location,
+            };
+        }
+        current_affected || pending_affected.is_some()
     }
     pub fn show_section(&mut self, section: SidebarSection) {
         self.cancel_pending();

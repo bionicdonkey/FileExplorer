@@ -111,6 +111,105 @@ fn slice2_first_reconnect_commits_initial_history_only_after_success() {
     );
     assert_eq!(tab.history.current(), Some(&root));
 }
+
+#[test]
+fn slice2_removed_pending_mount_preserves_unrelated_successful_view() {
+    let mut tab = TabState::new(location("file:///home"));
+    success(&mut tab, "file:///home");
+    tab.selection_keys = vec!["file:///home/selected".into()];
+    let request = tab
+        .begin_navigation(location("smb://host/share/folder"))
+        .unwrap();
+    assert!(tab.mark_unavailable(&location("smb://host/share")));
+    assert!(request.request.cancellable.is_cancelled());
+    assert!(!tab.apply_directory_result(
+        request.generation,
+        RequestCompletion {
+            id: request.request.id,
+            outcome: RequestOutcome::Succeeded(snapshot("smb://host/share/folder")),
+        }
+    ));
+    assert_eq!(tab.location.uri(), "file:///home");
+    assert_eq!(tab.history.current().unwrap().uri(), "file:///home");
+    assert!(matches!(tab.content, TabContent::Directory(_)));
+    assert!(tab.directory.is_some());
+    assert_eq!(tab.selection_keys, ["file:///home/selected"]);
+    assert_eq!(
+        tab.begin_retry().unwrap().request.location.uri(),
+        "smb://host/share/folder"
+    );
+}
+
+#[test]
+fn slice2_removed_current_mount_preserves_unrelated_pending_navigation() {
+    let mut tab = TabState::new(location("smb://host/share"));
+    success(&mut tab, "smb://host/share");
+    let request = tab.begin_navigation(location("file:///home")).unwrap();
+    assert!(tab.mark_unavailable(&location("smb://host/share")));
+    assert!(!request.request.cancellable.is_cancelled());
+    assert!(tab.apply_directory_result(
+        request.generation,
+        RequestCompletion {
+            id: request.request.id,
+            outcome: RequestOutcome::Succeeded(snapshot("file:///home")),
+        }
+    ));
+    assert_eq!(tab.location.uri(), "file:///home");
+}
+
+#[test]
+fn slice2_section_overlay_does_not_restore_directory_availability() {
+    let root = location("file:///mounted");
+    let mut tab = TabState::new(root.clone());
+    success(&mut tab, root.uri());
+    assert!(tab.has_available_directory());
+    tab.mark_unavailable(&root);
+    tab.show_section(zorin_explorer::core::sidebar_model::SidebarSection {
+        title: "This PC".into(),
+        nodes: vec![],
+    });
+    assert!(!tab.has_available_directory());
+}
+
+#[test]
+fn slice2_picker_includes_and_activates_network_shortcuts() {
+    use zorin_explorer::ui::folder_picker::FolderPicker;
+    let repo = Rc::new(ControlledRepository::default());
+    let picker = FolderPicker::new(location("network:///"), repo.clone());
+    picker.select_location(location("network:///"));
+    let (request, done) = repo.0.borrow_mut().remove(0);
+    let target = location("smb://server/");
+    let mut directory = snapshot("network:///");
+    directory.entries = vec![
+        EntrySnapshot {
+            location: target.clone(),
+            display_name: "Network server".into(),
+            kind: EntryKind::Shortcut,
+            size: None,
+            modified: None,
+            content_type: None,
+            capabilities: CapabilitySnapshot::default(),
+        },
+        EntrySnapshot {
+            location: location("network:///file"),
+            display_name: "Regular file".into(),
+            kind: EntryKind::File,
+            size: None,
+            modified: None,
+            content_type: None,
+            capabilities: CapabilitySnapshot::default(),
+        },
+    ];
+    done(RequestCompletion {
+        id: request.id,
+        outcome: RequestOutcome::Succeeded(directory),
+    });
+    assert_eq!(picker.entries().len(), 1);
+    assert_eq!(picker.entries()[0].location, target);
+    picker.activate_entry(0);
+    let (activated, _) = repo.0.borrow_mut().remove(0);
+    assert_eq!(activated.location, target);
+}
 fn snapshot(uri: &str) -> DirectorySnapshot {
     let location = location(uri);
     DirectorySnapshot {

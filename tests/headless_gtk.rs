@@ -173,6 +173,54 @@ fn slice2_navigation_commits_after_success_and_refresh_restores_selection() {
     assert_eq!(entered.borrow().len(), 1);
     assert!(entry.has_css_class("error"));
 
+    // Tab selection must replace the editable URI even when an overview is visible.
+    let header =
+        zorin_explorer::ui::header::HeaderControls::new(Rc::new(RefCell::new(root.clone())));
+    let tabs = adw::TabView::new();
+    let directory_page = tabs.append(&gtk::Label::new(Some("Directory")));
+    let overview_page = tabs.append(&gtk::Label::new(Some("Overview")));
+    tabs.set_selected_page(&directory_page);
+    let overview_content = zorin_explorer::core::navigation::TabContent::SectionOverview {
+        section: zorin_explorer::core::sidebar_model::SidebarSection {
+            title: "Network & online".into(),
+            nodes: vec![],
+        },
+        underlying: Location::from_uri("smb://other/retained").unwrap(),
+    };
+    tabs.connect_selected_page_notify({
+        let header = header.clone();
+        let overview_page = overview_page.clone();
+        let root = root.clone();
+        move |tabs| {
+            let content = if tabs.selected_page().as_ref() == Some(&overview_page) {
+                overview_content.clone()
+            } else {
+                zorin_explorer::core::navigation::TabContent::Directory(root.clone())
+            };
+            header.set_tab_content(&content);
+        }
+    });
+    tabs.set_selected_page(&overview_page);
+    header.focus_location();
+    let mut header_child = header.widget.first_child();
+    let stack = loop {
+        let child = header_child.expect("header contains a location stack");
+        if let Some(stack) = child.downcast_ref::<gtk::Stack>() {
+            break stack.clone();
+        }
+        header_child = child.next_sibling();
+    };
+    let entry = stack
+        .child_by_name("entry")
+        .unwrap()
+        .downcast::<gtk::Entry>()
+        .unwrap();
+    assert_eq!(entry.text(), "smb://other/retained");
+    tabs.set_selected_page(&directory_page);
+    tabs.set_selected_page(&overview_page);
+    header.focus_location();
+    assert_eq!(entry.text(), "smb://other/retained");
+
     fn named_button(widget: &gtk::Widget, label: &str) -> Option<gtk::Button> {
         if let Some(button) = widget.downcast_ref::<gtk::Button>() {
             if button.label().as_deref() == Some(label) {
@@ -248,6 +296,24 @@ fn slice2_navigation_commits_after_success_and_refresh_restores_selection() {
     unavailable_local.mark_unavailable(&root);
     assert!(!unavailable_local.command_availability().can_paste);
     assert_eq!(unavailable_local.current_location(), root);
+    unavailable_local.show_section_overview(zorin_explorer::core::sidebar_model::SidebarSection {
+        title: "This PC".into(),
+        nodes: vec![],
+    });
+    assert!(!unavailable_local.command_availability().can_paste);
+    let dispatched = Rc::new(std::cell::Cell::new(false));
+    unavailable_local.set_context_handler({
+        let dispatched = dispatched.clone();
+        move |_, _| dispatched.set(true)
+    });
+    unavailable_local.dispatch_context_command(
+        zorin_explorer::ui::context_menu::ContextTarget::Background(root.clone()),
+        ContextCommand::Paste,
+    );
+    assert!(
+        !dispatched.get(),
+        "overview must not permit Paste into a removed mount"
+    );
     unavailable_local.close();
 }
 

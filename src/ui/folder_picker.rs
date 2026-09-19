@@ -1,6 +1,6 @@
 use crate::application::navigation::NavigationCoordinator;
 use crate::core::{
-    contracts::EntryKind,
+    contracts::{EntryKind, EntrySnapshot},
     navigation::{NavigationStatus, TabState},
     Location, OperationManager, SidebarModel,
 };
@@ -32,6 +32,14 @@ impl FolderPicker {
     pub fn current_location(&self) -> Location {
         self.navigation.state.borrow().location.clone()
     }
+    pub fn entries(&self) -> Vec<EntrySnapshot> {
+        navigable_entries(&self.navigation.state.borrow())
+    }
+    pub fn activate_entry(&self, index: usize) {
+        if let Some(entry) = self.entries().get(index) {
+            self.select_location(entry.location.clone());
+        }
+    }
     pub fn select_location(&self, location: Location) {
         let render = self.render.clone();
         self.navigation.navigate(location, move |accepted| {
@@ -41,6 +49,26 @@ impl FolderPicker {
         });
         (self.render)();
     }
+}
+
+fn navigable_entries(state: &TabState) -> Vec<EntrySnapshot> {
+    let mut entries = state
+        .directory
+        .as_ref()
+        .map(|snapshot| {
+            snapshot
+                .entries
+                .iter()
+                .filter(|entry| {
+                    matches!(entry.kind, EntryKind::Directory | EntryKind::Shortcut)
+                        && !entry.display_name.starts_with('.')
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    entries.sort_by(|left, right| left.display_name.cmp(&right.display_name));
+    entries
 }
 
 pub fn pick_folder<F: Fn(Location) + 'static>(
@@ -155,28 +183,18 @@ pub fn pick_folder<F: Fn(Location) + 'static>(
             }
             *selected.borrow_mut() = None;
             folders.borrow_mut().clear();
-            if let Some(snapshot) = snapshot.directory {
-                let mut entries = snapshot
-                    .entries
-                    .into_iter()
-                    .filter(|entry| {
-                        entry.kind == EntryKind::Directory && !entry.display_name.starts_with('.')
-                    })
-                    .collect::<Vec<_>>();
-                entries.sort_by(|left, right| left.display_name.cmp(&right.display_name));
-                for entry in entries {
-                    let row = ListBoxRow::new();
-                    let row_content = GtkBox::new(Orientation::Horizontal, 8);
-                    row_content.set_margin_top(6);
-                    row_content.set_margin_bottom(6);
-                    row_content.set_margin_start(8);
-                    row_content.set_margin_end(8);
-                    row_content.append(&gtk::Image::from_icon_name("folder-symbolic"));
-                    row_content.append(&Label::new(Some(&entry.display_name)));
-                    row.set_child(Some(&row_content));
-                    folders.borrow_mut().push(entry.location);
-                    list.append(&row);
-                }
+            for entry in navigable_entries(&snapshot) {
+                let row = ListBoxRow::new();
+                let row_content = GtkBox::new(Orientation::Horizontal, 8);
+                row_content.set_margin_top(6);
+                row_content.set_margin_bottom(6);
+                row_content.set_margin_start(8);
+                row_content.set_margin_end(8);
+                row_content.append(&gtk::Image::from_icon_name("folder-symbolic"));
+                row_content.append(&Label::new(Some(&entry.display_name)));
+                row.set_child(Some(&row_content));
+                folders.borrow_mut().push(entry.location);
+                list.append(&row);
             }
             location_bar.set_uri(snapshot.location.uri());
             destination.set_text(&format!("Destination: {}", snapshot.location.uri()));
@@ -208,10 +226,7 @@ pub fn pick_folder<F: Fn(Location) + 'static>(
     list.connect_row_activated({
         let picker = picker.clone();
         move |_, row| {
-            let location = folders.borrow().get(row.index() as usize).cloned();
-            if let Some(location) = location {
-                picker.select_location(location);
-            }
+            picker.activate_entry(row.index() as usize);
         }
     });
     for section in sidebar_model.borrow().sections() {

@@ -590,13 +590,9 @@ impl ExplorerWindow {
         tabs.view.connect_selected_page_notify(move |view| {
             if let Some(index) = selected_index(view, &select_data) {
                 let tab = &select_data.borrow()[index];
+                select_header.set_tab_content(&tab.view.tab_state().borrow().content);
                 if let Some(title) = tab.view.section_title() {
-                    select_header.set_section(&title);
                     select_sidebar.set_active_section(title);
-                } else if let Some(uri) = tab.view.uri() {
-                    select_header.set_uri(&uri);
-                } else {
-                    select_header.set_uri(tab.view.current_location().uri());
                 }
                 select_header.set_file_action_availability(&tab.view.command_availability());
                 if tab.view.section_title().is_none() {
