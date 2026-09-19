@@ -10,6 +10,286 @@ use zorin_explorer::{
     },
 };
 
+#[derive(Default)]
+struct ControlledSearch(RefCell<Vec<(SearchRequest, SearchCallback)>>);
+impl SearchRepository for ControlledSearch {
+    fn search(&self, request: SearchRequest, done: SearchCallback) {
+        self.0.borrow_mut().push((request, done));
+    }
+}
+
+#[test]
+fn slice2_search_debounce_sends_only_latest_and_close_cancels_pending() {
+    use zorin_explorer::application::search::SearchCoordinator;
+    let context = glib::MainContext::new();
+    context
+        .with_thread_default(|| {
+            let repo = Rc::new(ControlledSearch::default());
+            let state = Rc::new(RefCell::new(TabState::new(location("file:///home"))));
+            success(&mut state.borrow_mut(), "file:///home");
+            let search = SearchCoordinator::new(state.clone(), repo.clone());
+            for term in ["r", "re", "report"] {
+                search.submit_debounced(
+                    term,
+                    SearchMode::Filename,
+                    SearchScope::local_fallback(location("file:///home")),
+                    |_| {},
+                );
+            }
+            assert!(repo.0.borrow().is_empty());
+            let end = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while repo.0.borrow().is_empty() {
+                context.iteration(false);
+                assert!(std::time::Instant::now() < end);
+            }
+            assert_eq!(repo.0.borrow().len(), 1);
+            let (request, done) = repo.0.borrow_mut().remove(0);
+            assert_eq!(request.query, "report");
+            search.clear();
+            state.borrow_mut().close();
+            assert!(request.cancellable.is_cancelled());
+            done(SearchCompletion {
+                id: request.id,
+                outcome: SearchOutcome::Completed {
+                    matches: vec![],
+                    declared_scope: request.scope,
+                    scope_limited: true,
+                    limits: vec![],
+                },
+            });
+            assert!(search.outcome().is_none());
+        })
+        .unwrap();
+}
+
+#[test]
+fn slice2_search_while_directory_is_loading_does_not_cancel_navigation_or_use_old_root() {
+    use zorin_explorer::application::search::SearchCoordinator;
+    let repo = Rc::new(ControlledSearch::default());
+    let state = Rc::new(RefCell::new(TabState::new(location("file:///home"))));
+    let search = SearchCoordinator::new(state.clone(), repo.clone());
+    for target in ["file:///home", "smb://host/share"] {
+        let request = state
+            .borrow_mut()
+            .begin_navigation(location(target))
+            .unwrap();
+        search.submit(
+            "report",
+            SearchMode::Filename,
+            SearchScope::local_fallback(location("file:///home")),
+            |_| {},
+        );
+        assert!(
+            !request.request.cancellable.is_cancelled(),
+            "typing must not cancel directory loading"
+        );
+        assert!(
+            repo.0.borrow().is_empty(),
+            "no search may bind to a pending or obsolete location"
+        );
+        state.borrow_mut().apply_directory_result(
+            request.generation,
+            RequestCompletion {
+                id: request.request.id,
+                outcome: RequestOutcome::Succeeded(snapshot(target)),
+            },
+        );
+    }
+}
+
+#[test]
+fn slice2_search_privacy_disabling_removes_saved_terms_and_submit_honors_policy() {
+    use zorin_explorer::core::SearchHistory;
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("searches.json");
+    let mut history = SearchHistory::load_from(path.clone()).unwrap();
+    history.record_submitted("report", true, 30).unwrap();
+    assert_eq!(
+        SearchHistory::load_from(path.clone())
+            .unwrap()
+            .entries()
+            .len(),
+        1
+    );
+    history.record_submitted("private term", false, 30).unwrap();
+    assert!(history.entries().is_empty());
+    assert!(SearchHistory::load_from(path).unwrap().entries().is_empty());
+}
+
+#[test]
+fn slice2_search_provider_ordering_partial_failure_and_time_boundary_reach_real_coordinator() {
+    use std::time::Duration;
+    use zorin_explorer::{
+        application::search::SearchCoordinator,
+        infrastructure::mock_provider::{MockConfig, MockProvider, MockSearchBehavior},
+    };
+    let context = glib::MainContext::new();
+    let _guard = context.acquire().unwrap();
+    let provider = Rc::new(MockProvider::new(context.clone(), MockConfig::default()));
+    let state = Rc::new(RefCell::new(TabState::new(location("smb://host/share"))));
+    success(&mut state.borrow_mut(), "smb://host/share");
+    let search = SearchCoordinator::new(state, provider.clone());
+    let entries = ["report-z", "report-a", "report-b"].map(|name| EntrySnapshot {
+        location: location(&format!("smb://host/share/{name}")),
+        display_name: name.into(),
+        kind: EntryKind::File,
+        size: None,
+        modified: None,
+        content_type: None,
+        capabilities: CapabilitySnapshot::default(),
+    });
+    let mut capabilities = CapabilitySnapshot {
+        stable_order: false,
+        supported: [Capability::List, Capability::SearchFilename]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
+    let mut scope = SearchScope::local_fallback(location("smb://host/share"));
+    let finish = || {
+        for _ in 0..20 {
+            provider.advance(1);
+            while context.pending() {
+                context.iteration(false);
+            }
+        }
+    };
+    provider.set_directory(scope.root.clone(), entries.to_vec(), capabilities.clone());
+    search.submit("report", SearchMode::Filename, scope.clone(), |_| {});
+    finish();
+    assert!(matches!(
+        search.outcome(),
+        Some(SearchOutcome::Unsupported { .. })
+    ));
+    capabilities.stable_order = true;
+    provider.set_directory(scope.root.clone(), entries.to_vec(), capabilities);
+    scope.max_results = 1;
+    search.submit("report", SearchMode::Filename, scope.clone(), |_| {});
+    finish();
+    assert!(
+        matches!(search.outcome(), Some(SearchOutcome::Completed { matches, .. }) if matches.len() == 1 && matches[0].display_name == "report-a")
+    );
+    scope.max_results = 100;
+    scope.timeout = Duration::from_micros(1500);
+    search.submit("report", SearchMode::Filename, scope.clone(), |_| {});
+    finish();
+    assert!(
+        matches!(search.outcome(), Some(SearchOutcome::Completed { matches, limits, .. }) if matches.len() == 1 && limits.contains(&SearchLimit::Time))
+    );
+    scope.timeout = Duration::from_secs(2);
+    provider.set_search_behavior(MockSearchBehavior::FailAfter {
+        matches: 1,
+        reason: SearchIncompleteReason::AccessLost,
+    });
+    search.submit("report", SearchMode::Filename, scope, |_| {});
+    finish();
+    assert!(
+        matches!(search.outcome(), Some(SearchOutcome::Incomplete { matches, reason: SearchIncompleteReason::AccessLost, .. }) if matches.len() == 1 && matches[0].display_name == "report-a")
+    );
+}
+
+#[test]
+fn slice2_search_latest_query_cancels_and_clear_restores_saved_selection() {
+    use zorin_explorer::application::search::SearchCoordinator;
+    let repo = Rc::new(ControlledSearch::default());
+    let state = Rc::new(RefCell::new(TabState::new(location("file:///home"))));
+    success(&mut state.borrow_mut(), "file:///home");
+    state.borrow_mut().selection_keys = vec!["file:///home/chosen".into()];
+    let search = SearchCoordinator::new(state.clone(), repo.clone());
+    let scope = SearchScope::local_fallback(location("file:///home"));
+    assert_eq!(
+        (scope.max_depth, scope.max_results, scope.timeout.as_secs()),
+        (1, 5000, 2)
+    );
+    search.submit("one", SearchMode::Filename, scope.clone(), |_| {});
+    search.submit("two", SearchMode::Filename, scope.clone(), |_| {});
+    let (first, first_done) = repo.0.borrow_mut().remove(0);
+    let (second, second_done) = repo.0.borrow_mut().remove(0);
+    assert!(first.cancellable.is_cancelled());
+    let completed = |scope| SearchOutcome::Completed {
+        matches: vec![],
+        declared_scope: scope,
+        scope_limited: true,
+        limits: vec![SearchLimit::Depth],
+    };
+    second_done(SearchCompletion {
+        id: second.id,
+        outcome: completed(scope.clone()),
+    });
+    first_done(SearchCompletion {
+        id: first.id,
+        outcome: SearchOutcome::Unsupported {
+            declared_scope: scope.clone(),
+            error: OperationError::new(OperationErrorKind::Unsupported, None, None),
+        },
+    });
+    assert!(matches!(
+        search.outcome(),
+        Some(SearchOutcome::Completed { .. })
+    ));
+    state.borrow_mut().selection_keys.clear();
+    search.clear();
+    assert!(matches!(state.borrow().content, TabContent::Directory(_)));
+    assert_eq!(state.borrow().selection_keys, ["file:///home/chosen"]);
+    assert!(!state.borrow().history.can_go_back());
+}
+
+#[test]
+fn slice2_search_incomplete_retains_uri_results_retry_scope_and_rejects_navigation_races() {
+    use zorin_explorer::application::search::SearchCoordinator;
+    let repo = Rc::new(ControlledSearch::default());
+    let state = Rc::new(RefCell::new(TabState::new(location("smb://host/share"))));
+    success(&mut state.borrow_mut(), "smb://host/share");
+    let search = SearchCoordinator::new(state.clone(), repo.clone());
+    let scope = SearchScope::local_fallback(location("smb://host/share"));
+    search.submit("report", SearchMode::Filename, scope.clone(), |_| {});
+    let (request, done) = repo.0.borrow_mut().remove(0);
+    let entry = EntrySnapshot {
+        location: location("smb://host/share/report%20one"),
+        display_name: "report one".into(),
+        kind: EntryKind::File,
+        size: None,
+        modified: None,
+        content_type: None,
+        capabilities: CapabilitySnapshot::default(),
+    };
+    done(SearchCompletion {
+        id: request.id,
+        outcome: SearchOutcome::Incomplete {
+            matches: vec![entry.clone(), entry],
+            declared_scope: scope.clone(),
+            reason: SearchIncompleteReason::ProviderFailure,
+            retry: RetryClass::AfterRefresh,
+            error: None,
+        },
+    });
+    let TabContent::Search { items, .. } = state.borrow().content.clone() else {
+        panic!("missing retained results")
+    };
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].location().uri(), "smb://host/share/report%20one");
+    assert!(search.retry(|_| {}));
+    let (retried, done) = repo.0.borrow_mut().remove(0);
+    assert_eq!(retried.scope, scope);
+    assert_eq!(retried.query, "report");
+    state
+        .borrow_mut()
+        .begin_navigation(location("file:///elsewhere"));
+    done(SearchCompletion {
+        id: retried.id,
+        outcome: SearchOutcome::Completed {
+            matches: vec![],
+            declared_scope: scope,
+            scope_limited: true,
+            limits: vec![],
+        },
+    });
+    assert!(matches!(
+        search.outcome(),
+        Some(SearchOutcome::Incomplete { .. })
+    ));
+}
+
 fn location(uri: &str) -> Location {
     Location::from_uri(uri).unwrap()
 }

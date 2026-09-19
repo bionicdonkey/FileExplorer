@@ -23,7 +23,7 @@ pub use location::{Location, LocationError, ResolvedLocation};
 pub use navigation::NavigationHistory;
 pub use operation_manager::{OperationKind, OperationManager, OperationRecord, OperationState};
 pub use properties::{PermissionBits, PropertyDetails};
-pub use search::{SearchBackend, SearchHistory, SearchQuery, SearchService};
+pub use search::{SearchHistory, SearchResult};
 pub use sidebar_model::{SidebarLocation, SidebarModel, SidebarNode, SidebarPreferences};
 pub use view_options::{
     GridSize, GroupField, ListColumn, ListColumnLayout, SortDirection, SortField, ViewMode,

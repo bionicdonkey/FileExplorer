@@ -63,6 +63,7 @@ fn command_availability_for_target(
 pub struct FileView {
     pub widget: ScrolledWindow,
     navigation: NavigationCoordinator,
+    search: crate::application::search::SearchCoordinator,
     on_location_committed: Rc<RefCell<Option<Box<dyn Fn(Location)>>>>,
     on_navigate: Rc<RefCell<Option<Box<dyn Fn(Location)>>>>,
     on_close: Rc<RefCell<Option<Box<dyn Fn()>>>>,
@@ -100,15 +101,33 @@ impl FileView {
         current_location: Location,
         repository: Rc<dyn crate::core::ports::DirectoryRepository>,
     ) -> Self {
+        Self::new_with_repositories(
+            current_location,
+            repository,
+            Rc::new(
+                crate::infrastructure::tracker_search::TrackerSearchRepository::new(
+                    glib::MainContext::ref_thread_default(),
+                ),
+            ),
+        )
+    }
+
+    pub fn new_with_repositories(
+        current_location: Location,
+        repository: Rc<dyn crate::core::ports::DirectoryRepository>,
+        search_repository: Rc<dyn crate::core::ports::SearchRepository>,
+    ) -> Self {
         let scroll = ScrolledWindow::new();
         scroll.set_vexpand(true);
         let on_navigate = Rc::new(RefCell::new(None));
+        let state = Rc::new(RefCell::new(TabState::new(current_location)));
         let view = Self {
             widget: scroll,
-            navigation: NavigationCoordinator::new(
-                Rc::new(RefCell::new(TabState::new(current_location))),
-                repository,
+            search: crate::application::search::SearchCoordinator::new(
+                state.clone(),
+                search_repository,
             ),
+            navigation: NavigationCoordinator::new(state, repository),
             on_location_committed: Rc::new(RefCell::new(None)),
             on_navigate,
             on_close: Rc::new(RefCell::new(None)),
@@ -158,6 +177,7 @@ impl FileView {
     }
 
     pub fn navigate(&self, location: Location) {
+        self.clear_search_results();
         let view = self.clone();
         self.navigation.navigate(location, move |accepted| {
             if accepted {
@@ -168,6 +188,7 @@ impl FileView {
     }
 
     pub fn go_back(&self) {
+        self.clear_search_results();
         let view = self.clone();
         if self.navigation.back(move |accepted| {
             if accepted {
@@ -179,6 +200,7 @@ impl FileView {
     }
 
     pub fn go_forward(&self) {
+        self.clear_search_results();
         let view = self.clone();
         if self.navigation.forward(move |accepted| {
             if accepted {
@@ -190,6 +212,7 @@ impl FileView {
     }
 
     pub fn close(&self) {
+        self.search.clear();
         self.navigation.close_tab();
     }
 
@@ -199,6 +222,9 @@ impl FileView {
 
     pub fn mark_unavailable(&self, root: &Location) {
         if self.navigation.state.borrow_mut().mark_unavailable(root) {
+            if self.current_location().is_within(root) {
+                self.search.clear();
+            }
             if !self.navigation.state.borrow().has_available_directory() {
                 *self.selected_target.borrow_mut() = None;
             }
@@ -385,13 +411,109 @@ impl FileView {
     }
 
     pub fn clear_search_results(&self) {
+        let was_active = self.search.clear();
+        if !was_active && !self.is_showing_search_results() {
+            return;
+        }
         if self.is_showing_search_results() {
             self.navigation.state.borrow_mut().restore_directory();
-            self.reload();
+        }
+        self.navigation_finished();
+    }
+
+    pub fn search(
+        &self,
+        term: &str,
+        mode: crate::core::contracts::SearchMode,
+        debounce: bool,
+    ) -> bool {
+        if term.trim().is_empty() {
+            self.clear_search_results();
+            return true;
+        }
+        let scope = crate::core::contracts::SearchScope::local_fallback(self.current_location());
+        let view = self.clone();
+        let done = move |_| view.search_finished();
+        if debounce {
+            self.search.submit_debounced(term, mode, scope, done)
+        } else {
+            self.search.submit(term, mode, scope, done)
         }
     }
 
+    fn search_finished(&self) {
+        *self.selected_target.borrow_mut() = None;
+        self.notify_command_availability_changed();
+        self.reload();
+    }
+
+    fn show_search_status(&self) {
+        use crate::core::contracts::SearchOutcome;
+        use adw::prelude::{MessageDialogExt, MessageDialogExtManual};
+        if !self.is_showing_search_results() {
+            return;
+        }
+        let Some(outcome) = self.search.outcome() else {
+            return;
+        };
+        let content = self.widget.child();
+        self.widget.set_child(gtk::Widget::NONE);
+        let layout = GtkBox::new(Orientation::Vertical, 8);
+        let status = Label::new(Some(&outcome.status_text()));
+        status.set_wrap(true);
+        status.set_xalign(0.0);
+        layout.append(&status);
+        if matches!(outcome, SearchOutcome::Incomplete { .. }) {
+            let retry = Button::with_label("Retry search");
+            let view = self.clone();
+            retry.connect_clicked(move |_| {
+                let updated = view.clone();
+                view.search.retry(move |_| updated.search_finished());
+            });
+            layout.append(&retry);
+        }
+        if let SearchOutcome::Completed { declared_scope, .. } = outcome {
+            let expand = Button::with_label("Expand search scope…");
+            let view = self.clone();
+            expand.connect_clicked(move |_| {
+                let Some(parent) = view.widget.root().and_downcast::<gtk::Window>() else {
+                    return;
+                };
+                let scope = crate::core::contracts::SearchScope {
+                    max_depth: declared_scope.max_depth.saturating_add(1),
+                    max_results: declared_scope.max_results.saturating_mul(2),
+                    timeout: declared_scope.timeout.saturating_mul(2),
+                    ..declared_scope.clone()
+                };
+                let dialog = adw::MessageDialog::new(
+                    Some(&parent),
+                    Some("Expand search scope"),
+                    Some(&scope.annotation()),
+                );
+                dialog.add_responses(&[("cancel", "Cancel"), ("expand", "Search expanded scope")]);
+                dialog.set_default_response(Some("cancel"));
+                dialog.set_close_response("cancel");
+                let view = view.clone();
+                dialog.connect_response(None, move |dialog, response| {
+                    if response == "expand" {
+                        let updated = view.clone();
+                        view.search
+                            .expand_scope(scope.clone(), move |_| updated.search_finished());
+                    }
+                    dialog.close();
+                });
+                dialog.present();
+            });
+            layout.append(&expand);
+        }
+        if let Some(content) = content {
+            layout.append(&content);
+        }
+        self.widget.set_child(Some(&layout));
+    }
+
     pub fn refresh(&self) {
+        self.clear_search_results();
         if !self.has_pending_navigation() && self.section_title().is_some() {
             self.reload();
             return;
@@ -417,6 +539,7 @@ impl FileView {
     }
 
     pub fn show_section_overview(&self, section: SidebarSection) {
+        self.search.clear();
         *self.selected_target.borrow_mut() = None;
         self.navigation.state.borrow_mut().show_section(section);
         self.notify_command_availability_changed();
@@ -505,6 +628,7 @@ impl FileView {
         };
         sort_items(&mut items, &options);
         self.render(items, &options);
+        self.show_search_status();
         self.show_error();
     }
 
@@ -613,7 +737,15 @@ impl FileView {
     fn render(&self, items: Vec<FileItem>, options: &ViewOptions) {
         if items.is_empty() {
             let message = if self.is_showing_search_results() {
-                "No files matched your search"
+                match self.search.outcome() {
+                    Some(crate::core::contracts::SearchOutcome::Incomplete { .. }) => {
+                        "No results were accepted before search stopped"
+                    }
+                    Some(crate::core::contracts::SearchOutcome::Unsupported { .. }) => {
+                        "Search is unavailable for this location or mode"
+                    }
+                    _ => "No files matched in the declared search scope",
+                }
             } else {
                 "This folder is empty"
             };

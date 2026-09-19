@@ -9,15 +9,14 @@ use gtk::{
     Popover, SearchEntry, Separator,
 };
 
-use crate::core::file_item::FileItem;
 use crate::core::location::Location;
 use crate::core::operations::FileOperations;
+use crate::core::SearchHistory;
 use crate::core::{ApplicationPreferences, ConflictDefault, OperationKind, OperationManager};
 use crate::core::{
     GridSize, GroupField, SidebarModel, SidebarPreferences, SortDirection, SortField, ViewMode,
     ViewOptions, ViewPreferencesStore,
 };
-use crate::core::{SearchBackend, SearchHistory, SearchQuery, SearchService};
 use crate::ui::context_menu::{ContextCommand, ContextTarget};
 use crate::ui::file_view::FileView;
 use crate::ui::header::{FileAction, HeaderControls, NavigationAction};
@@ -77,7 +76,8 @@ impl ExplorerWindow {
                 .transpose()
                 .unwrap_or(None)
                 .unwrap_or_else(SearchHistory::in_memory);
-            history.prune(
+            let _ = history.enforce_policy(
+                application_preferences.borrow().record_search_history,
                 application_preferences
                     .borrow()
                     .search_history_retention_days,
@@ -356,7 +356,8 @@ impl ExplorerWindow {
         let search_tabs = tabs.view.clone();
         let search_preferences = application_preferences.clone();
         let search_status = status.clone();
-        search.connect_search_changed(move |entry| {
+        // Cancel on every edit; the coordinator owns the only debounce timer.
+        search.connect_changed(move |entry| {
             perform_search(
                 &entry.text(),
                 &search_data,
@@ -1301,49 +1302,31 @@ fn perform_search(
     let Some(index) = selected_index(tabs, data) else {
         return;
     };
-    let (view, folder, is_remote) = {
+    let view = {
         let data = data.borrow();
         let tab = &data[index];
-        let snapshot = (
-            tab.view.clone(),
-            tab.view.current_location().local_path().unwrap_or_default(),
-            tab.view.uri().is_some(),
-        );
-        snapshot
+        tab.view.clone()
     };
     if term.trim().is_empty() {
         view.clear_search_results();
         status.set_text("Ready");
         return;
     }
-    if is_remote {
-        status.set_text("Search isn't available for remote locations");
-        return;
-    }
     let content_search = preferences.borrow().content_search_enabled;
-    let query = SearchQuery::new(term, content_search);
-    match SearchService::search(&query, &folder) {
-        Ok((backend, paths)) => {
-            let items: Vec<FileItem> = paths
-                .iter()
-                .filter_map(|path| FileItem::from_path(path).ok())
-                .collect();
-            status.set_text(&search_status_text(backend, items.len()));
-            view.show_search_results(items);
-        }
-        Err(error) => status.set_text(&format!("Search failed: {error}")),
-    }
-}
-
-fn search_status_text(backend: SearchBackend, count: usize) -> String {
-    let scope = match backend {
-        SearchBackend::Tracker => "the desktop search index",
-        SearchBackend::FolderFallback => "this folder only (desktop search index unavailable)",
-    };
-    format!(
-        "Found {count} item{} searching {scope}",
-        if count == 1 { "" } else { "s" }
-    )
+    let started = view.search(
+        term,
+        if content_search {
+            crate::core::contracts::SearchMode::Content
+        } else {
+            crate::core::contracts::SearchMode::Filename
+        },
+        true,
+    );
+    status.set_text(if started {
+        "Search results and scope are shown in the active tab"
+    } else {
+        "Search is available when the folder has finished loading"
+    });
 }
 
 /// Recorded only when a search is committed with Enter, not on every
@@ -1353,12 +1336,13 @@ fn record_search_term(
     preferences: &Rc<RefCell<ApplicationPreferences>>,
     history: &Rc<RefCell<SearchHistory>>,
 ) {
-    if term.trim().is_empty() || !preferences.borrow().record_search_history {
-        return;
-    }
+    let preferences = preferences.borrow();
     let mut history = history.borrow_mut();
-    history.record(term);
-    let _ = history.save();
+    let _ = history.record_submitted(
+        term,
+        preferences.record_search_history,
+        preferences.search_history_retention_days,
+    );
 }
 
 fn copy_text(view: &FileView, text: &str) {

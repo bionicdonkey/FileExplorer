@@ -10,6 +10,209 @@ use zorin_explorer::ui::context_menu::{
 };
 
 #[test]
+fn slice2_search_scope_incomplete_retry_clear_and_remote_activation() {
+    use std::cell::RefCell;
+    use zorin_explorer::{core::ports::*, ui::file_view::FileView};
+    #[derive(Default)]
+    struct SearchDouble(RefCell<Vec<(SearchRequest, SearchCallback)>>);
+    impl SearchRepository for SearchDouble {
+        fn search(&self, request: SearchRequest, done: SearchCallback) {
+            self.0.borrow_mut().push((request, done));
+        }
+    }
+    fn texts(widget: &gtk::Widget) -> String {
+        let mut text = widget
+            .clone()
+            .downcast::<gtk::Label>()
+            .ok()
+            .map(|l| l.text().to_string())
+            .unwrap_or_default();
+        let mut child = widget.first_child();
+        while let Some(current) = child {
+            text.push_str(&texts(&current));
+            child = current.next_sibling();
+        }
+        text
+    }
+    fn button(widget: &gtk::Widget, label: &str) -> Option<gtk::Button> {
+        if let Ok(button) = widget.clone().downcast::<gtk::Button>() {
+            if button.label().as_deref() == Some(label) {
+                return Some(button);
+            }
+        }
+        let mut child = widget.first_child();
+        while let Some(current) = child {
+            if let Some(button) = button(&current, label) {
+                return Some(button);
+            }
+            child = current.next_sibling();
+        }
+        None
+    }
+    fn column(widget: &gtk::Widget) -> Option<gtk::ColumnView> {
+        if let Ok(column) = widget.clone().downcast::<gtk::ColumnView>() {
+            return Some(column);
+        }
+        let mut child = widget.first_child();
+        while let Some(current) = child {
+            if let Some(column) = column(&current) {
+                return Some(column);
+            }
+            child = current.next_sibling();
+        }
+        None
+    }
+    gtk::init().expect("headless GTK must initialize");
+    let context = glib::MainContext::default();
+    let _guard = context.acquire().unwrap();
+    let provider = Rc::new(MockProvider::new(context.clone(), MockConfig::default()));
+    let root = Location::from_uri("smb://host/share").unwrap();
+    let saved = EntrySnapshot {
+        location: Location::from_uri("smb://host/share/saved").unwrap(),
+        display_name: "saved".into(),
+        kind: EntryKind::File,
+        size: None,
+        modified: None,
+        content_type: None,
+        capabilities: CapabilitySnapshot::default(),
+    };
+    provider.set_directory(
+        root.clone(),
+        vec![saved],
+        CapabilitySnapshot {
+            stable_order: true,
+            supported: [Capability::List].into_iter().collect(),
+            ..Default::default()
+        },
+    );
+    let search = Rc::new(SearchDouble::default());
+    let view = FileView::new_with_repositories(root.clone(), provider.clone(), search.clone());
+    view.set_options(zorin_explorer::core::ViewOptions {
+        view_mode: zorin_explorer::core::ViewMode::DetailedList,
+        group_field: zorin_explorer::core::GroupField::None,
+        ..Default::default()
+    });
+    provider.advance(1);
+    while context.pending() {
+        context.iteration(false);
+    }
+    column(view.widget.upcast_ref())
+        .unwrap()
+        .model()
+        .unwrap()
+        .downcast::<gtk::SingleSelection>()
+        .unwrap()
+        .set_selected(0);
+    view.search("report", SearchMode::Filename, false);
+    let (request, done) = search.0.borrow_mut().remove(0);
+    let result_location = Location::from_uri("smb://host/share/report%20one").unwrap();
+    let entry = EntrySnapshot {
+        location: result_location.clone(),
+        display_name: "report one".into(),
+        kind: EntryKind::Directory,
+        size: None,
+        modified: None,
+        content_type: None,
+        capabilities: CapabilitySnapshot::default(),
+    };
+    done(SearchCompletion {
+        id: request.id,
+        outcome: SearchOutcome::Incomplete {
+            matches: vec![entry],
+            declared_scope: request.scope.clone(),
+            reason: SearchIncompleteReason::ProviderFailure,
+            retry: RetryClass::AfterRefresh,
+            error: None,
+        },
+    });
+    let rendered = texts(view.widget.upcast_ref());
+    assert!(rendered.contains("Search incomplete"));
+    assert!(rendered.contains("smb://host/share"));
+    assert!(
+        rendered.contains("5000") && rendered.contains("2 seconds") && rendered.contains("depth 1")
+    );
+    let activated = Rc::new(RefCell::new(None));
+    let output = activated.clone();
+    view.set_navigation_handler(move |location| *output.borrow_mut() = Some(location));
+    let result_column = column(view.widget.upcast_ref()).unwrap();
+    result_column
+        .model()
+        .unwrap()
+        .downcast::<gtk::SingleSelection>()
+        .unwrap()
+        .set_selected(0);
+    result_column.emit_by_name::<()>("activate", &[&0u32]);
+    assert_eq!(*activated.borrow(), Some(result_location));
+    button(view.widget.upcast_ref(), "Retry search")
+        .unwrap()
+        .emit_clicked();
+    let (retry, done) = search.0.borrow_mut().remove(0);
+    assert_eq!(retry.scope, request.scope);
+    done(SearchCompletion {
+        id: retry.id,
+        outcome: SearchOutcome::Completed {
+            matches: vec![],
+            declared_scope: retry.scope,
+            scope_limited: true,
+            limits: vec![
+                SearchLimit::Depth,
+                SearchLimit::ResultCount,
+                SearchLimit::Time,
+            ],
+        },
+    });
+    assert!(view.selected_target().is_none());
+    assert!(button(view.widget.upcast_ref(), "Expand search scope…").is_some());
+    view.clear_search_results();
+    assert!(!view.is_showing_search_results());
+    assert_eq!(
+        view.tab_state().borrow().selection_keys,
+        ["smb://host/share/saved"]
+    );
+    assert!(!view.tab_state().borrow().history.can_go_back());
+    // Failed navigation after leaving search must restore the directory's
+    // selected target, not keep an invisible search result actionable.
+    view.search("report", SearchMode::Filename, false);
+    let (request, done) = search.0.borrow_mut().remove(0);
+    let result = EntrySnapshot {
+        location: Location::from_uri("smb://host/share/report").unwrap(),
+        display_name: "report".into(),
+        kind: EntryKind::Directory,
+        size: None,
+        modified: None,
+        content_type: None,
+        capabilities: CapabilitySnapshot::default(),
+    };
+    done(SearchCompletion {
+        id: request.id,
+        outcome: SearchOutcome::Completed {
+            matches: vec![result],
+            declared_scope: request.scope,
+            scope_limited: true,
+            limits: vec![],
+        },
+    });
+    column(view.widget.upcast_ref())
+        .unwrap()
+        .model()
+        .unwrap()
+        .downcast::<gtk::SingleSelection>()
+        .unwrap()
+        .set_selected(0);
+    view.navigate(Location::from_uri("smb://host/missing").unwrap());
+    provider.advance(1);
+    while context.pending() {
+        context.iteration(false);
+    }
+    let Some(zorin_explorer::ui::context_menu::ContextTarget::File(selected)) =
+        view.selected_target()
+    else {
+        panic!("saved file must remain selected")
+    };
+    assert_eq!(selected.location().uri(), "smb://host/share/saved");
+}
+
+#[test]
 fn slice2_navigation_commits_after_success_and_refresh_restores_selection() {
     use std::cell::RefCell;
     use zorin_explorer::{core::navigation::NavigationStatus, ui::file_view::FileView};

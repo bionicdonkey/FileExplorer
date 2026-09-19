@@ -1,83 +1,3 @@
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SearchQuery {
-    term: String,
-    content: bool,
-}
-
-impl SearchQuery {
-    pub fn new(term: impl Into<String>, content: bool) -> Self {
-        Self { term: term.into(), content }
-    }
-
-    pub fn includes_content(&self) -> bool { self.content }
-    pub fn term(&self) -> &str { &self.term }
-}
-
-/// Matches any filename containing `term`, case-insensitively — an exact
-/// `nfo:fileName "term"` triple pattern only matches a filename equal to
-/// the whole search term, which almost never matches what a user types.
-pub fn tracker_filename_query(term: &str) -> String {
-    let escaped = escape_sparql_literal(term);
-    format!("SELECT DISTINCT nie:url(?u) WHERE {{ ?u a nfo:FileDataObject ; nfo:fileName ?name . FILTER(CONTAINS(LCASE(?name), LCASE(\"{escaped}\"))) }}")
-}
-
-/// Reuses Tracker's existing full-text index rather than scanning file
-/// contents directly, so this stays opt-in and never builds a second index.
-pub fn tracker_content_query(term: &str) -> String {
-    let escaped = escape_sparql_literal(term);
-    format!("SELECT DISTINCT nie:url(?u) WHERE {{ ?u a nfo:FileDataObject ; fts:match \"{escaped}\" . }}")
-}
-
-fn escape_sparql_literal(term: &str) -> String {
-    term.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
-fn tracker_query_for(query: &SearchQuery) -> String {
-    if query.includes_content() { tracker_content_query(query.term()) } else { tracker_filename_query(query.term()) }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SearchBackend { Tracker, FolderFallback }
-
-pub struct SearchService;
-
-impl SearchService {
-    pub fn backend() -> SearchBackend {
-        Command::new("tracker3").arg("--version").output().map(|output| output.status.success()).unwrap_or(false)
-            .then_some(SearchBackend::Tracker).unwrap_or(SearchBackend::FolderFallback)
-    }
-
-    pub fn search(query: &SearchQuery, folder: &Path) -> io::Result<(SearchBackend, Vec<PathBuf>)> {
-        if Self::backend() == SearchBackend::Tracker {
-            // An empty result can mean "no matches" or "this folder isn't in
-            // Tracker's index" (e.g. a mounted volume outside $HOME); either
-            // way a live scan of the folder the user is actually looking at
-            // is strictly more useful than reporting nothing.
-            if let Ok(results) = tracker_search(query) { if !results.is_empty() { return Ok((SearchBackend::Tracker, results)); } }
-        }
-        Ok((SearchBackend::FolderFallback, folder_search(query, folder)?))
-    }
-}
-
-fn tracker_search(query: &SearchQuery) -> io::Result<Vec<PathBuf>> {
-    let output = Command::new("tracker3")
-        .args(["sparql", "--dbus-service", "org.freedesktop.Tracker3.Miner.Files", "--query", &tracker_query_for(query)])
-        .output()?;
-    if !output.status.success() { return Err(io::Error::new(io::ErrorKind::Other, String::from_utf8_lossy(&output.stderr))); }
-    Ok(String::from_utf8_lossy(&output.stdout).lines()
-        .map(str::trim).map(|line| line.trim_matches('"'))
-        .filter_map(|uri| uri.strip_prefix("file://"))
-        .map(PathBuf::from).collect())
-}
-
-fn folder_search(query: &SearchQuery, folder: &Path) -> io::Result<Vec<PathBuf>> {
-    let needle = query.term().to_lowercase();
-    let results = fs::read_dir(folder)?.filter_map(Result::ok)
-        .filter(|entry| entry.file_name().to_string_lossy().to_lowercase().contains(&needle))
-        .map(|entry| entry.path()).collect::<Vec<_>>();
-    Ok(results)
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SearchHistoryEntry {
     pub term: String,
@@ -96,21 +16,42 @@ pub struct SearchHistory {
 }
 
 impl SearchHistory {
-    pub fn in_memory() -> Self { Self { path: None, entries: Vec::new() } }
-
-    pub fn load_from(path: PathBuf) -> io::Result<Self> {
-        if !path.exists() { return Ok(Self { path: Some(path), entries: Vec::new() }); }
-        let stored: StoredSearchHistory = serde_json::from_slice(&fs::read(&path)?).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        Ok(Self { path: Some(path), entries: stored.entries })
+    pub fn in_memory() -> Self {
+        Self {
+            path: None,
+            entries: Vec::new(),
+        }
     }
 
-    pub fn entries(&self) -> &[SearchHistoryEntry] { &self.entries }
+    pub fn load_from(path: PathBuf) -> io::Result<Self> {
+        if !path.exists() {
+            return Ok(Self {
+                path: Some(path),
+                entries: Vec::new(),
+            });
+        }
+        let stored: StoredSearchHistory = serde_json::from_slice(&fs::read(&path)?)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        Ok(Self {
+            path: Some(path),
+            entries: stored.entries,
+        })
+    }
+
+    pub fn entries(&self) -> &[SearchHistoryEntry] {
+        &self.entries
+    }
 
     pub fn record(&mut self, term: &str) {
         let term = term.trim();
-        if term.is_empty() { return; }
+        if term.is_empty() {
+            return;
+        }
         self.entries.retain(|entry| entry.term != term);
-        self.entries.push(SearchHistoryEntry { term: term.to_owned(), recorded_at: now() });
+        self.entries.push(SearchHistoryEntry {
+            term: term.to_owned(),
+            recorded_at: now(),
+        });
     }
 
     pub fn prune(&mut self, retention_days: u32) {
@@ -118,73 +59,58 @@ impl SearchHistory {
         self.entries.retain(|entry| entry.recorded_at >= cutoff);
     }
 
-    pub fn clear(&mut self) { self.entries.clear(); }
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    /// Shared by startup and preferences so disabled recording also removes
+    /// terms left by a previous enabled session.
+    pub fn enforce_policy(&mut self, enabled: bool, retention_days: u32) -> io::Result<()> {
+        if enabled {
+            self.prune(retention_days);
+        } else {
+            self.clear();
+        }
+        self.save()
+    }
+
+    pub fn record_submitted(
+        &mut self,
+        term: &str,
+        enabled: bool,
+        retention_days: u32,
+    ) -> io::Result<()> {
+        if enabled {
+            self.record(term);
+        }
+        self.enforce_policy(enabled, retention_days)
+    }
 
     pub fn save(&self) -> io::Result<()> {
-        let Some(path) = &self.path else { return Ok(()); };
-        if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
-        let bytes = serde_json::to_vec_pretty(&StoredSearchHistory { entries: self.entries.clone() }).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let Some(path) = &self.path else {
+            return Ok(());
+        };
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let bytes = serde_json::to_vec_pretty(&StoredSearchHistory {
+            entries: self.entries.clone(),
+        })
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         fs::write(path, bytes)
     }
 }
 
-fn now() -> i64 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64 }
+fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn tracker_query_escapes_user_search_terms() {
-        let query = tracker_filename_query("report \"draft\"");
-        assert!(query.contains("report \\\"draft\\\""));
-    }
-
-    #[test]
-    fn content_search_is_opt_in() {
-        assert!(!SearchQuery::new("report", false).includes_content());
-        assert!(SearchQuery::new("report", true).includes_content());
-    }
-
-    #[test]
-    fn opting_into_content_search_queries_full_text_instead_of_just_the_filename() {
-        let name_only = tracker_query_for(&SearchQuery::new("report", false));
-        let with_content = tracker_query_for(&SearchQuery::new("report", true));
-
-        assert!(name_only.contains("nfo:fileName"));
-        assert!(!name_only.contains("fts:match"));
-        assert!(with_content.contains("fts:match"));
-    }
-
-    #[test]
-    fn fallback_search_only_matches_the_requested_folder() {
-        let directory = tempfile::tempdir().unwrap();
-        std::fs::write(directory.path().join("report.txt"), "content").unwrap();
-        assert_eq!(folder_search(&SearchQuery::new("report", false), directory.path()).unwrap(), vec![directory.path().join("report.txt")]);
-    }
-
-    #[test]
-    fn a_partial_term_matches_a_longer_filename() {
-        let query = tracker_filename_query("repo");
-        // The filter must test containment, not equality: an exact
-        // `nfo:fileName "repo"` triple pattern would never match "report.txt".
-        assert!(query.contains("CONTAINS(LCASE(?name), LCASE(\"repo\"))"));
-    }
-
-    /// A temp directory is never in Tracker's index (e.g. it commonly
-    /// excludes mounted volumes entirely), so a Tracker "success" with zero
-    /// rows must still fall back to scanning this folder directly, whether
-    /// or not `tracker3` happens to be installed on the machine running
-    /// this test.
-    #[test]
-    fn a_folder_outside_the_tracker_index_still_finds_its_own_files() {
-        let directory = tempfile::tempdir().unwrap();
-        std::fs::write(directory.path().join("report.txt"), "content").unwrap();
-
-        let (_backend, results) = SearchService::search(&SearchQuery::new("report", false), directory.path()).unwrap();
-
-        assert_eq!(results, vec![directory.path().join("report.txt")]);
-    }
 
     #[test]
     fn recording_a_term_twice_keeps_only_the_latest_entry() {
@@ -224,12 +150,74 @@ mod tests {
         history.save().unwrap();
 
         let restored = SearchHistory::load_from(path).unwrap();
-        assert_eq!(restored.entries().iter().map(|entry| entry.term.as_str()).collect::<Vec<_>>(), ["invoice"]);
+        assert_eq!(
+            restored
+                .entries()
+                .iter()
+                .map(|entry| entry.term.as_str())
+                .collect::<Vec<_>>(),
+            ["invoice"]
+        );
     }
 }
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::PathBuf;
 
+use super::{contracts::*, FileItem, Location};
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
+
+impl SearchScope {
+    pub fn local_fallback(root: Location) -> Self {
+        Self {
+            root,
+            max_depth: 1,
+            max_results: 5_000,
+            timeout: Duration::from_secs(2),
+        }
+    }
+
+    pub fn annotation(&self) -> String {
+        format!(
+            "{}; depth {} (root is 0); up to {} matches; up to {} seconds",
+            self.root.redacted(),
+            self.max_depth,
+            self.max_results,
+            self.timeout.as_secs_f64()
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SearchResult {
+    pub item: FileItem,
+    pub location: Location,
+}
+
+impl From<&EntrySnapshot> for SearchResult {
+    fn from(entry: &EntrySnapshot) -> Self {
+        Self {
+            item: FileItem::from_snapshot(entry),
+            location: entry.location.clone(),
+        }
+    }
+}
+
+impl SearchOutcome {
+    pub fn status_text(&self) -> String {
+        match self {
+            Self::Completed { matches, declared_scope, .. } => format!("Found {} items. Searched {}", matches.len(), declared_scope.annotation()),
+            Self::Incomplete { matches, declared_scope, reason, .. } => {
+                let reason = match reason {
+                    SearchIncompleteReason::Cancelled => "cancelled",
+                    SearchIncompleteReason::ProviderFailure => "provider failed",
+                    SearchIncompleteReason::MalformedPage => "invalid provider response",
+                    SearchIncompleteReason::AccessLost => "access or mount lost",
+                };
+                format!("Search incomplete ({reason}); retained {} items. {}", matches.len(), declared_scope.annotation())
+            }
+            Self::Unsupported { declared_scope, .. } => format!("Search unavailable for {}: the provider does not support this search mode and scope", declared_scope.root.redacted()),
+        }
+    }
+}

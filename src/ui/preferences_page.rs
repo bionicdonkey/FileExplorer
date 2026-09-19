@@ -138,6 +138,8 @@ fn search_privacy_page(preferences: Rc<RefCell<ApplicationPreferences>>, history
     let stored = preferences.clone();
     content_search.connect_toggled(move |button| { stored.borrow_mut().content_search_enabled = button.is_active(); let _ = stored.borrow().save(); });
     page.append(&content_search);
+    let index_note = Label::new(Some("Content search requires a compatible desktop-index provider. If unavailable, search explains why; files are never scanned to substitute for an index."));
+    index_note.set_wrap(true); index_note.set_xalign(0.0); page.append(&index_note);
     let record_history = CheckButton::with_label("Remember recent searches"); record_history.set_active(preferences.borrow().record_search_history);
     let stored = preferences.clone(); let record_history_effect = history.clone();
     record_history.connect_toggled(move |button| { stored.borrow_mut().record_search_history = button.is_active(); let _ = stored.borrow().save(); if !button.is_active() { record_history_effect.borrow_mut().clear(); let _ = record_history_effect.borrow().save(); } });

@@ -4,6 +4,143 @@ use zorin_explorer::{
     infrastructure::gio_operations::GioOperations,
 };
 
+fn search_result(scope: SearchScope, mode: SearchMode, cancelled: bool) -> SearchOutcome {
+    use gio::prelude::*;
+    use zorin_explorer::{
+        core::ports::SearchRepository, infrastructure::tracker_search::TrackerSearchRepository,
+    };
+    let context = glib::MainContext::new();
+    let _guard = context.acquire().unwrap();
+    let adapter = TrackerSearchRepository::new(context.clone());
+    let received = Rc::new(RefCell::new(None));
+    let out = received.clone();
+    let cancellable = gio::Cancellable::new();
+    if cancelled {
+        cancellable.cancel();
+    }
+    let callback_context = context.clone();
+    adapter.search(
+        SearchRequest {
+            id: RequestId(123),
+            scope,
+            query: "report".into(),
+            mode,
+            cancellable,
+        },
+        Box::new(move |completion| {
+            assert!(callback_context.is_owner());
+            assert_eq!(completion.id, RequestId(123));
+            *out.borrow_mut() = Some(completion.outcome);
+        }),
+    );
+    assert!(received.borrow().is_none());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while received.borrow().is_none() {
+        context.iteration(false);
+        assert!(std::time::Instant::now() < deadline);
+    }
+    let result = received.borrow_mut().take().unwrap();
+    result
+}
+
+#[test]
+fn slice2_search_local_depth_stable_order_result_and_time_bounds() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::create_dir(temp.path().join("child")).unwrap();
+    std::fs::write(temp.path().join("report-z"), "").unwrap();
+    std::fs::write(temp.path().join("report-a"), "").unwrap();
+    std::fs::write(temp.path().join("child/report-nested"), "").unwrap();
+    let mut scope = SearchScope::local_fallback(Location::from_local_path(temp.path()));
+    let SearchOutcome::Completed {
+        matches,
+        scope_limited,
+        ..
+    } = search_result(scope.clone(), SearchMode::Filename, false)
+    else {
+        panic!("fallback must complete")
+    };
+    assert!(scope_limited);
+    assert_eq!(
+        matches
+            .iter()
+            .map(|e| e.display_name.as_str())
+            .collect::<Vec<_>>(),
+        ["report-a", "report-z"]
+    );
+    scope.max_depth = 0;
+    assert!(
+        matches!(search_result(scope.clone(), SearchMode::Filename, false), SearchOutcome::Completed { matches, .. } if matches.is_empty())
+    );
+    scope.max_depth = 2;
+    assert!(
+        matches!(search_result(scope.clone(), SearchMode::Filename, false), SearchOutcome::Completed { matches, .. } if matches.len() == 3)
+    );
+    scope.max_results = 1;
+    assert!(
+        matches!(search_result(scope.clone(), SearchMode::Filename, false), SearchOutcome::Completed { matches, limits, .. } if matches.len() == 1 && matches[0].display_name == "report-a" && limits.contains(&SearchLimit::ResultCount))
+    );
+    scope.timeout = std::time::Duration::ZERO;
+    assert!(
+        matches!(search_result(scope, SearchMode::Filename, false), SearchOutcome::Completed { matches, limits, .. } if matches.is_empty() && limits.contains(&SearchLimit::Time))
+    );
+}
+
+#[test]
+fn slice2_search_cancellation_failure_and_unavailable_modes_are_explicit() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("unrelated"), "report secret contents").unwrap();
+    let scope = SearchScope::local_fallback(Location::from_local_path(temp.path()));
+    assert!(matches!(
+        search_result(scope.clone(), SearchMode::Content, false),
+        SearchOutcome::Unsupported { .. }
+    ));
+    assert!(matches!(
+        search_result(scope, SearchMode::Filename, true),
+        SearchOutcome::Incomplete {
+            reason: SearchIncompleteReason::Cancelled,
+            ..
+        }
+    ));
+    let remote = SearchScope::local_fallback(Location::from_uri("smb://host/share").unwrap());
+    assert!(matches!(
+        search_result(remote, SearchMode::Filename, false),
+        SearchOutcome::Unsupported { .. }
+    ));
+    let missing =
+        SearchScope::local_fallback(Location::from_local_path(&temp.path().join("missing")));
+    assert!(matches!(
+        search_result(missing, SearchMode::Filename, false),
+        SearchOutcome::Incomplete {
+            reason: SearchIncompleteReason::ProviderFailure,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn slice2_search_never_follows_symlinks_or_decodes_uri_identity_as_a_path() {
+    use std::{
+        ffi::OsString,
+        os::unix::{ffi::OsStringExt, fs::symlink},
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("report-secret"), "private").unwrap();
+    symlink(outside.path(), temp.path().join("shortcut")).unwrap();
+    let name = OsString::from_vec(b"report-% space\xff".to_vec());
+    let expected = Location::from_local_path(&temp.path().join(&name));
+    std::fs::write(temp.path().join(name), "").unwrap();
+    let mut scope = SearchScope::local_fallback(Location::from_local_path(temp.path()));
+    scope.max_depth = 5;
+    let SearchOutcome::Completed { matches, .. } =
+        search_result(scope, SearchMode::Filename, false)
+    else {
+        panic!("expected completed metadata search")
+    };
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0].location, expected);
+}
+
 fn directory_result(
     location: Location,
     cancelled: bool,
