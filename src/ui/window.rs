@@ -9,10 +9,13 @@ use gtk::{
     Popover, SearchEntry, Separator,
 };
 
+use crate::application::commands::{
+    route, ClipboardAction, ClipboardPayload, ClipboardState, Shortcut,
+};
+use crate::core::contracts::{ConflictDecision, MutationKind};
 use crate::core::location::Location;
-use crate::core::operations::FileOperations;
 use crate::core::SearchHistory;
-use crate::core::{ApplicationPreferences, ConflictDefault, OperationKind, OperationManager};
+use crate::core::{ApplicationPreferences, ConflictDefault, OperationManager};
 use crate::core::{
     GridSize, GroupField, SidebarModel, SidebarPreferences, SortDirection, SortField, ViewMode,
     ViewOptions, ViewPreferencesStore,
@@ -33,17 +36,16 @@ struct TabData {
     page: TabPage,
 }
 
-#[derive(Clone, Copy)]
-enum ClipboardOperation {
-    Copy,
-    Move,
+#[derive(Clone)]
+struct FileClipboard {
+    state: ClipboardState,
+    source_view: FileView,
 }
 
 #[derive(Clone)]
-struct FileClipboard {
-    path: PathBuf,
-    operation: ClipboardOperation,
-    source_view: FileView,
+struct ClipboardLease {
+    owner: Rc<RefCell<Option<FileClipboard>>>,
+    generation: u64,
 }
 
 pub struct ExplorerWindow {
@@ -147,6 +149,23 @@ impl ExplorerWindow {
                 .unwrap_or_else(|_| ViewPreferencesStore::in_memory()),
         ));
         let clipboard: Rc<RefCell<Option<FileClipboard>>> = Rc::new(RefCell::new(None));
+        let clipboard_changed = clipboard.clone();
+        gtk::prelude::WidgetExt::display(&window)
+            .clipboard()
+            .connect_changed(move |system| {
+                if !system.is_local()
+                    || !system
+                        .formats()
+                        .contains_type(gtk::gdk::FileList::static_type())
+                {
+                    let state = clipboard_changed.clone();
+                    glib::idle_add_local_once(move || {
+                        if let Some(previous) = state.borrow_mut().take() {
+                            previous.source_view.set_pending_cut_locations(vec![]);
+                        }
+                    });
+                }
+            });
         for path in startup_paths {
             let location = Rc::new(RefCell::new(path.clone()));
             let view = FileView::from_location(path.clone());
@@ -866,15 +885,47 @@ fn wire_tab(
     let command_tabs = tabs.clone();
     let command_header = header.clone();
     let command_preferences = preferences.clone();
-    let command_page = page.clone();
     let command_app = app.clone();
     let command_clipboard = clipboard.clone();
     let command_sidebar = sidebar.clone();
     let command_operations = operations.clone();
     let command_view = view.clone();
-    view.set_context_handler(move |target, command| {
+    view.set_application_handler(move |intent| {
+        let command = intent.kind;
+        let target = command_view
+            .selected_target()
+            .unwrap_or_else(|| ContextTarget::Background(intent.destination.clone()));
         let path = target_path(&target);
+        let clipboard_payload = command_clipboard
+            .borrow()
+            .as_ref()
+            .and_then(|c| c.state.payload().cloned());
         match command {
+            ContextCommand::OpenWith => {
+                if let Some(application) = intent.application {
+                    let files = intent
+                        .selection
+                        .iter()
+                        .map(|l| gio::File::for_uri(l.uri()))
+                        .collect::<Vec<_>>();
+                    if let Err(error) = application.launch(&files, None::<&gio::AppLaunchContext>) {
+                        show_operation_error(
+                            &command_view,
+                            crate::core::contracts::OperationError::from_gio(
+                                &error,
+                                intent.selection.first(),
+                                None,
+                            )
+                            .message_key,
+                        );
+                    }
+                }
+            }
+            ContextCommand::Open => {
+                for item in command_view.selected_items() {
+                    command_view.open_item(&item);
+                }
+            }
             ContextCommand::OpenInNewTab => {
                 if let Some(path) = target_location(&target) {
                     add_tab_at(
@@ -901,41 +952,90 @@ fn wire_tab(
                 }
             }
             ContextCommand::Copy | ContextCommand::Cut => {
-                if let Some(path) = path {
-                    if command == ContextCommand::Cut {
-                        command_view.set_pending_cut(Some(path.clone()));
+                if !intent.selection.is_empty() {
+                    if let Some(previous) = command_clipboard.borrow_mut().take() {
+                        previous.source_view.set_pending_cut_locations(vec![]);
                     }
-                    *command_clipboard.borrow_mut() = Some(FileClipboard {
-                        path,
-                        operation: if command == ContextCommand::Copy {
-                            ClipboardOperation::Copy
+                    let payload = ClipboardPayload {
+                        action: if command == ContextCommand::Copy {
+                            ClipboardAction::Copy
                         } else {
-                            ClipboardOperation::Move
+                            ClipboardAction::Cut
                         },
+                        locations: intent.selection,
+                    };
+                    if payload.action == ClipboardAction::Cut {
+                        command_view.set_pending_cut_locations(payload.locations.clone());
+                    }
+                    let files = gtk::gdk::FileList::from_array(
+                        &payload
+                            .locations
+                            .iter()
+                            .map(|l| gio::File::for_uri(l.uri()))
+                            .collect::<Vec<_>>(),
+                    );
+                    let provider = gtk::gdk::ContentProvider::new_union(&[
+                        gtk::gdk::ContentProvider::for_value(&files.to_value()),
+                        gtk::gdk::ContentProvider::for_bytes(
+                            "text/uri-list",
+                            &glib::Bytes::from_owned(payload.uri_list().into_bytes()),
+                        ),
+                        gtk::gdk::ContentProvider::for_bytes(
+                            "x-special/gnome-copied-files",
+                            &glib::Bytes::from_owned(
+                                format!(
+                                    "{}\n{}",
+                                    if payload.action == ClipboardAction::Cut {
+                                        "cut"
+                                    } else {
+                                        "copy"
+                                    },
+                                    payload.uri_list()
+                                )
+                                .into_bytes(),
+                            ),
+                        ),
+                    ]);
+                    let _ = command_view
+                        .widget
+                        .display()
+                        .clipboard()
+                        .set_content(Some(&provider));
+                    let mut state = ClipboardState::default();
+                    state.replace(payload);
+                    *command_clipboard.borrow_mut() = Some(FileClipboard {
+                        state,
                         source_view: command_view.clone(),
                     });
                 }
             }
             ContextCommand::CopyFilename => {
-                if let Some(path) = path {
-                    copy_text(
-                        &command_view,
-                        path.file_name()
-                            .and_then(|name| name.to_str())
-                            .unwrap_or_default(),
-                    );
-                }
+                copy_text(
+                    &command_view,
+                    &command_view
+                        .selected_items()
+                        .iter()
+                        .map(|i| i.name().to_owned())
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                );
             }
             ContextCommand::CopyFullPath => {
-                if let Some(path) = path {
-                    copy_text(&command_view, &path.display().to_string());
-                }
+                copy_text(
+                    &command_view,
+                    &intent
+                        .selection
+                        .iter()
+                        .map(Location::uri)
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                );
             }
             ContextCommand::CopyTo | ContextCommand::MoveTo => {
-                if let Some(path) = path {
+                if !intent.selection.is_empty() {
                     choose_destination(
                         &command_view,
-                        path,
+                        intent.selection,
                         command == ContextCommand::MoveTo,
                         command_operations.clone(),
                         command_sidebar.model(),
@@ -943,55 +1043,73 @@ fn wire_tab(
                 }
             }
             ContextCommand::Paste => {
-                let destination = command_data
-                    .borrow()
-                    .iter()
-                    .find(|tab| tab.page == command_page)
-                    .and_then(|tab| tab.view.current_location().local_path());
-                if let (Some(clipboard), Some(destination)) =
-                    (command_clipboard.borrow().clone(), destination)
-                {
-                    let kind = match clipboard.operation {
-                        ClipboardOperation::Copy => OperationKind::Copy,
-                        ClipboardOperation::Move => OperationKind::Move,
-                    };
-                    let cut_source = matches!(clipboard.operation, ClipboardOperation::Move)
-                        .then_some(clipboard.source_view);
-                    start_transfer(
+                if let Some(action) = intent.transfer {
+                    start_uri_transfer(
                         &command_view,
-                        clipboard.path,
-                        destination,
-                        kind,
+                        ClipboardPayload {
+                            action,
+                            locations: intent.selection,
+                        },
+                        intent.destination,
                         command_operations.clone(),
-                        cut_source,
+                        None,
                     );
+                } else if let Some(payload) = clipboard_payload {
+                    start_uri_transfer(
+                        &command_view,
+                        payload,
+                        intent.destination,
+                        command_operations.clone(),
+                        Some(command_clipboard.clone()),
+                    );
+                } else {
+                    let view = command_view.clone();
+                    let operations = command_operations.clone();
+                    read_uri_clipboard(command_view.widget.display().clipboard(), move |payload| {
+                        if let Some(payload) = payload {
+                            start_uri_transfer(
+                                &view,
+                                payload,
+                                intent.destination,
+                                operations,
+                                None,
+                            );
+                        }
+                    });
                 }
             }
             ContextCommand::NewFolder => {
-                if let Some(parent) = path {
-                    let refresh = command_view.clone();
-                    let submit_operations = command_operations.clone();
-                    let refresh_operations = command_operations.clone();
-                    show_name_dialog(
-                        &command_view,
-                        "New Folder",
-                        "Folder name",
-                        "New Folder",
-                        "Create",
-                        move |name| {
-                            FileOperations::create_folder(&submit_operations, &parent, &name)
-                        },
-                        move |id| schedule_refresh(refresh.clone(), refresh_operations.clone(), id),
-                    );
-                }
+                let parent = intent.destination;
+                let refresh = command_view.clone();
+                let submit_operations = command_operations.clone();
+                let refresh_operations = command_operations.clone();
+                show_name_dialog(
+                    &command_view,
+                    "New Folder",
+                    "Folder name",
+                    "New Folder",
+                    "Create",
+                    move |name| {
+                        let target = crate::application::commands::named_child(&parent, &name)?;
+                        Ok(submit_operations.submit_locations(
+                            MutationKind::Create,
+                            vec![target],
+                            None,
+                            None,
+                            None,
+                            false,
+                        ))
+                    },
+                    move |id| schedule_refresh(refresh.clone(), refresh_operations.clone(), id),
+                );
             }
             ContextCommand::Rename => {
-                if let Some(path) = path {
-                    let initial = path
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .unwrap_or_default()
-                        .to_owned();
+                if let Some(source) = intent.selection.first().cloned() {
+                    let initial = command_view
+                        .selected_items()
+                        .first()
+                        .map(|i| i.name().to_owned())
+                        .unwrap_or_default();
                     let refresh = command_view.clone();
                     let submit_operations = command_operations.clone();
                     let refresh_operations = command_operations.clone();
@@ -1001,15 +1119,37 @@ fn wire_tab(
                         "New name",
                         &initial,
                         "Rename",
-                        move |name| FileOperations::rename(&submit_operations, &path, &name),
+                        move |name| {
+                            let parent = source.parent().ok_or_else(|| {
+                                std::io::Error::new(
+                                    std::io::ErrorKind::InvalidInput,
+                                    "This location has no parent",
+                                )
+                            })?;
+                            let target = crate::application::commands::named_child(&parent, &name)?;
+                            Ok(submit_operations.submit_locations(
+                                MutationKind::Rename,
+                                vec![source.clone()],
+                                Some(parent),
+                                Some(target),
+                                None,
+                                false,
+                            ))
+                        },
                         move |id| schedule_refresh(refresh.clone(), refresh_operations.clone(), id),
                     );
                 }
             }
             ContextCommand::MoveToTrash => {
-                if let Some(path) = path {
-                    let operation_id =
-                        command_operations.submit(OperationKind::Trash, vec![path], None);
+                if !intent.selection.is_empty() {
+                    let operation_id = command_operations.submit_locations(
+                        MutationKind::Trash,
+                        intent.selection,
+                        None,
+                        None,
+                        None,
+                        false,
+                    );
                     schedule_refresh(
                         command_view.clone(),
                         command_operations.clone(),
@@ -1018,24 +1158,32 @@ fn wire_tab(
                 }
             }
             ContextCommand::DeletePermanently => {
-                if let Some(path) = path {
-                    confirm_permanent_delete(&command_view, path, command_operations.clone());
+                if !intent.selection.is_empty() {
+                    confirm_permanent_delete(
+                        &command_view,
+                        intent.selection,
+                        command_operations.clone(),
+                    );
                 }
             }
             ContextCommand::Properties => {
-                if let Some(path) = path {
+                if let Some(location) = intent.selection.first() {
                     let refresh = command_view.clone();
                     PropertiesDialog::present(
                         command_view.widget.root().and_downcast_ref::<gtk::Window>(),
-                        path,
+                        location.clone(),
                         move || refresh.refresh(),
                     );
                 }
             }
             ContextCommand::ToggleQuickAccess => {
-                if let Some(path) = path {
-                    command_sidebar.toggle_quick_access(path);
-                }
+                command_sidebar.toggle_quick_access_location(
+                    intent
+                        .selection
+                        .first()
+                        .unwrap_or(&intent.destination)
+                        .clone(),
+                );
             }
             ContextCommand::Refresh => command_view.refresh(),
             _ => {}
@@ -1098,45 +1246,6 @@ fn show_name_dialog<F, S>(
     dialog.present();
 }
 
-#[allow(dead_code, deprecated)]
-fn show_properties_dialog(view: &FileView, path: &Path) {
-    let dialog = gtk::Dialog::new();
-    dialog.set_title(Some("Properties"));
-    dialog.set_modal(true);
-    if let Some(window) = view.widget.root().and_downcast::<gtk::Window>() {
-        dialog.set_transient_for(Some(&window));
-    }
-    dialog.add_button("Close", gtk::ResponseType::Close);
-    let content = dialog.content_area();
-    content.set_spacing(6);
-    content.set_margin_top(16);
-    content.set_margin_bottom(16);
-    content.set_margin_start(16);
-    content.set_margin_end(16);
-    let metadata = std::fs::metadata(path).ok();
-    let kind = metadata
-        .as_ref()
-        .map(|meta| if meta.is_dir() { "Folder" } else { "File" })
-        .unwrap_or("Unavailable");
-    let size = metadata.as_ref().map(|meta| meta.len()).unwrap_or_default();
-    for text in [
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("/")
-            .to_owned(),
-        format!("Type: {kind}"),
-        format!("Location: {}", path.parent().unwrap_or(path).display()),
-        format!("Size: {} bytes", size),
-    ] {
-        let label = Label::new(Some(&text));
-        label.set_xalign(0.0);
-        label.set_selectable(true);
-        content.append(&label);
-    }
-    dialog.connect_response(|dialog, _| dialog.close());
-    dialog.present();
-}
-
 fn target_path(target: &ContextTarget) -> Option<PathBuf> {
     match target {
         ContextTarget::File(item) | ContextTarget::Folder(item) => item.local_path(),
@@ -1174,16 +1283,16 @@ fn shortcut_command(
 ) -> Option<ContextCommand> {
     if delete {
         return Some(if shift {
-            ContextCommand::DeletePermanently
+            route(Shortcut::DeletePermanently)
         } else {
-            ContextCommand::MoveToTrash
+            route(Shortcut::Trash)
         });
     }
     control
         .then(|| match key {
-            Some('x') => Some(ContextCommand::Cut),
-            Some('c') => Some(ContextCommand::Copy),
-            Some('v') => Some(ContextCommand::Paste),
+            Some('x') => Some(route(Shortcut::Cut)),
+            Some('c') => Some(route(Shortcut::Copy)),
+            Some('v') => Some(route(Shortcut::Paste)),
             _ => None,
         })
         .flatten()
@@ -1416,125 +1525,296 @@ fn show_network_location_dialog(
     dialog.present();
 }
 
+fn read_uri_clipboard(
+    clipboard: gtk::gdk::Clipboard,
+    done: impl FnOnce(Option<ClipboardPayload>) + 'static,
+) {
+    glib::MainContext::default().spawn_local(async move {
+        let Ok((stream, mime)) = clipboard
+            .read_future(
+                &["x-special/gnome-copied-files", "text/uri-list"],
+                glib::Priority::DEFAULT,
+            )
+            .await
+        else {
+            done(None);
+            return;
+        };
+        let mut bytes = Vec::new();
+        loop {
+            let Ok(chunk) = stream
+                .read_bytes_future(8192, glib::Priority::DEFAULT)
+                .await
+            else {
+                done(None);
+                return;
+            };
+            if chunk.is_empty() {
+                break;
+            }
+            bytes.extend_from_slice(chunk.as_ref());
+            if bytes.len() > 1024 * 1024 {
+                done(None);
+                return;
+            }
+        }
+        let payload = std::str::from_utf8(&bytes).ok().and_then(|text| {
+            if mime == "x-special/gnome-copied-files" {
+                ClipboardPayload::parse_gnome(text).ok()
+            } else {
+                ClipboardPayload::parse(ClipboardAction::Copy, text).ok()
+            }
+        });
+        done(payload);
+    });
+}
+
 fn choose_destination(
     view: &FileView,
-    source: PathBuf,
+    sources: Vec<Location>,
     move_source: bool,
     operations: OperationManager,
     sidebar_model: Rc<RefCell<SidebarModel>>,
 ) {
-    let Some(parent) = view.widget.root().and_downcast::<gtk::Window>() else {
-        return;
-    };
     let reload = view.clone();
-    let title = if move_source { "Move To" } else { "Copy To" };
-    let action_label = if move_source { "Move" } else { "Copy" };
     crate::ui::folder_picker::pick_folder(
-        &parent,
-        title,
-        action_label,
+        &view.widget,
+        if move_source { "Move To" } else { "Copy To" },
+        if move_source { "Move" } else { "Copy" },
         view.current_location(),
         sidebar_model,
         operations.clone(),
         move |destination| {
-            let Some(destination) = destination.local_path() else {
-                if let Some(parent) = reload.widget.root().and_downcast::<gtk::Window>() {
-                    let dialog = adw::MessageDialog::new(
-                        Some(&parent),
-                        Some("Destination unavailable for this operation"),
-                        Some("This copy or move operation currently requires a local destination."),
-                    );
-                    dialog.add_response("close", "Close");
-                    dialog.connect_response(None, |dialog, _| dialog.close());
-                    dialog.present();
-                }
-                return;
-            };
-            start_transfer(
+            start_uri_transfer(
                 &reload,
-                source.clone(),
-                destination,
-                if move_source {
-                    OperationKind::Move
-                } else {
-                    OperationKind::Copy
+                ClipboardPayload {
+                    action: if move_source {
+                        ClipboardAction::Cut
+                    } else {
+                        ClipboardAction::Copy
+                    },
+                    locations: sources.clone(),
                 },
+                destination,
                 operations.clone(),
                 None,
-            );
+            )
         },
     );
 }
 
-#[allow(deprecated)]
-fn start_transfer(
+/// Each item uses the same coordinator and conflict decisions. Continue only
+/// after a terminal acknowledgement; a failure never drops unattempted items.
+fn start_uri_transfer(
     view: &FileView,
-    source: PathBuf,
-    destination: PathBuf,
-    kind: OperationKind,
+    payload: ClipboardPayload,
+    destination: Location,
     operations: OperationManager,
-    cut_source: Option<FileView>,
+    clipboard: Option<Rc<RefCell<Option<FileClipboard>>>>,
 ) {
-    let Some(name) = source.file_name().map(|name| name.to_owned()) else {
+    let clipboard = clipboard.and_then(|owner| {
+        let generation = owner.borrow().as_ref().map(|c| c.state.generation())?;
+        Some(ClipboardLease { owner, generation })
+    });
+    transfer_next(
+        view.clone(),
+        payload,
+        destination,
+        operations,
+        clipboard,
+        0,
+        None,
+    );
+}
+
+fn transfer_next(
+    view: FileView,
+    payload: ClipboardPayload,
+    destination: Location,
+    operations: OperationManager,
+    clipboard: Option<ClipboardLease>,
+    index: usize,
+    decision: Option<ConflictDecision>,
+) {
+    let Some(source) = payload.locations.get(index).cloned() else {
+        view.refresh();
         return;
     };
-    let target = destination.join(&name);
-    let refresh_view = view.clone();
-    let submit = move |target: Option<PathBuf>, replace: bool| {
-        let operation_id = match target {
-            Some(target) => operations.submit_to_target(kind, source.clone(), target),
-            None if replace => {
-                operations.submit_replacing(kind, vec![source.clone()], destination.clone())
-            }
-            None => operations.submit(kind, vec![source.clone()], Some(destination.clone())),
-        };
-        if kind == OperationKind::Move {
-            if let Some(cut_source) = &cut_source {
-                cut_source.set_pending_cut(None);
+    let kind = if payload.action == ClipboardAction::Cut {
+        MutationKind::Move
+    } else {
+        MutationKind::Copy
+    };
+    let id = operations.submit_locations(
+        kind,
+        if decision == Some(ConflictDecision::CancelRemaining) {
+            payload.locations[index..].to_vec()
+        } else {
+            vec![source]
+        },
+        Some(destination.clone()),
+        None,
+        decision,
+        false,
+    );
+    if let Some(state) = &clipboard {
+        if let Some(current) = state.owner.borrow_mut().as_mut() {
+            if current.state.generation() == state.generation {
+                current.state.begin_paste(id);
             }
         }
-        schedule_refresh(refresh_view.clone(), operations.clone(), operation_id);
-    };
-    if !target.exists() {
-        submit(None, false);
-        return;
     }
-    match ApplicationPreferences::load_default()
+    glib::timeout_add_local(std::time::Duration::from_millis(40), move || {
+        let Some(record) = operations.records().into_iter().find(|r| r.id == id) else {
+            return glib::ControlFlow::Continue;
+        };
+        if matches!(
+            record.state,
+            crate::core::OperationState::Queued
+                | crate::core::OperationState::Running
+                | crate::core::OperationState::CancelRequested
+        ) {
+            return glib::ControlFlow::Continue;
+        }
+        let conflict = operations
+            .summary(id)
+            .and_then(|s| s.error_kind)
+            .is_some_and(|kind| kind == "Conflict");
+        if conflict && decision.is_none() {
+            show_transfer_conflict(
+                view.clone(),
+                payload.clone(),
+                destination.clone(),
+                operations.clone(),
+                clipboard.clone(),
+                index,
+            );
+            return glib::ControlFlow::Break;
+        }
+        if let crate::core::OperationState::Failed(error) = &record.state {
+            show_operation_error(&view, error);
+        }
+        if record.state == crate::core::OperationState::Cancelled
+            && decision != Some(ConflictDecision::CancelRemaining)
+            && index + 1 < payload.locations.len()
+        {
+            transfer_next(
+                view.clone(),
+                payload.clone(),
+                destination.clone(),
+                operations.clone(),
+                clipboard.clone(),
+                index + 1,
+                Some(ConflictDecision::CancelRemaining),
+            );
+            return glib::ControlFlow::Break;
+        }
+        let last = index + 1 == payload.locations.len()
+            || matches!(record.state, crate::core::OperationState::Cancelled);
+        if last {
+            finish_cut(&clipboard, id, &view);
+        } else {
+            transfer_next(
+                view.clone(),
+                payload.clone(),
+                destination.clone(),
+                operations.clone(),
+                clipboard.clone(),
+                index + 1,
+                None,
+            );
+        }
+        view.refresh();
+        glib::ControlFlow::Break
+    });
+}
+
+fn finish_cut(clipboard: &Option<ClipboardLease>, id: u64, view: &FileView) {
+    if let Some(state) = clipboard {
+        let generation = state.generation;
+        let mut state = state.owner.borrow_mut();
+        if let Some(current) = state.as_mut() {
+            if current.state.generation() != generation {
+                return;
+            }
+            current.state.finish_paste(id, true);
+            if current.state.payload().is_none() {
+                current.source_view.set_pending_cut_locations(vec![]);
+                current.source_view.refresh();
+                if view.widget.display().clipboard().is_local() {
+                    let _ = view
+                        .widget
+                        .display()
+                        .clipboard()
+                        .set_content(None::<&gtk::gdk::ContentProvider>);
+                }
+                *state = None;
+            }
+        }
+    }
+}
+
+#[allow(deprecated)]
+fn show_transfer_conflict(
+    view: FileView,
+    payload: ClipboardPayload,
+    destination: Location,
+    operations: OperationManager,
+    clipboard: Option<ClipboardLease>,
+    index: usize,
+) {
+    let preference = ApplicationPreferences::load_default()
         .unwrap_or_default()
-        .conflict_default
-    {
-        ConflictDefault::Replace => {
-            submit(None, true);
-            return;
-        }
-        ConflictDefault::KeepBoth => {
-            submit(Some(FileOperations::keep_both_destination(&target)), false);
-            return;
-        }
-        ConflictDefault::Skip => return,
-        ConflictDefault::Ask => {}
+        .conflict_default;
+    let choice = match preference {
+        ConflictDefault::Replace => Some(ConflictDecision::Replace),
+        ConflictDefault::KeepBoth => Some(ConflictDecision::KeepBoth),
+        ConflictDefault::Skip => Some(ConflictDecision::Skip),
+        ConflictDefault::Ask => None,
+    };
+    if let Some(choice) = choice {
+        transfer_next(
+            view,
+            payload,
+            destination,
+            operations,
+            clipboard,
+            index,
+            Some(choice),
+        );
+        return;
     }
     let parent = view.widget.root().and_downcast::<gtk::Window>();
     let dialog = adw::MessageDialog::new(
         parent.as_ref(),
         Some("An item with this name already exists"),
-        Some(&format!(
-            "“{}” already exists in this folder. Choose how to continue.",
-            name.to_string_lossy()
-        )),
+        Some("Choose how to handle this item. Remaining items will continue in order."),
     );
     dialog.add_responses(&[
         ("replace", "Replace"),
         ("keep", "Keep Both"),
         ("skip", "Skip"),
-        ("cancel", "Cancel"),
+        ("cancel", "Cancel Remaining"),
     ]);
     dialog.set_default_response(Some("cancel"));
     dialog.set_close_response("cancel");
-    dialog.connect_response(None, move |_, response| match response {
-        "replace" => submit(None, true),
-        "keep" => submit(Some(FileOperations::keep_both_destination(&target)), false),
-        _ => {}
+    dialog.connect_response(None, move |_, response| {
+        let decision = match response {
+            "replace" => ConflictDecision::Replace,
+            "keep" => ConflictDecision::KeepBoth,
+            "skip" => ConflictDecision::Skip,
+            _ => ConflictDecision::CancelRemaining,
+        };
+        view.widget.grab_focus();
+        transfer_next(
+            view.clone(),
+            payload.clone(),
+            destination.clone(),
+            operations.clone(),
+            clipboard.clone(),
+            index,
+            Some(decision),
+        );
     });
     dialog.present();
 }
@@ -1582,16 +1862,18 @@ fn show_operation_error(view: &FileView, error: &str) {
 }
 
 #[allow(deprecated)]
-fn confirm_permanent_delete(view: &FileView, path: PathBuf, operations: OperationManager) {
+pub fn confirm_permanent_delete(
+    view: &FileView,
+    locations: Vec<Location>,
+    operations: OperationManager,
+) -> adw::MessageDialog {
     let parent = view.widget.root().and_downcast::<gtk::Window>();
     let dialog = adw::MessageDialog::new(
         parent.as_ref(),
         Some("Delete permanently?"),
         Some(&format!(
-            "“{}” will be permanently deleted. This cannot be undone.",
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("This item")
+            "{} selected item(s) will be permanently deleted. This cannot be undone.",
+            locations.len()
         )),
     );
     dialog.add_responses(&[("delete", "Delete Permanently"), ("cancel", "Cancel")]);
@@ -1601,11 +1883,20 @@ fn confirm_permanent_delete(view: &FileView, path: PathBuf, operations: Operatio
     let reload = view.clone();
     dialog.connect_response(None, move |_, response| {
         if response == "delete" {
-            let operation_id = operations.submit_confirmed_delete(vec![path.clone()]);
+            let operation_id = operations.submit_locations(
+                MutationKind::Delete,
+                locations.clone(),
+                None,
+                None,
+                None,
+                true,
+            );
             schedule_refresh(reload.clone(), operations.clone(), operation_id);
         }
+        reload.widget.grab_focus();
     });
     dialog.present();
+    dialog
 }
 
 fn show_close_operations_dialog(parent: &ApplicationWindow, operations: OperationManager) {
@@ -2051,6 +2342,173 @@ fn persist_options(store: &mut ViewPreferencesStore, path: &Path, options: ViewO
 
 #[cfg(test)]
 mod tests {
+    #[gtk::test]
+    fn slice3_system_clipboard_round_trip_validates_uri_transport_and_cut_action() {
+        use super::*;
+        let clipboard = gtk::gdk::Display::default().unwrap().clipboard();
+        for (text, accepted) in [
+            ("cut\nsmb://host/share/a\nfile:///tmp/b\n", true),
+            ("copy\nsmb://user:secret@host/share/a\n", false),
+        ] {
+            let provider = gtk::gdk::ContentProvider::for_bytes(
+                "x-special/gnome-copied-files",
+                &glib::Bytes::from_owned(text.as_bytes().to_vec()),
+            );
+            clipboard.set_content(Some(&provider)).unwrap();
+            let result = Rc::new(RefCell::new(None));
+            let output = result.clone();
+            read_uri_clipboard(clipboard.clone(), move |payload| {
+                *output.borrow_mut() = Some(payload)
+            });
+            let context = glib::MainContext::default();
+            let end = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            while result.borrow().is_none() {
+                context.iteration(false);
+                assert!(std::time::Instant::now() < end);
+            }
+            let value = result.borrow_mut().take().unwrap();
+            assert_eq!(value.is_some(), accepted);
+            if let Some(payload) = value {
+                assert_eq!(payload.action, ClipboardAction::Cut);
+                assert_eq!(payload.locations.len(), 2);
+            }
+        }
+        clipboard
+            .set_content(None::<&gtk::gdk::ContentProvider>)
+            .unwrap();
+    }
+
+    #[gtk::test]
+    fn slice3_cancel_remaining_records_every_unattempted_uri() {
+        use super::*;
+        let fixture = tempfile::tempdir().unwrap();
+        let view = FileView::new(Location::from_local_path(fixture.path()));
+        let sources: Vec<_> = ["a", "b", "c"]
+            .into_iter()
+            .map(|name| Location::from_local_path(&fixture.path().join(name)))
+            .collect();
+        let manager = OperationManager::default();
+        transfer_next(
+            view.clone(),
+            ClipboardPayload {
+                action: ClipboardAction::Copy,
+                locations: sources.clone(),
+            },
+            Location::from_local_path(fixture.path()),
+            manager.clone(),
+            None,
+            0,
+            Some(ConflictDecision::CancelRemaining),
+        );
+        let context = glib::MainContext::default();
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while manager.active_count() > 0 {
+            context.iteration(false);
+            assert!(std::time::Instant::now() < end);
+        }
+        let record = manager.records().remove(0);
+        assert_eq!(
+            manager.summary(record.id).unwrap().remaining,
+            sources
+                .iter()
+                .map(|l| l.uri().to_owned())
+                .collect::<Vec<_>>()
+        );
+        view.close();
+    }
+
+    #[gtk::test]
+    fn slice3_cut_transfer_clears_after_completion_and_retains_a_replacement_cut() {
+        use super::*;
+        let context = glib::MainContext::default();
+        let fixture = tempfile::tempdir().unwrap();
+        let source = fixture.path().join("source");
+        let destination = fixture.path().join("destination");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::create_dir(&destination).unwrap();
+        for name in ["a", "b"] {
+            std::fs::write(source.join(name), "data").unwrap();
+        }
+        let view = FileView::new(Location::from_local_path(&source));
+        let payload = ClipboardPayload {
+            action: ClipboardAction::Cut,
+            locations: ["a", "b"]
+                .into_iter()
+                .map(|name| Location::from_local_path(&source.join(name)))
+                .collect(),
+        };
+        let manager = OperationManager::default();
+        let mut state = ClipboardState::default();
+        state.replace(payload.clone());
+        let clipboard = Rc::new(RefCell::new(Some(FileClipboard {
+            state,
+            source_view: view.clone(),
+        })));
+        start_uri_transfer(
+            &view,
+            payload.clone(),
+            Location::from_local_path(&destination),
+            manager.clone(),
+            Some(clipboard.clone()),
+        );
+        assert!(clipboard
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .state
+            .payload()
+            .is_some());
+        // Re-cutting the same URIs is a new clipboard generation. An old batch
+        // must not consume it as it advances from the first to the second item.
+        clipboard
+            .borrow_mut()
+            .as_mut()
+            .unwrap()
+            .state
+            .replace(payload.clone());
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while manager.records().len() < 2 || manager.active_count() > 0 {
+            context.iteration(false);
+            assert!(std::time::Instant::now() < end);
+        }
+        let settle = std::time::Instant::now() + std::time::Duration::from_millis(100);
+        while std::time::Instant::now() < settle {
+            context.iteration(false);
+        }
+        assert_eq!(
+            clipboard.borrow().as_ref().and_then(|c| c.state.payload()),
+            Some(&payload)
+        );
+        assert!(destination.join("a").exists() && destination.join("b").exists());
+        let moved = ClipboardPayload {
+            action: ClipboardAction::Cut,
+            locations: ["a", "b"]
+                .into_iter()
+                .map(|name| Location::from_local_path(&destination.join(name)))
+                .collect(),
+        };
+        clipboard
+            .borrow_mut()
+            .as_mut()
+            .unwrap()
+            .state
+            .replace(moved.clone());
+        start_uri_transfer(
+            &view,
+            moved,
+            Location::from_local_path(&source),
+            manager.clone(),
+            Some(clipboard.clone()),
+        );
+        assert!(clipboard.borrow().is_some());
+        while clipboard.borrow().is_some() {
+            context.iteration(false);
+            assert!(std::time::Instant::now() < end);
+        }
+        assert!(source.join("a").exists() && source.join("b").exists());
+        view.close();
+    }
+
     use std::cell::RefCell;
     use std::path::PathBuf;
     use std::rc::Rc;

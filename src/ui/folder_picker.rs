@@ -1,6 +1,6 @@
 use crate::application::navigation::NavigationCoordinator;
 use crate::core::{
-    contracts::{EntryKind, EntrySnapshot},
+    contracts::{Capability, EntryKind, EntrySnapshot, MutationKind},
     navigation::{NavigationStatus, TabState},
     Location, OperationManager, SidebarModel,
 };
@@ -161,7 +161,10 @@ pub fn pick_folder<F: Fn(Location) + 'static>(
             select.set_sensitive(matches!(snapshot.status, NavigationStatus::Ready));
             new_folder.set_sensitive(
                 matches!(snapshot.status, NavigationStatus::Ready)
-                    && snapshot.location.local_path().is_some(),
+                    && snapshot
+                        .directory
+                        .as_ref()
+                        .is_some_and(|d| d.capabilities.supports(Capability::Create)),
             );
             back.set_sensitive(snapshot.history.can_go_back());
             forward.set_sensitive(snapshot.history.can_go_forward());
@@ -273,14 +276,24 @@ pub fn pick_folder<F: Fn(Location) + 'static>(
         let picker = picker.clone();
         let state = state.clone();
         move |_| {
-            let Some(parent) = state.borrow().location.local_path() else {
+            let parent = state.borrow().location.clone();
+            if !state
+                .borrow()
+                .directory
+                .as_ref()
+                .is_some_and(|d| d.capabilities.supports(Capability::Create))
+            {
                 return;
-            };
-            if let Ok(id) = crate::core::operations::FileOperations::create_folder(
-                &operations,
-                &parent,
-                "New Folder",
-            ) {
+            }
+            if let Ok(target) = crate::application::commands::named_child(&parent, "New Folder") {
+                let id = operations.submit_locations(
+                    MutationKind::Create,
+                    vec![target.clone()],
+                    None,
+                    None,
+                    None,
+                    false,
+                );
                 let operations = operations.clone();
                 let picker = picker.clone();
                 let state = state.clone();
@@ -299,8 +312,7 @@ pub fn pick_folder<F: Fn(Location) + 'static>(
                         return glib::ControlFlow::Continue;
                     }
                     if record.state == crate::core::OperationState::Completed {
-                        picker
-                            .select_location(Location::from_local_path(&parent.join("New Folder")));
+                        picker.select_location(target.clone());
                     }
                     glib::ControlFlow::Break
                 });

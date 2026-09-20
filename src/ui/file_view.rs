@@ -7,10 +7,13 @@ use glib::prelude::ToValue;
 use gtk::prelude::*;
 use gtk::{
     Box as GtkBox, Button, ColumnView, ColumnViewColumn, CustomSorter, FlowBox, GestureClick,
-    Image, Label, Orientation, Popover, ScrolledWindow, Separator, SignalListItemFactory,
-    SingleSelection, SortListModel,
+    Image, Label, MultiSelection, Orientation, Popover, ScrolledWindow, Separator,
+    SignalListItemFactory, SortListModel,
 };
 
+use crate::application::commands::{
+    ApplicationCommand, ClipboardAction, ClipboardPayload, DragProposal,
+};
 use crate::application::navigation::NavigationCoordinator;
 use crate::core::directory_model::sort_items;
 use crate::core::file_item::FileItem;
@@ -48,6 +51,7 @@ fn filesystem_space(path: &Path) -> Option<(u64, u64)> {
 /// Produces the one availability snapshot used by the toolbar while retaining
 /// the displayed location as the Paste destination even when an item is
 /// selected.
+#[cfg(test)]
 fn command_availability_for_target(
     selected_target: Option<&ContextTarget>,
     destination: &Location,
@@ -68,11 +72,13 @@ pub struct FileView {
     on_navigate: Rc<RefCell<Option<Box<dyn Fn(Location)>>>>,
     on_close: Rc<RefCell<Option<Box<dyn Fn()>>>>,
     on_context_command: Rc<RefCell<Option<Box<dyn Fn(ContextTarget, ContextCommand)>>>>,
+    on_application_command: Rc<RefCell<Option<Box<dyn Fn(ApplicationCommand)>>>>,
+    selection: Rc<RefCell<Vec<FileItem>>>,
     on_options_changed: Rc<RefCell<Option<Box<dyn Fn(ViewOptions)>>>>,
     options: Rc<RefCell<ViewOptions>>,
     selected_target: Rc<RefCell<Option<ContextTarget>>>,
     on_command_availability_changed: Rc<RefCell<Option<Box<dyn Fn(CommandAvailability)>>>>,
-    pending_cut: Rc<RefCell<Option<PathBuf>>>,
+    pending_cut: Rc<RefCell<Vec<Location>>>,
     is_quick_access_location: Rc<RefCell<Option<Rc<dyn Fn(&Location) -> bool>>>>,
 }
 
@@ -132,11 +138,13 @@ impl FileView {
             on_navigate,
             on_close: Rc::new(RefCell::new(None)),
             on_context_command: Rc::new(RefCell::new(None)),
+            on_application_command: Rc::new(RefCell::new(None)),
+            selection: Rc::new(RefCell::new(Vec::new())),
             on_options_changed: Rc::new(RefCell::new(None)),
             options: Rc::new(RefCell::new(ViewOptions::default())),
             selected_target: Rc::new(RefCell::new(None)),
             on_command_availability_changed: Rc::new(RefCell::new(None)),
-            pending_cut: Rc::new(RefCell::new(None)),
+            pending_cut: Rc::new(RefCell::new(Vec::new())),
             is_quick_access_location: Rc::new(RefCell::new(None)),
         };
         let background_view = view.clone();
@@ -158,6 +166,32 @@ impl FileView {
             }
         });
         view.widget.add_controller(background);
+        let drop = gtk::DropTarget::new(
+            gtk::gdk::FileList::static_type(),
+            gtk::gdk::DragAction::COPY | gtk::gdk::DragAction::MOVE,
+        );
+        let drop_view = view.clone();
+        drop.connect_drop(move |target, value, _, _| {
+            let Ok(files) = value.get::<gtk::gdk::FileList>() else {
+                return false;
+            };
+            let text: String = files
+                .files()
+                .iter()
+                .map(|file| format!("{}\r\n", file.uri()))
+                .collect();
+            let action = if target
+                .current_drop()
+                .and_then(|d| d.drag())
+                .is_some_and(|d| d.selected_action() == gtk::gdk::DragAction::MOVE)
+            {
+                ClipboardAction::Cut
+            } else {
+                ClipboardAction::Copy
+            };
+            drop_view.dispatch_drop(&text, action)
+        });
+        view.widget.add_controller(drop);
         view.refresh();
         view
     }
@@ -227,6 +261,7 @@ impl FileView {
             }
             if !self.navigation.state.borrow().has_available_directory() {
                 *self.selected_target.borrow_mut() = None;
+                self.selection.borrow_mut().clear();
             }
             self.notify_command_availability_changed();
             self.reload();
@@ -251,20 +286,25 @@ impl FileView {
         drop(state);
         if succeeded {
             let state = self.navigation.state.borrow();
-            *self.selected_target.borrow_mut() = state.directory.as_ref().and_then(|snapshot| {
-                snapshot
-                    .entries
-                    .iter()
-                    .find(|entry| {
-                        state
-                            .selection_keys
-                            .iter()
-                            .any(|key| key == entry.location.uri())
-                    })
-                    .map(|entry| file_target(&FileItem::from_snapshot(entry)))
-            });
+            let restored = state
+                .directory
+                .as_ref()
+                .map(|snapshot| {
+                    snapshot
+                        .entries
+                        .iter()
+                        .filter(|entry| {
+                            state
+                                .selection_keys
+                                .iter()
+                                .any(|key| key == entry.location.uri())
+                        })
+                        .map(FileItem::from_snapshot)
+                        .collect()
+                })
+                .unwrap_or_default();
             drop(state);
-            self.notify_command_availability_changed();
+            self.select_items(restored);
             if let Some(callback) = self.on_location_committed.borrow().as_ref() {
                 callback(location);
             }
@@ -324,6 +364,106 @@ impl FileView {
         self.selected_target.borrow().clone()
     }
 
+    pub fn selected_items(&self) -> Vec<FileItem> {
+        self.selection.borrow().clone()
+    }
+
+    fn select_items(&self, items: Vec<FileItem>) {
+        *self.selected_target.borrow_mut() = items.first().map(file_target);
+        *self.selection.borrow_mut() = items;
+        self.notify_command_availability_changed();
+    }
+
+    fn select_context_item(&self, item: &FileItem) {
+        if !self
+            .selection
+            .borrow()
+            .iter()
+            .any(|i| i.location() == item.location())
+        {
+            if let Some(model) = self.column_view().and_then(|view| view.model()) {
+                for index in 0..model.n_items() {
+                    let matches = model.item(index).and_downcast::<glib::BoxedAnyObject>().is_some_and(|o| matches!(&*o.borrow::<ListRow>(), ListRow::File(row) if row.location() == item.location()));
+                    if matches {
+                        model.select_item(index, true);
+                        return;
+                    }
+                }
+            }
+            self.select_items(vec![item.clone()]);
+        }
+    }
+
+    pub fn set_application_handler(&self, callback: impl Fn(ApplicationCommand) + 'static) {
+        *self.on_application_command.borrow_mut() = Some(Box::new(callback));
+    }
+
+    pub fn drag_payload(&self, action: ClipboardAction) -> Option<ClipboardPayload> {
+        let availability = self.command_availability();
+        if !(match action {
+            ClipboardAction::Copy => availability.can_copy,
+            ClipboardAction::Cut => availability.can_cut,
+        }) {
+            return None;
+        }
+        Some(ClipboardPayload {
+            action,
+            locations: self
+                .selected_items()
+                .iter()
+                .map(|i| i.location().clone())
+                .collect(),
+        })
+    }
+
+    pub fn dispatch_drop(&self, text: &str, action: ClipboardAction) -> bool {
+        if !self.command_availability().can_paste {
+            return false;
+        }
+        let Ok(payload) = ClipboardPayload::parse(action, text) else {
+            return false;
+        };
+        let command = DragProposal {
+            sources: payload.locations,
+            destination: self.current_location(),
+            action,
+        }
+        .command();
+        if let Some(callback) = self.on_application_command.borrow().as_ref() {
+            callback(command);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn dispatch_drop_on(&self, folder: &FileItem, text: &str, action: ClipboardAction) -> bool {
+        if !self.navigation.state.borrow().has_available_directory()
+            || !folder.is_dir()
+            || !folder
+                .capabilities()
+                .supports(crate::core::contracts::Capability::Create)
+        {
+            return false;
+        }
+        let Ok(payload) = ClipboardPayload::parse(action, text) else {
+            return false;
+        };
+        if let Some(callback) = self.on_application_command.borrow().as_ref() {
+            callback(
+                DragProposal {
+                    sources: payload.locations,
+                    destination: folder.location().clone(),
+                    action,
+                }
+                .command(),
+            );
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn current_location(&self) -> Location {
         self.navigation.state.borrow().location.clone()
     }
@@ -334,8 +474,15 @@ impl FileView {
             availability.disabled_reason = Some("This location is unavailable");
             return availability;
         }
-        let selected_target = self.selected_target();
-        command_availability_for_target(selected_target.as_ref(), &self.current_location())
+        CommandAvailability::for_capabilities(
+            &self.selected_items(),
+            self.navigation
+                .state
+                .borrow()
+                .directory
+                .as_ref()
+                .map(|d| &d.capabilities),
+        )
     }
 
     pub fn set_command_availability_handler<F: Fn(CommandAvailability) + 'static>(
@@ -347,13 +494,12 @@ impl FileView {
     }
 
     fn notify_command_availability_changed(&self) {
-        self.navigation.state.borrow_mut().selection_keys =
-            match self.selected_target.borrow().as_ref() {
-                Some(ContextTarget::File(item) | ContextTarget::Folder(item)) => {
-                    vec![item.identity_key().to_owned()]
-                }
-                _ => vec![],
-            };
+        self.navigation.state.borrow_mut().selection_keys = self
+            .selection
+            .borrow()
+            .iter()
+            .map(|i| i.identity_key().to_owned())
+            .collect();
         if let Some(callback) = self.on_command_availability_changed.borrow().as_ref() {
             callback(self.command_availability());
         }
@@ -363,7 +509,22 @@ impl FileView {
         if !self.navigation.state.borrow().has_available_directory() {
             return;
         }
-        if !CommandAvailability::for_target(&target).allows(command) {
+        if !self.command_availability().allows(command) {
+            return;
+        }
+        if let Some(callback) = self.on_application_command.borrow().as_ref() {
+            callback(ApplicationCommand::route(
+                command,
+                if matches!(target, ContextTarget::Background(_)) {
+                    Vec::new()
+                } else {
+                    self.selected_items()
+                        .iter()
+                        .map(|i| i.location().clone())
+                        .collect()
+                },
+                self.current_location(),
+            ));
             return;
         }
         if let Some(callback) = self.on_context_command.borrow().as_ref() {
@@ -372,7 +533,29 @@ impl FileView {
     }
 
     pub fn set_pending_cut(&self, path: Option<PathBuf>) {
-        *self.pending_cut.borrow_mut() = path;
+        self.set_pending_cut_locations(path.iter().map(|p| Location::from_local_path(p)).collect());
+    }
+
+    pub fn dispatch_open_with(&self, application: gio::AppInfo) {
+        if !self.command_availability().allows(ContextCommand::OpenWith) {
+            return;
+        }
+        let mut command = ApplicationCommand::route(
+            ContextCommand::OpenWith,
+            self.selected_items()
+                .iter()
+                .map(|i| i.location().clone())
+                .collect(),
+            self.current_location(),
+        );
+        command.application = Some(application);
+        if let Some(callback) = self.on_application_command.borrow().as_ref() {
+            callback(command);
+        }
+    }
+
+    pub fn set_pending_cut_locations(&self, locations: Vec<Location>) {
+        *self.pending_cut.borrow_mut() = locations;
         self.reload();
     }
 
@@ -443,6 +626,7 @@ impl FileView {
 
     fn search_finished(&self) {
         *self.selected_target.borrow_mut() = None;
+        self.selection.borrow_mut().clear();
         self.notify_command_availability_changed();
         self.reload();
     }
@@ -541,6 +725,7 @@ impl FileView {
     pub fn show_section_overview(&self, section: SidebarSection) {
         self.search.clear();
         *self.selected_target.borrow_mut() = None;
+        self.selection.borrow_mut().clear();
         self.navigation.state.borrow_mut().show_section(section);
         self.notify_command_availability_changed();
         self.reload();
@@ -789,39 +974,36 @@ impl FileView {
         let sorted = native_row_sorting
             .then(|| SortListModel::new(Some(store.clone()), None::<gtk::Sorter>));
         let selection = match &sorted {
-            Some(sorted) => SingleSelection::new(Some(sorted.clone())),
-            None => SingleSelection::new(Some(store)),
+            Some(sorted) => MultiSelection::new(Some(sorted.clone())),
+            None => MultiSelection::new(Some(store)),
         };
-        selection.set_autoselect(false);
-        selection.set_can_unselect(true);
-        let selected_key = self
-            .navigation
-            .state
-            .borrow()
-            .selection_keys
-            .first()
-            .cloned();
-        let selected_position = (0..selection.n_items()).find(|position| {
-            selection
-                .item(*position)
+        let selected_keys = self.navigation.state.borrow().selection_keys.clone();
+        for position in 0..selection.n_items() {
+            let selected = selection
+                .item(position)
                 .and_downcast::<glib::BoxedAnyObject>()
                 .and_then(|object| file_target_from_row(&object.borrow::<ListRow>()))
                 .is_some_and(|target| match target {
                     ContextTarget::File(item) | ContextTarget::Folder(item) => {
-                        selected_key.as_deref() == Some(item.identity_key())
+                        selected_keys.iter().any(|key| key == item.identity_key())
                     }
                     _ => false,
-                })
-        });
-        selection.set_selected(selected_position.unwrap_or(gtk::INVALID_LIST_POSITION));
-        let selected_target = self.selected_target.clone();
+                });
+            if selected {
+                selection.select_item(position, false);
+            }
+        }
         let availability_view = self.clone();
         selection.connect_selection_changed(move |model, _, _| {
-            *selected_target.borrow_mut() = model
-                .selected_item()
-                .and_downcast::<glib::BoxedAnyObject>()
-                .and_then(|object| file_target_from_row(&object.borrow::<ListRow>()));
-            availability_view.notify_command_availability_changed();
+            let items = (0..model.n_items())
+                .filter(|i| model.is_selected(*i))
+                .filter_map(|i| model.item(i).and_downcast::<glib::BoxedAnyObject>())
+                .filter_map(|object| match &*object.borrow::<ListRow>() {
+                    ListRow::File(item) => Some(item.clone()),
+                    _ => None,
+                })
+                .collect();
+            availability_view.select_items(items);
         });
         let view = ColumnView::new(Some(selection.clone()));
         view.set_reorderable(true);
@@ -910,17 +1092,28 @@ impl FileView {
         self.widget.child()?.downcast::<ColumnView>().ok()
     }
 
+    pub fn open_item(&self, item: &FileItem) {
+        if item.is_dir() {
+            if let Some(callback) = self.on_navigate.borrow().as_ref() {
+                callback(item.location().clone());
+            } else {
+                self.navigate(item.location().clone());
+            }
+        } else {
+            gio::AppInfo::launch_default_for_uri_async(
+                item.location().uri(),
+                None::<&gio::AppLaunchContext>,
+                None::<&gio::Cancellable>,
+                |_| {},
+            );
+        }
+    }
+
     fn grid_view(&self, items: &[FileItem], options: &ViewOptions) -> FlowBox {
-        let selected_key = self
-            .navigation
-            .state
-            .borrow()
-            .selection_keys
-            .first()
-            .cloned();
+        let selected_keys = self.navigation.state.borrow().selection_keys.clone();
         let layout = options.grid_size.grid_layout();
         let grid = FlowBox::new();
-        grid.set_selection_mode(gtk::SelectionMode::Single);
+        grid.set_selection_mode(gtk::SelectionMode::Multiple);
         grid.set_activate_on_single_click(false);
         grid.set_valign(gtk::Align::Start);
         grid.set_column_spacing(layout.gap.try_into().expect("grid gaps are positive"));
@@ -936,25 +1129,19 @@ impl FileView {
             }
         });
         let grid_selection_items = items.to_vec();
-        let selected_target = self.selected_target.clone();
         let availability_view = self.clone();
         grid.connect_selected_children_changed(move |grid| {
-            *selected_target.borrow_mut() = grid
+            let items = grid
                 .selected_children()
-                .first()
-                .and_then(|child| grid_selection_items.get(child.index() as usize))
-                .map(file_target);
-            availability_view.notify_command_availability_changed();
+                .iter()
+                .filter_map(|child| grid_selection_items.get(child.index() as usize).cloned())
+                .collect();
+            availability_view.select_items(items);
         });
         for item in items {
             let tile = GtkBox::new(Orientation::Vertical, layout.gap / 2);
             tile.add_css_class("icon-grid-tile");
-            if self
-                .pending_cut
-                .borrow()
-                .as_ref()
-                .is_some_and(|path| item.local_path().as_deref() == Some(path))
-            {
+            if self.pending_cut.borrow().contains(item.location()) {
                 tile.add_css_class("cut-pending");
             }
             tile.set_size_request(layout.tile_width, -1);
@@ -968,20 +1155,20 @@ impl FileView {
             icon.set_pixel_size(options.grid_size.icon_size());
             tile.append(&icon);
             tile.append(&grid_tile_label(item.name(), layout.label_width_chars));
-            attach_drag_source(&tile, item.clone());
+            attach_drag_source(&tile, item.clone(), self.clone());
             let target = file_target(item);
             let view = self.clone();
             let grid_context = grid.clone();
             let menu_tile = tile.clone();
-            let selected_target = self.selected_target.clone();
             let gesture = GestureClick::new();
             gesture.set_button(3);
             gesture.connect_pressed(move |gesture, _, x, y| {
                 gesture.set_state(gtk::EventSequenceState::Claimed);
-                *selected_target.borrow_mut() = Some(target.clone());
-                view.notify_command_availability_changed();
                 if let Some(child) = menu_tile.parent().and_downcast::<gtk::FlowBoxChild>() {
-                    grid_context.select_child(&child);
+                    if !child.is_selected() {
+                        grid_context.unselect_all();
+                        grid_context.select_child(&child);
+                    }
                 }
                 show_item_context_menu(
                     &menu_tile,
@@ -996,12 +1183,42 @@ impl FileView {
             });
             tile.add_controller(gesture);
             grid.append(&tile);
-            if selected_key.as_deref() == Some(item.identity_key()) {
+            if selected_keys.iter().any(|key| key == item.identity_key()) {
                 if let Some(child) = tile.parent().and_downcast::<gtk::FlowBoxChild>() {
                     grid.select_child(&child);
                 }
             }
         }
+        // GTK initially focuses a tile when this renderer is mapped and may
+        // replace a restored multi-selection with that tile. Restore the URI
+        // set after mapping, without changing the user's later selections.
+        let map_items: Vec<_> = items.iter().map(|i| i.identity_key().to_owned()).collect();
+        let map_view = self.clone();
+        let first_map = std::cell::Cell::new(true);
+        grid.connect_map(move |grid| {
+            let keys = if first_map.replace(false) {
+                selected_keys.clone()
+            } else {
+                map_view.navigation.state.borrow().selection_keys.clone()
+            };
+            if keys.is_empty() {
+                return;
+            }
+            let weak = grid.downgrade();
+            let items = map_items.clone();
+            glib::idle_add_local_once(move || {
+                if let Some(grid) = weak.upgrade().filter(|grid| grid.is_mapped()) {
+                    grid.unselect_all();
+                    for (index, key) in items.iter().enumerate() {
+                        if keys.contains(key) {
+                            if let Some(child) = grid.child_at_index(index as i32) {
+                                grid.select_child(&child);
+                            }
+                        }
+                    }
+                }
+            });
+        });
         grid
     }
 
@@ -1074,10 +1291,10 @@ fn show_item_context_menu(
     let menu = GtkBox::new(Orientation::Vertical, 2);
     menu.set_margin_top(6);
     menu.set_margin_bottom(6);
-    let availability = CommandAvailability::for_target(&target);
+    let availability = view.command_availability();
     for command in item_commands(&target) {
         if command == ContextCommand::OpenWith {
-            menu.append(&open_with_submenu(&target, &availability));
+            menu.append(&open_with_submenu(&target, &availability, view));
             continue;
         }
         if command == ContextCommand::Copy {
@@ -1244,17 +1461,19 @@ fn command_submenu(
     button
 }
 
-fn open_with_submenu(target: &ContextTarget, availability: &CommandAvailability) -> Button {
+fn open_with_submenu(
+    target: &ContextTarget,
+    availability: &CommandAvailability,
+    view: &FileView,
+) -> Button {
     let button = Button::with_label("Open With ›");
     set_command_enabled(&button, availability, ContextCommand::OpenWith);
     let submenu_parent = button.clone();
     let target = target.clone();
+    let view = view.clone();
     button.connect_clicked(move |_| {
-        let (uri, content_type) = match &target {
-            ContextTarget::File(item) => (
-                item.location().uri().to_owned(),
-                item.content_type().to_owned(),
-            ),
+        let content_type = match &target {
+            ContextTarget::File(item) => item.content_type().to_owned(),
             _ => return,
         };
         let menu = GtkBox::new(Orientation::Vertical, 2);
@@ -1262,17 +1481,18 @@ fn open_with_submenu(target: &ContextTarget, availability: &CommandAvailability)
         menu.set_margin_bottom(6);
         for app in open_with_apps(&content_type) {
             let app_button = Button::with_label(&app.display_name());
-            let uri = uri.clone();
+            let view = view.clone();
             app_button.connect_clicked(move |_| {
-                let _ = app.launch(&[gio::File::for_uri(&uri)], None::<&gio::AppLaunchContext>);
+                view.dispatch_open_with(app.clone());
             });
             menu.append(&app_button);
         }
         menu.append(&Separator::new(Orientation::Horizontal));
         let other = Button::with_label("Other Application…");
         let parent = submenu_parent.clone();
+        let view = view.clone();
         other.connect_clicked(move |_| {
-            show_application_chooser(&parent, uri.clone(), content_type.clone())
+            show_application_chooser(&parent, content_type.clone(), view.clone())
         });
         menu.append(&other);
         show_submenu(&submenu_parent, &menu);
@@ -1290,7 +1510,7 @@ fn show_submenu(parent: &Button, menu: &GtkBox) {
 }
 
 #[allow(deprecated)]
-fn show_application_chooser(parent: &Button, uri: String, content_type: String) {
+fn show_application_chooser(parent: &Button, content_type: String, view: FileView) {
     let window = parent.root().and_downcast::<gtk::Window>();
     let dialog = gtk::AppChooserDialog::for_content_type(
         window.as_ref(),
@@ -1300,7 +1520,7 @@ fn show_application_chooser(parent: &Button, uri: String, content_type: String) 
     dialog.connect_response(move |dialog, response| {
         if response == gtk::ResponseType::Ok {
             if let Some(app) = dialog.app_info() {
-                let _ = app.launch(&[gio::File::for_uri(&uri)], None::<&gio::AppLaunchContext>);
+                view.dispatch_open_with(app);
             }
         }
         dialog.close();
@@ -1321,12 +1541,6 @@ fn command_button(
     button.connect_clicked(move |_| {
         if let Some(popover) = &parent {
             popover.popdown();
-        }
-        if command == ContextCommand::Open {
-            if let ContextTarget::Folder(item) | ContextTarget::File(item) = &target {
-                activate_item(&view, item.clone());
-                return;
-            }
         }
         view.dispatch_context_command(target.clone(), command);
     });
@@ -1443,6 +1657,7 @@ fn publish_column_layout(
 
 fn column_factory(column: ListColumn, thumbnails: bool, view: FileView) -> SignalListItemFactory {
     let factory = SignalListItemFactory::new();
+    let bind_view = view.clone();
     factory.connect_setup(move |_, list_item| {
         let list_item = list_item
             .downcast_ref::<gtk::ListItem>()
@@ -1477,8 +1692,7 @@ fn column_factory(column: ListColumn, thumbnails: bool, view: FileView) -> Signa
                     return;
                 };
                 gesture.set_state(gtk::EventSequenceState::Claimed);
-                *context_view.selected_target.borrow_mut() = Some(target.clone());
-                context_view.notify_command_availability_changed();
+                context_view.select_context_item(item);
                 show_item_context_menu(
                     &parent,
                     x,
@@ -1491,16 +1705,37 @@ fn column_factory(column: ListColumn, thumbnails: bool, view: FileView) -> Signa
                 );
             });
             line.add_controller(gesture);
+            let touch_item = list_item.clone();
+            let drop_item = list_item.clone();
+            attach_folder_drop(&line, view.clone(), move || {
+                let object = drop_item.item().and_downcast::<glib::BoxedAnyObject>()?;
+                let row = object.borrow::<ListRow>();
+                match &*row {
+                    ListRow::File(item) => Some(item.clone()),
+                    _ => None,
+                }
+            });
+            attach_touch_menu(&line, view.clone(), move || {
+                let object = touch_item.item().and_downcast::<glib::BoxedAnyObject>()?;
+                let row = object.borrow::<ListRow>();
+                match &*row {
+                    ListRow::File(item) => Some(item.clone()),
+                    _ => None,
+                }
+            });
             let drag_item = list_item.clone();
+            let drag_view = view.clone();
             let drag_source = gtk::DragSource::new();
-            drag_source.set_actions(gtk::gdk::DragAction::COPY);
-            drag_source.connect_prepare(move |_, _, _| {
+            drag_source.set_actions(gtk::gdk::DragAction::COPY | gtk::gdk::DragAction::MOVE);
+            drag_source.connect_prepare(move |source, _, _| {
                 let object = drag_item.item().and_downcast::<glib::BoxedAnyObject>()?;
                 let row = object.borrow::<ListRow>();
                 let ListRow::File(item) = &*row else {
                     return None;
                 };
-                drag_content_provider(item)
+                drag_view.select_context_item(item);
+                source.set_actions(drag_actions(&drag_view));
+                drag_selection_provider(&drag_view)
             });
             line.add_controller(drag_source);
             list_item.set_child(Some(&line));
@@ -1524,6 +1759,9 @@ fn column_factory(column: ListColumn, thumbnails: bool, view: FileView) -> Signa
         let Some(child) = list_item.child() else {
             return;
         };
+        list_item.set_selectable(matches!(&*row, ListRow::File(_)));
+        if matches!(&*row, ListRow::File(item) if bind_view.pending_cut.borrow().contains(item.location())) { child.add_css_class("cut-pending"); }
+        else { child.remove_css_class("cut-pending"); }
         match (&*row, column) {
             (ListRow::Group(group), ListColumn::Name) => {
                 let line = child.downcast::<GtkBox>().expect("name cells use a box");
@@ -1953,19 +2191,100 @@ fn thumbnail_cache_paths(cache_home: &Path, uri: &str) -> Vec<PathBuf> {
         .collect()
 }
 
-fn attach_drag_source(widget: &impl IsA<gtk::Widget>, item: FileItem) {
+fn attach_drag_source(widget: &impl IsA<gtk::Widget>, item: FileItem, view: FileView) {
+    let drop_item = item.clone();
+    attach_folder_drop(widget, view.clone(), move || Some(drop_item.clone()));
+    let touch_item = item.clone();
+    attach_touch_menu(widget, view.clone(), move || Some(touch_item.clone()));
     let drag_source = gtk::DragSource::new();
-    drag_source.set_actions(gtk::gdk::DragAction::COPY);
-    drag_source.connect_prepare(move |_, _, _| drag_content_provider(&item));
+    drag_source.set_actions(gtk::gdk::DragAction::COPY | gtk::gdk::DragAction::MOVE);
+    drag_source.connect_prepare(move |source, _, _| {
+        view.select_context_item(&item);
+        source.set_actions(drag_actions(&view));
+        drag_selection_provider(&view)
+    });
     widget.add_controller(drag_source);
 }
 
-fn drag_content_provider(item: &FileItem) -> Option<gtk::gdk::ContentProvider> {
-    let file = gio::File::for_uri(&drag_uri_for(item)?);
-    let files = gtk::gdk::FileList::from_array(&[file]);
+fn attach_folder_drop(
+    widget: &impl IsA<gtk::Widget>,
+    view: FileView,
+    item: impl Fn() -> Option<FileItem> + 'static,
+) {
+    let target = gtk::DropTarget::new(
+        gtk::gdk::FileList::static_type(),
+        gtk::gdk::DragAction::COPY | gtk::gdk::DragAction::MOVE,
+    );
+    target.connect_drop(move |target, value, _, _| {
+        let Some(folder) = item() else {
+            return false;
+        };
+        let Ok(files) = value.get::<gtk::gdk::FileList>() else {
+            return false;
+        };
+        let text: String = files
+            .files()
+            .iter()
+            .map(|f| format!("{}\r\n", f.uri()))
+            .collect();
+        let action = if target
+            .current_drop()
+            .and_then(|d| d.drag())
+            .is_some_and(|d| d.selected_action() == gtk::gdk::DragAction::MOVE)
+        {
+            ClipboardAction::Cut
+        } else {
+            ClipboardAction::Copy
+        };
+        view.dispatch_drop_on(&folder, &text, action)
+    });
+    widget.add_controller(target);
+}
+
+fn attach_touch_menu(
+    widget: &impl IsA<gtk::Widget>,
+    view: FileView,
+    item: impl Fn() -> Option<FileItem> + 'static,
+) {
+    let gesture = gtk::GestureLongPress::new();
+    gesture.set_touch_only(true);
+    let parent = widget.clone().upcast::<gtk::Widget>().downgrade();
+    gesture.connect_pressed(move |_, x, y| {
+        if let (Some(parent), Some(item)) = (parent.upgrade(), item()) {
+            view.select_context_item(&item);
+            show_item_context_menu(&parent, x, y, file_target(&item), &view, false);
+        }
+    });
+    widget.add_controller(gesture);
+}
+
+fn drag_selection_provider(view: &FileView) -> Option<gtk::gdk::ContentProvider> {
+    let payload = view
+        .drag_payload(ClipboardAction::Copy)
+        .or_else(|| view.drag_payload(ClipboardAction::Cut))?;
+    let files = gtk::gdk::FileList::from_array(
+        &payload
+            .locations
+            .iter()
+            .map(|l| gio::File::for_uri(l.uri()))
+            .collect::<Vec<_>>(),
+    );
     Some(gtk::gdk::ContentProvider::for_value(&files.to_value()))
 }
 
+fn drag_actions(view: &FileView) -> gtk::gdk::DragAction {
+    let availability = view.command_availability();
+    let mut actions = gtk::gdk::DragAction::empty();
+    if availability.can_copy {
+        actions |= gtk::gdk::DragAction::COPY;
+    }
+    if availability.can_cut {
+        actions |= gtk::gdk::DragAction::MOVE;
+    }
+    actions
+}
+
+#[cfg(test)]
 fn drag_uri_for(item: &FileItem) -> Option<String> {
     Some(item.location().uri().to_owned())
 }
@@ -1985,15 +2304,11 @@ fn format_modified(modified: std::time::SystemTime) -> String {
 }
 
 fn activate_item(view: &FileView, item: FileItem) {
-    let uri = item.location().uri();
-    if item.is_dir() {
-        if let Some(callback) = view.on_navigate.borrow().as_ref() {
-            callback(item.location().clone());
-        } else {
-            view.navigate(item.location().clone());
-        }
+    view.select_items(vec![item.clone()]);
+    if view.on_application_command.borrow().is_some() {
+        view.dispatch_context_command(file_target(&item), ContextCommand::Open);
     } else {
-        let _ = gio::AppInfo::launch_default_for_uri(uri, None::<&gio::AppLaunchContext>);
+        view.open_item(&item);
     }
 }
 

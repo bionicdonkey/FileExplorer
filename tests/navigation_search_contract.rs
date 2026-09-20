@@ -1,4 +1,239 @@
 use gio::prelude::*;
+
+#[test]
+fn daily_named_children_reject_path_traversal_for_remote_create_and_rename() {
+    use zorin_explorer::application::commands::named_child;
+    let root = location("smb://host/share");
+    assert_eq!(
+        named_child(&root, "new folder").unwrap().uri(),
+        "smb://host/share/new%20folder"
+    );
+    for name in ["", ".", "..", "../escape", "child/name", "name\nsecret"] {
+        assert!(named_child(&root, name).is_err());
+    }
+}
+
+#[test]
+fn daily_pins_and_sessions_keep_unmounted_uri_identities() {
+    use zorin_explorer::core::{
+        application_preferences::{decode_session, encode_session},
+        SidebarPreferences,
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("pins.json");
+    let locations = vec![
+        location("smb://offline/share/reports"),
+        location("sftp://offline/home/me"),
+        Location::from_local_path(&directory.path().join("missing")),
+    ];
+    let mut pins = SidebarPreferences::load_from(path.clone()).unwrap();
+    for uri in &locations {
+        pins.pin_location(uri.clone());
+    }
+    pins.save().unwrap();
+    let restored = SidebarPreferences::load_from(path).unwrap();
+    for uri in &locations {
+        assert!(restored.locations().any(|pin| pin == uri));
+    }
+    assert_eq!(
+        decode_session(&encode_session(&locations).unwrap()).unwrap(),
+        locations
+    );
+}
+
+#[test]
+fn daily_multi_item_conflicts_keep_both_replace_and_skip_report_effects() {
+    use zorin_explorer::core::{OperationManager, OperationState};
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source");
+    let destination = directory.path().join("destination");
+    std::fs::create_dir(&source).unwrap();
+    std::fs::create_dir(&destination).unwrap();
+    for name in ["a.txt", "b.txt"] {
+        std::fs::write(source.join(name), "new").unwrap();
+        std::fs::write(destination.join(name), "old").unwrap();
+    }
+    let manager = OperationManager::default();
+    let sources = ["a.txt", "b.txt"]
+        .iter()
+        .map(|name| Location::from_local_path(&source.join(name)))
+        .collect::<Vec<_>>();
+    for decision in [
+        ConflictDecision::KeepBoth,
+        ConflictDecision::Replace,
+        ConflictDecision::Skip,
+    ] {
+        let id = manager.submit_locations(
+            MutationKind::Copy,
+            sources.clone(),
+            Some(Location::from_local_path(&destination)),
+            None,
+            Some(decision),
+            false,
+        );
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let record = manager.records().into_iter().find(|r| r.id == id).unwrap();
+            if record.finished_at.is_some() {
+                assert_eq!(record.state, OperationState::Completed);
+                break;
+            }
+            assert!(std::time::Instant::now() < end);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let summary = manager.summary(id).unwrap();
+        if decision == ConflictDecision::Skip {
+            assert_eq!(summary.remaining.len(), 2);
+            assert_eq!(summary.completed.len(), 0);
+        } else {
+            assert_eq!(summary.completed.len(), 2);
+        }
+    }
+    for name in ["a.txt", "b.txt"] {
+        assert_eq!(
+            std::fs::read_to_string(destination.join(name)).unwrap(),
+            "new"
+        );
+    }
+    assert_eq!(std::fs::read_dir(&destination).unwrap().count(), 4);
+}
+
+#[test]
+fn daily_uri_payload_rejects_unsafe_input_and_deduplicates() {
+    use zorin_explorer::application::commands::*;
+    let payload = ClipboardPayload::parse(
+        ClipboardAction::Cut,
+        "# Files\r\nsmb://host/share/a\r\nfile:///tmp/b\r\nsmb://host/share/a\r\n",
+    )
+    .unwrap();
+    assert_eq!(payload.locations.len(), 2);
+    assert_eq!(
+        payload.uri_list(),
+        "smb://host/share/a\r\nfile:///tmp/b\r\n"
+    );
+    for input in [
+        "",
+        "/tmp/a",
+        "smb://user:secret@host/a",
+        "file:///tmp/a?secret=x",
+        "file:///tmp/a\ninvalid",
+    ] {
+        assert!(ClipboardPayload::parse(ClipboardAction::Copy, input).is_err());
+    }
+}
+
+#[test]
+fn daily_external_clipboard_preserves_cut_action_and_rejects_unknown_actions() {
+    use zorin_explorer::application::commands::*;
+    assert_eq!(
+        ClipboardPayload::parse_gnome("cut\nfile:///tmp/a\n")
+            .unwrap()
+            .action,
+        ClipboardAction::Cut
+    );
+    assert_eq!(
+        ClipboardPayload::parse_gnome("copy\nsmb://host/share/a\n")
+            .unwrap()
+            .action,
+        ClipboardAction::Copy
+    );
+    assert!(ClipboardPayload::parse_gnome("delete\nfile:///tmp/a").is_err());
+}
+
+#[test]
+fn daily_keyboard_toolbar_and_menu_route_identical_commands() {
+    use zorin_explorer::application::commands::*;
+    assert_eq!(route(Shortcut::Paste), route(ContextCommand::Paste));
+    assert_eq!(route(Shortcut::Cut), route(ContextCommand::Cut));
+    assert_eq!(route(Shortcut::Copy), route(ContextCommand::Copy));
+    assert_eq!(route(Shortcut::Trash), route(ContextCommand::MoveToTrash));
+    assert_eq!(
+        route(Shortcut::DeletePermanently),
+        route(ContextCommand::DeletePermanently)
+    );
+}
+
+#[test]
+fn daily_selection_capabilities_and_drag_action_are_uri_based() {
+    use zorin_explorer::{
+        application::commands::*, core::FileItem, ui::context_menu::CommandAvailability,
+    };
+    let entry = |uri: &str, supported: Vec<Capability>| {
+        FileItem::from_snapshot(&EntrySnapshot {
+            location: location(uri),
+            display_name: "item".into(),
+            kind: EntryKind::File,
+            size: None,
+            modified: None,
+            content_type: None,
+            capabilities: CapabilitySnapshot {
+                supported: supported.into_iter().collect(),
+                ..Default::default()
+            },
+        })
+    };
+    let items = vec![
+        entry(
+            "smb://host/share/a",
+            vec![Capability::Copy, Capability::Move],
+        ),
+        entry("smb://host/share/b", vec![Capability::Copy]),
+    ];
+    let destination = CapabilitySnapshot {
+        supported: [Capability::Create].into_iter().collect(),
+        ..Default::default()
+    };
+    let availability = CommandAvailability::for_capabilities(&items, Some(&destination));
+    assert!(availability.can_copy && availability.can_paste);
+    assert!(!availability.can_cut);
+    assert!(DragProposal::negotiate(
+        &items,
+        location("smb://host/destination"),
+        &destination,
+        ClipboardAction::Copy
+    )
+    .is_ok());
+    assert!(DragProposal::negotiate(
+        &items,
+        location("smb://host/destination"),
+        &destination,
+        ClipboardAction::Cut
+    )
+    .is_err());
+}
+
+#[test]
+fn daily_write_permission_does_not_imply_rename_capability() {
+    use zorin_explorer::{core::FileItem, ui::context_menu::CommandAvailability};
+    let info = gio::FileInfo::new();
+    info.set_name("file");
+    info.set_file_type(gio::FileType::Regular);
+    info.set_attribute_boolean("access::can-write", true);
+    info.set_attribute_boolean("access::can-rename", false);
+    let item = FileItem::from_gio(&gio::File::for_uri("smb://host/share"), &info);
+    let availability = CommandAvailability::for_capabilities(&[item], None);
+    assert!(!availability.can_cut && !availability.can_rename);
+}
+
+#[test]
+fn daily_cut_is_cleared_only_for_its_terminal_operation() {
+    use zorin_explorer::application::commands::*;
+    let payload = ClipboardPayload::parse(ClipboardAction::Cut, "file:///tmp/a").unwrap();
+    let mut clipboard = ClipboardState::default();
+    clipboard.replace(payload.clone());
+    clipboard.begin_paste(7);
+    clipboard.finish_paste(8, true);
+    assert_eq!(clipboard.payload(), Some(&payload));
+    clipboard.finish_paste(7, false);
+    assert_eq!(clipboard.payload(), Some(&payload));
+    clipboard.finish_paste(7, true);
+    assert!(clipboard.payload().is_none());
+    clipboard.replace(payload.clone());
+    clipboard.begin_paste(9);
+    clipboard.replace(ClipboardPayload::parse(ClipboardAction::Copy, "file:///tmp/b").unwrap());
+    clipboard.finish_paste(9, true);
+    assert_eq!(clipboard.payload().unwrap().action, ClipboardAction::Copy);
+}
 use std::{cell::RefCell, rc::Rc};
 use zorin_explorer::{
     application::navigation::NavigationCoordinator,
@@ -387,7 +622,10 @@ fn slice2_unmount_cancels_pending_and_preserves_history_for_reconnect() {
         matches!(&tab.content, TabContent::Unavailable(l) if l.uri() == "smb://host/share/folder")
     );
     assert_eq!(tab.location.uri(), "smb://host/share/folder");
-    assert_eq!(tab.history.current().unwrap().uri(), "smb://host/share/folder");
+    assert_eq!(
+        tab.history.current().unwrap().uri(),
+        "smb://host/share/folder"
+    );
     assert_eq!(tab.history.back_target().unwrap().uri(), "file:///home");
     assert!(tab.directory.is_none());
     let retry = tab.begin_retry().unwrap();

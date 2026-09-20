@@ -280,11 +280,15 @@ impl Sidebar {
     }
 
     pub fn toggle_quick_access(&self, path: PathBuf) {
+        self.toggle_quick_access_location(Location::from_local_path(&path));
+    }
+
+    pub fn toggle_quick_access_location(&self, location: Location) {
         let mut model = self.model.borrow_mut();
-        if model.preferences().is_pinned(&path) {
-            model.preferences_mut().unpin(&path);
+        if model.preferences().locations().any(|pin| pin == &location) {
+            model.preferences_mut().unpin_location(&location);
         } else {
-            model.preferences_mut().pin(path);
+            model.preferences_mut().pin_location(location);
         }
         let _ = model.preferences().save();
         drop(model);

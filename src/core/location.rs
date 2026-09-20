@@ -105,7 +105,13 @@ impl Location {
         &self.canonical_uri
     }
     pub fn local_path(&self) -> Option<PathBuf> {
-        self.file.path()
+        // GVfs may offer a FUSE projection for a remote URI. That projection
+        // is not local identity and must not grant Terminal/local-adapter
+        // privileges or migrate remote pins into file: locations.
+        self.canonical_uri
+            .starts_with("file:")
+            .then(|| self.file.path())
+            .flatten()
     }
 
     pub fn parent(&self) -> Option<Self> {

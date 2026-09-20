@@ -218,13 +218,16 @@ fn gio_capabilities(info: &gio::FileInfo, file_type: gio::FileType) -> Capabilit
     if info.has_attribute("access::can-read") && info.boolean("access::can-read") {
         snapshot.supported.insert(Capability::Copy);
     }
-    if info.has_attribute("access::can-write") && info.boolean("access::can-write") {
+    if info.has_attribute("access::can-rename") && info.boolean("access::can-rename") {
         snapshot
             .supported
             .extend([Capability::Move, Capability::Rename]);
-        if file_type == gio::FileType::Directory {
-            snapshot.supported.insert(Capability::Create);
-        }
+    }
+    if file_type == gio::FileType::Directory
+        && info.has_attribute("access::can-write")
+        && info.boolean("access::can-write")
+    {
+        snapshot.supported.insert(Capability::Create);
     }
     if info.has_attribute("access::can-trash") && info.boolean("access::can-trash") {
         snapshot.supported.insert(Capability::Trash);

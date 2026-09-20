@@ -4,8 +4,193 @@ use zorin_explorer::{
     infrastructure::gio_operations::GioOperations,
 };
 
+use gio::prelude::*;
+
+#[test]
+fn daily_uri_adapter_queries_nonlocal_gio_backend_without_a_mount() {
+    use zorin_explorer::core::ports::FileOperations;
+    let context = glib::MainContext::new();
+    context.with_thread_default(|| {
+        let adapter = zorin_explorer::infrastructure::gio_operations::GioOperations::new_uri(context.clone());
+        let result = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let output = result.clone();
+        adapter.inspect_capabilities(CapabilityRequest {
+            id: RequestId(9100), location: Location::from_uri("resource:///missing-daily-workflow-file").unwrap(), cancellable: gio::Cancellable::new(),
+        }, Box::new(move |completion| *output.borrow_mut() = Some(completion.outcome)));
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while result.borrow().is_none() { context.iteration(false); assert!(std::time::Instant::now() < end); }
+        assert!(matches!(result.borrow().as_ref().unwrap(), RequestOutcome::Failed(error) if error.kind == OperationErrorKind::NotFound));
+    }).unwrap();
+}
+
+#[test]
+fn daily_registered_gio_uri_backend_executes_transfers_and_preserves_uri_history() {
+    use zorin_explorer::core::{OperationManager, OperationState};
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path().to_path_buf();
+    std::fs::create_dir(root.join("source")).unwrap();
+    std::fs::create_dir(root.join("destination")).unwrap();
+    std::fs::write(root.join("source/a.txt"), "alpha").unwrap();
+    std::fs::write(root.join("source/b.txt"), "bravo").unwrap();
+    // A registered GIO backend resolves non-file identities to controlled test
+    // files. All inspection/mutation calls run through the production adapter.
+    let vfs = gio::Vfs::default();
+    let fixture_root = root.clone();
+    assert!(vfs.register_uri_scheme(
+        "dailyfixture",
+        Some(Box::new(move |_, uri| {
+            gio::File::for_path(fixture_root.join(uri.strip_prefix("dailyfixture:///").unwrap()))
+        })),
+        None
+    ));
+    let uri = |relative: &str| Location::from_uri(&format!("dailyfixture:///{relative}")).unwrap();
+    assert!(
+        uri("source").local_path().is_none(),
+        "a provider's local projection must not grant local-only application actions"
+    );
+    let remote_folder = zorin_explorer::core::FileItem::from_snapshot(&EntrySnapshot {
+        location: uri("source"),
+        display_name: "source".into(),
+        kind: EntryKind::Directory,
+        size: None,
+        modified: None,
+        content_type: None,
+        capabilities: CapabilitySnapshot {
+            supported: [Capability::Open].into_iter().collect(),
+            ..Default::default()
+        },
+    });
+    let availability = zorin_explorer::ui::context_menu::CommandAvailability::for_capabilities(
+        &[remote_folder],
+        None,
+    );
+    assert!(!availability.can_open_terminal);
+    let manager = OperationManager::default();
+    let wait = |id| {
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let record = manager.records().into_iter().find(|r| r.id == id).unwrap();
+            if record.finished_at.is_some() {
+                return record;
+            }
+            assert!(std::time::Instant::now() < end);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    };
+    let sources = vec![uri("source/a.txt"), uri("source/b.txt")];
+    std::fs::create_dir(root.join("source/nested")).unwrap();
+    let descendant = manager.submit_locations(
+        MutationKind::Copy,
+        vec![uri("source")],
+        Some(uri("source/nested")),
+        None,
+        None,
+        false,
+    );
+    assert!(matches!(wait(descendant).state, OperationState::Failed(_)));
+    assert!(!root.join("source/nested/source").exists());
+    let id = manager.submit_locations(
+        MutationKind::Copy,
+        sources.clone(),
+        Some(uri("destination")),
+        None,
+        None,
+        false,
+    );
+    assert_eq!(wait(id).state, OperationState::Completed);
+    assert_eq!(
+        manager.summary(id).unwrap().completed,
+        [
+            "dailyfixture:///source/a.txt",
+            "dailyfixture:///source/b.txt"
+        ]
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("destination/a.txt")).unwrap(),
+        "alpha"
+    );
+    let conflict = manager.submit_locations(
+        MutationKind::Copy,
+        sources.clone(),
+        Some(uri("destination")),
+        None,
+        None,
+        false,
+    );
+    assert!(matches!(wait(conflict).state, OperationState::Failed(_)));
+    assert_eq!(
+        manager.summary(conflict).unwrap().error_kind.as_deref(),
+        Some("Conflict")
+    );
+    let keep = manager.submit_locations(
+        MutationKind::Copy,
+        sources.clone(),
+        Some(uri("destination")),
+        None,
+        Some(ConflictDecision::KeepBoth),
+        false,
+    );
+    assert_eq!(wait(keep).state, OperationState::Completed);
+    assert_eq!(
+        std::fs::read_dir(root.join("destination")).unwrap().count(),
+        4
+    );
+    std::fs::create_dir(root.join("partial")).unwrap();
+    std::fs::write(root.join("partial/b.txt"), "existing").unwrap();
+    let partial = manager.submit_locations(
+        MutationKind::Copy,
+        sources.clone(),
+        Some(uri("partial")),
+        None,
+        None,
+        false,
+    );
+    assert!(matches!(wait(partial).state, OperationState::Failed(_)));
+    let outcome = manager.summary(partial).unwrap();
+    assert_eq!(outcome.effect, "Partial");
+    assert_eq!(outcome.completed, ["dailyfixture:///source/a.txt"]);
+    assert_eq!(outcome.remaining, ["dailyfixture:///source/b.txt"]);
+    let moved = manager.submit_locations(
+        MutationKind::Move,
+        sources,
+        Some(uri("destination")),
+        None,
+        Some(ConflictDecision::Replace),
+        false,
+    );
+    assert_eq!(wait(moved).state, OperationState::Completed);
+    assert!(!root.join("source/a.txt").exists());
+    let created = manager.submit_locations(
+        MutationKind::Create,
+        vec![uri("created")],
+        None,
+        None,
+        None,
+        false,
+    );
+    assert_eq!(wait(created).state, OperationState::Completed);
+    let renamed = manager.submit_locations(
+        MutationKind::Rename,
+        vec![uri("created")],
+        Some(uri("destination")),
+        Some(uri("destination/renamed")),
+        None,
+        false,
+    );
+    assert_eq!(wait(renamed).state, OperationState::Completed);
+    let deleted = manager.submit_locations(
+        MutationKind::Delete,
+        vec![uri("destination/renamed")],
+        None,
+        None,
+        None,
+        true,
+    );
+    assert_eq!(wait(deleted).state, OperationState::Completed);
+    assert!(!root.join("destination/renamed").exists());
+    assert!(vfs.unregister_uri_scheme("dailyfixture"));
+}
 fn search_result(scope: SearchScope, mode: SearchMode, cancelled: bool) -> SearchOutcome {
-    use gio::prelude::*;
     use zorin_explorer::{
         core::ports::SearchRepository, infrastructure::tracker_search::TrackerSearchRepository,
     };

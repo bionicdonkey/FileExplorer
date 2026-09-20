@@ -30,13 +30,13 @@ fn uri_items_keep_canonical_identity_and_disable_unsupported_trash() {
     assert!(!availability.allows(ContextCommand::OpenInTerminal));
     assert!(!availability.allows(ContextCommand::DeletePermanently));
     assert!(
-        !CommandAvailability::for_target(&ContextTarget::Folder(item))
+        CommandAvailability::for_target(&ContextTarget::Folder(item))
             .allows(ContextCommand::OpenInNewTab)
     );
 }
 
 #[test]
-fn uri_items_with_provider_capabilities_stay_disabled_until_uri_execution_exists() {
+fn uri_items_with_provider_capabilities_enable_uri_execution() {
     let parent = gio::File::for_uri("smb://host/share");
     let info = gio::FileInfo::new();
     info.set_name("report.txt");
@@ -45,6 +45,7 @@ fn uri_items_with_provider_capabilities_stay_disabled_until_uri_execution_exists
     for attribute in [
         "access::can-read",
         "access::can-write",
+        "access::can-rename",
         "access::can-trash",
         "access::can-delete",
     ] {
@@ -57,11 +58,11 @@ fn uri_items_with_provider_capabilities_stay_disabled_until_uri_execution_exists
     );
 
     assert!(availability.can_open);
-    assert!(!availability.can_copy);
-    assert!(!availability.can_cut);
-    assert!(!availability.can_rename);
-    assert!(!availability.can_trash);
-    assert!(!availability.can_delete);
+    assert!(availability.can_copy);
+    assert!(availability.can_cut);
+    assert!(availability.can_rename);
+    assert!(availability.can_trash);
+    assert!(availability.can_delete);
 }
 
 mod operation_contract {

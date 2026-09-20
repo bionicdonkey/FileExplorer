@@ -36,7 +36,7 @@ impl DirectoryModel {
     pub fn load_uri_with_options(uri: &str, options: &ViewOptions) -> io::Result<Vec<FileItem>> {
         let file = gio::File::for_uri(uri);
         let enumerator = file.enumerate_children(
-            "standard::name,standard::display-name,standard::type,standard::icon,standard::content-type,standard::size,time::modified,standard::target-uri,access::can-read,access::can-write,access::can-trash,access::can-delete",
+            "standard::name,standard::display-name,standard::type,standard::icon,standard::content-type,standard::size,time::modified,standard::target-uri,access::can-read,access::can-write,access::can-rename,access::can-trash,access::can-delete",
             gio::FileQueryInfoFlags::NONE,
             gio::Cancellable::NONE,
         ).map_err(|error| io::Error::new(io::ErrorKind::Other, error))?;

@@ -1,4 +1,4 @@
-//! Local GIO boundary. All I/O runs on workers, all port callbacks on the owner
+//! GIO boundary. All I/O runs on workers, all port callbacks on the owner
 //! context. GIO owns move semantics, including cross-filesystem fallback.
 use crate::core::{contracts::*, ports::*, Location};
 use futures_util::StreamExt;
@@ -7,13 +7,23 @@ use gio::prelude::*;
 #[derive(Clone)]
 pub struct GioOperations {
     context: glib::MainContext,
+    uri_operations: bool,
     elevated: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<OperationId>>>,
 }
 impl GioOperations {
     pub fn new(context: glib::MainContext) -> Self {
         Self {
             context,
+            uri_operations: false,
             elevated: Default::default(),
+        }
+    }
+    /// Production GIO/GVfs boundary. Unsupported actions are determined from
+    /// provider metadata and GIO outcomes, not from the URI's scheme.
+    pub fn new_uri(context: glib::MainContext) -> Self {
+        Self {
+            uri_operations: true,
+            ..Self::new(context)
         }
     }
     pub(crate) fn authorize_elevated_retry(&self, id: OperationId) {
@@ -43,8 +53,9 @@ impl GioOperations {
         cancellable: gio::Cancellable,
         done: Box<dyn FnOnce(Result<(), OperationError>)>,
     ) {
+        let uri_operations = self.uri_operations;
         self.context.spawn_local(async move {
-            if !local(&location) {
+            if !uri_operations && !local(&location) {
                 done(Err(OperationError::new(
                     OperationErrorKind::Unsupported,
                     Some(&location),
@@ -95,12 +106,18 @@ impl GioOperations {
         capability: Option<Capability>,
         done: CapabilityCallback,
     ) {
+        let uri_operations = self.uri_operations;
         self.context.spawn_local(async move {
             let location = request.location.clone();
             let cancel = request.cancellable.clone();
-            let result =
-                gio::spawn_blocking(move || inspect_local_for(&location, &cancel, capability))
-                    .await;
+            let result = gio::spawn_blocking(move || {
+                if uri_operations {
+                    inspect_uri_for(&location, &cancel, capability)
+                } else {
+                    inspect_local_for(&location, &cancel, capability)
+                }
+            })
+            .await;
             let outcome = if request.cancellable.is_cancelled() {
                 RequestOutcome::Cancelled
             } else {
@@ -128,6 +145,7 @@ impl GioOperations {
     ) {
         let (send, mut receive) = futures_channel::mpsc::unbounded();
         let elevated = self.elevated.lock().unwrap().remove(&request.id);
+        let uri_operations = self.uri_operations;
         std::thread::spawn(move || {
             let mut sink = |event| {
                 let _ = send.unbounded_send(event);
@@ -135,7 +153,7 @@ impl GioOperations {
             if elevated {
                 execute_elevated(request, &mut sink);
             } else {
-                execute_inner(request, decision, &mut sink);
+                execute_inner_mode(request, decision, uri_operations, &mut sink);
             }
         });
         self.context.spawn_local(async move {
@@ -284,6 +302,97 @@ fn inspect_local(
     Ok(capabilities)
 }
 
+fn inspect_uri_for(
+    location: &Location,
+    cancel: &gio::Cancellable,
+    capability: Option<Capability>,
+) -> Result<CapabilitySnapshot, OperationError> {
+    if local(location) {
+        return inspect_local_for(location, cancel, capability);
+    }
+    let requested = gio::File::for_uri(location.uri());
+    let attributes = "standard::type,standard::target-uri,access::*";
+    let query = |file: &gio::File| {
+        file.query_info(
+            attributes,
+            gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS,
+            Some(cancel),
+        )
+    };
+    let (file, info) = match query(&requested) {
+        Ok(info) => (requested, info),
+        Err(error)
+            if capability == Some(Capability::Create)
+                && error.matches(gio::IOErrorEnum::NotFound) =>
+        {
+            let parent = requested
+                .parent()
+                .ok_or_else(|| OperationError::from_gio(&error, Some(location), None))?;
+            let info =
+                query(&parent).map_err(|e| OperationError::from_gio(&e, Some(location), None))?;
+            (parent, info)
+        }
+        Err(error) => return Err(OperationError::from_gio(&error, Some(location), None)),
+    };
+    let mut snapshot = CapabilitySnapshot {
+        version: 1,
+        ..Default::default()
+    };
+    snapshot.supported.insert(Capability::Open);
+    for (attribute, required) in [
+        ("access::can-read", Capability::Copy),
+        ("access::can-rename", Capability::Move),
+        ("access::can-rename", Capability::Rename),
+        ("access::can-trash", Capability::Trash),
+        ("access::can-delete", Capability::Delete),
+    ] {
+        if info.has_attribute(attribute) && info.boolean(attribute) {
+            snapshot.supported.insert(required);
+        }
+    }
+    if info.file_type() == gio::FileType::Directory
+        && info.has_attribute("access::can-write")
+        && info.boolean("access::can-write")
+    {
+        snapshot.supported.insert(Capability::Create);
+    }
+    // GIO supplies the parent relation. Resolve provider shortcuts before
+    // retaining ancestry; opaque backends with no parent stay conservative.
+    let resolved = if let Some(uri) = info.attribute_string("standard::target-uri") {
+        Location::from_uri(&uri).map_err(|_| {
+            OperationError::new(OperationErrorKind::InvalidRequest, Some(location), None)
+        })?
+    } else {
+        Location::try_from_file(file).map_err(|_| {
+            OperationError::new(OperationErrorKind::InvalidRequest, Some(location), None)
+        })?
+    };
+    let mut ancestors = vec![resolved.clone()];
+    let mut next = resolved.parent();
+    while let Some(parent) = next {
+        if ancestors.contains(&parent) || ancestors.len() >= 256 {
+            return Err(OperationError::new(
+                OperationErrorKind::InvalidRequest,
+                Some(location),
+                None,
+            ));
+        }
+        next = parent.parent();
+        ancestors.push(parent);
+    }
+    if ancestors.len() > 1 || info.file_type() == gio::FileType::Directory {
+        snapshot.containment = Containment::KnownAncestors(ancestors);
+    }
+    if capability.is_some_and(|c| !snapshot.supports(c)) {
+        return Err(OperationError::new(
+            OperationErrorKind::Unsupported,
+            Some(location),
+            None,
+        ));
+    }
+    Ok(snapshot)
+}
+
 pub fn execute(request: OperationRequest, sink: &mut dyn FnMut(OperationEvent)) {
     execute_inner(request, None, sink);
 }
@@ -297,6 +406,15 @@ pub fn execute_with_decision(
 fn execute_inner(
     request: OperationRequest,
     decision: Option<ConflictDecision>,
+    sink: &mut dyn FnMut(OperationEvent),
+) {
+    execute_inner_mode(request, decision, false, sink);
+}
+
+fn execute_inner_mode(
+    request: OperationRequest,
+    decision: Option<ConflictDecision>,
+    uri_operations: bool,
     sink: &mut dyn FnMut(OperationEvent),
 ) {
     let mut sequence = 0;
@@ -323,12 +441,13 @@ fn execute_inner(
         error: OperationError::new(kind, request.sources.first(), request.destination.as_ref()),
         completion,
     };
-    if !request
-        .sources
-        .iter()
-        .chain(request.destination.iter())
-        .chain(request.explicit_target.iter())
-        .all(local)
+    if !uri_operations
+        && !request
+            .sources
+            .iter()
+            .chain(request.destination.iter())
+            .chain(request.explicit_target.iter())
+            .all(local)
     {
         send(fail(OperationErrorKind::Unsupported, completion));
         return;
@@ -358,7 +477,12 @@ fn execute_inner(
         .chain(request.explicit_target.iter())
         .enumerate()
     {
-        match inspect_local_for(
+        let inspect = if uri_operations {
+            inspect_uri_for
+        } else {
+            inspect_local_for
+        };
+        match inspect(
             location,
             &request.cancellable,
             Some(if index < request.sources.len() {
@@ -372,7 +496,27 @@ fn execute_inner(
                     request.kind.capability()
                 } else {
                     Capability::Create
-                }) => {}
+                }) =>
+            {
+                if index >= request.sources.len()
+                    && matches!(
+                        request.kind,
+                        MutationKind::Copy | MutationKind::Move | MutationKind::Rename
+                    )
+                {
+                    if let Err(error) =
+                        crate::application::operations::lock_keys(&request, &capabilities)
+                    {
+                        send(OperationEvent::Failed {
+                            id,
+                            sequence: 0,
+                            error,
+                            completion,
+                        });
+                        return;
+                    }
+                }
+            }
             Ok(_) => {
                 send(fail(OperationErrorKind::CapabilityChanged, completion));
                 return;

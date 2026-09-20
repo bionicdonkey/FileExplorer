@@ -1,6 +1,313 @@
 use std::rc::Rc;
 
+#[gtk::test]
+fn slice3_multiple_selection_routes_one_uri_command_and_drag_payload() {
+    use std::cell::RefCell;
+    use zorin_explorer::{
+        application::commands::ClipboardAction,
+        core::{GroupField, ViewMode, ViewOptions},
+        ui::file_view::FileView,
+    };
+    let context = glib::MainContext::default();
+    let provider = Rc::new(MockProvider::new(context.clone(), MockConfig::default()));
+    let root = Location::from_uri("smb://host/share").unwrap();
+    let capabilities = CapabilitySnapshot {
+        version: 1,
+        stable_order: true,
+        supported: [
+            Capability::List,
+            Capability::Copy,
+            Capability::Move,
+            Capability::Create,
+            Capability::Open,
+        ]
+        .into_iter()
+        .collect(),
+        ..Default::default()
+    };
+    provider.set_directory(
+        root.clone(),
+        ["a", "b"]
+            .into_iter()
+            .map(|name| EntrySnapshot {
+                location: Location::from_uri(&format!("smb://host/share/{name}")).unwrap(),
+                display_name: name.into(),
+                kind: EntryKind::File,
+                size: None,
+                modified: None,
+                content_type: None,
+                capabilities: capabilities.clone(),
+            })
+            .collect(),
+        capabilities,
+    );
+    let view = FileView::new_with_repository(root.clone(), provider.clone());
+    view.set_options(ViewOptions {
+        view_mode: ViewMode::DetailedList,
+        group_field: GroupField::None,
+        ..Default::default()
+    });
+    provider.advance(1);
+    while context.pending() {
+        context.iteration(false);
+    }
+    let model = view.column_view().unwrap().model().unwrap();
+    model.select_item(0, true);
+    model.select_item(1, false);
+    assert_eq!(view.selected_items().len(), 2);
+    assert!(view.command_availability().can_copy);
+    let commands = Rc::new(RefCell::new(Vec::new()));
+    let output = commands.clone();
+    view.set_application_handler(move |command| output.borrow_mut().push(command));
+    view.dispatch_context_command(view.selected_target().unwrap(), ContextCommand::Copy);
+    assert_eq!(commands.borrow()[0].selection.len(), 2);
+    let application = gio::AppInfo::create_from_commandline(
+        "true",
+        Some("Fixture viewer"),
+        gio::AppInfoCreateFlags::SUPPORTS_URIS,
+    )
+    .unwrap();
+    view.dispatch_open_with(application);
+    assert_eq!(
+        commands.borrow().last().unwrap().kind,
+        ContextCommand::OpenWith
+    );
+    assert_eq!(commands.borrow().last().unwrap().selection.len(), 2);
+    commands.borrow_mut().pop();
+    let payload = view.drag_payload(ClipboardAction::Copy).unwrap();
+    assert_eq!(payload.locations.len(), 2);
+    assert!(view.dispatch_drop(&payload.uri_list(), ClipboardAction::Copy));
+    assert_eq!(commands.borrow()[1].selection.len(), 2);
+    assert_eq!(commands.borrow()[1].destination, root);
+    assert!(!view.dispatch_drop("smb://user:password@host/share/a", ClipboardAction::Copy));
+    let folder = zorin_explorer::core::FileItem::from_snapshot(&EntrySnapshot {
+        location: Location::from_uri("smb://host/share/folder").unwrap(),
+        display_name: "folder".into(),
+        kind: EntryKind::Directory,
+        size: None,
+        modified: None,
+        content_type: None,
+        capabilities: CapabilitySnapshot {
+            supported: [Capability::Create].into_iter().collect(),
+            ..Default::default()
+        },
+    });
+    assert!(view.dispatch_drop_on(&folder, &payload.uri_list(), ClipboardAction::Copy));
+    assert_eq!(
+        commands.borrow().last().unwrap().destination.uri(),
+        "smb://host/share/folder"
+    );
+    view.set_options(ViewOptions {
+        view_mode: ViewMode::IconGrid,
+        group_field: GroupField::None,
+        ..Default::default()
+    });
+    assert_eq!(view.tab_state().borrow().selection_keys.len(), 2);
+    let window = gtk::Window::new();
+    window.set_child(Some(&view.widget));
+    window.present();
+    while context.pending() {
+        context.iteration(false);
+    }
+    assert_eq!(
+        view.selected_items().len(),
+        2,
+        "mapping the grid must retain the URI selection"
+    );
+    fn flow(widget: &gtk::Widget) -> Option<gtk::FlowBox> {
+        if let Ok(flow) = widget.clone().downcast::<gtk::FlowBox>() {
+            return Some(flow);
+        }
+        let mut child = widget.first_child();
+        while let Some(next) = child {
+            if let Some(found) = flow(&next) {
+                return Some(found);
+            }
+            child = next.next_sibling();
+        }
+        None
+    }
+    fn menu_button(widget: &gtk::Widget, label: &str) -> Option<gtk::Button> {
+        if let Ok(button) = widget.clone().downcast::<gtk::Button>() {
+            if button.label().as_deref() == Some(label) {
+                return Some(button);
+            }
+        }
+        let mut child = widget.first_child();
+        while let Some(next) = child {
+            if let Some(found) = menu_button(&next, label) {
+                return Some(found);
+            }
+            child = next.next_sibling();
+        }
+        None
+    }
+    let grid = flow(view.widget.upcast_ref()).unwrap();
+    let tile = grid.child_at_index(0).unwrap().child().unwrap();
+    let controllers = tile.observe_controllers();
+    let touch = (0..controllers.n_items())
+        .find_map(|i| controllers.item(i).and_downcast::<gtk::GestureLongPress>())
+        .unwrap();
+    touch.emit_by_name::<()>("pressed", &[&1.0_f64, &1.0_f64]);
+    menu_button(&tile, "Copy ›").unwrap().emit_clicked();
+    menu_button(&tile, "Copy").unwrap().emit_clicked();
+    assert_eq!(commands.borrow().last().unwrap().selection.len(), 2);
+    assert_eq!(commands.borrow().last().unwrap().kind, ContextCommand::Copy);
+    window.close();
+    view.close();
+}
+
+#[gtk::test]
+fn slice3_properties_reports_async_errors_and_unavailable_fields() {
+    use zorin_explorer::ui::properties_dialog::PropertiesDialog;
+    let directory = tempfile::tempdir().unwrap();
+    let dialog = PropertiesDialog::present(
+        None,
+        Location::from_local_path(&directory.path().join("missing")),
+        || {},
+    );
+    fn labels(widget: &gtk::Widget) -> String {
+        let mut text = widget
+            .clone()
+            .downcast::<gtk::Label>()
+            .ok()
+            .map(|l| l.text().to_string())
+            .unwrap_or_default();
+        let mut child = widget.first_child();
+        while let Some(next) = child {
+            text.push_str(&labels(&next));
+            child = next.next_sibling();
+        }
+        text
+    }
+    assert!(labels(dialog.upcast_ref()).contains("Loading"));
+    let context = glib::MainContext::default();
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while labels(dialog.upcast_ref()).contains("Loading") {
+        context.iteration(false);
+        assert!(std::time::Instant::now() < end);
+    }
+    let text = labels(dialog.upcast_ref());
+    assert!(text.contains("Unavailable"));
+    assert!(text.contains("operation.not-found"));
+    dialog.close();
+}
+
+#[gtk::test]
+#[allow(deprecated)]
+fn slice3_properties_close_restores_focus_and_operation_center_reports_completion() {
+    use zorin_explorer::{
+        core::{OperationManager, OperationState},
+        ui::{operations_page, properties_dialog::PropertiesDialog},
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let parent = gtk::Window::new();
+    let entry = gtk::Entry::new();
+    parent.set_child(Some(&entry));
+    parent.present();
+    entry.grab_focus();
+    let focused = gtk::prelude::GtkWindowExt::focus(&parent).unwrap();
+    let dialog = PropertiesDialog::present(
+        Some(&parent),
+        Location::from_local_path(directory.path()),
+        || {},
+    );
+    dialog.response(gtk::ResponseType::Close);
+    let context = glib::MainContext::default();
+    while context.pending() {
+        context.iteration(false);
+    }
+    assert_eq!(gtk::prelude::GtkWindowExt::focus(&parent), Some(focused));
+    let manager = OperationManager::default();
+    let path = directory.path().join("created");
+    let id = manager.submit_locations(
+        MutationKind::Create,
+        vec![Location::from_local_path(&path)],
+        None,
+        None,
+        None,
+        false,
+    );
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while manager
+        .records()
+        .iter()
+        .find(|r| r.id == id)
+        .unwrap()
+        .finished_at
+        .is_none()
+    {
+        context.iteration(false);
+        assert!(std::time::Instant::now() < end);
+    }
+    assert_eq!(manager.records()[0].state, OperationState::Completed);
+    let center = operations_page::build(manager);
+    fn text(widget: &gtk::Widget) -> String {
+        let mut result = widget
+            .clone()
+            .downcast::<gtk::Label>()
+            .ok()
+            .map(|l| l.text().to_string())
+            .unwrap_or_default();
+        let mut child = widget.first_child();
+        while let Some(next) = child {
+            result.push_str(&text(&next));
+            child = next.next_sibling();
+        }
+        result
+    }
+    assert!(text(center.upcast_ref()).contains("Completed"));
+    parent.close();
+}
+
 use gtk::prelude::*;
+
+#[gtk::test]
+#[allow(deprecated)]
+fn slice3_permanent_delete_confirmation_cancels_or_deletes_all_uri_items() {
+    use adw::prelude::*;
+    use zorin_explorer::{
+        core::OperationManager,
+        ui::{file_view::FileView, window::confirm_permanent_delete},
+    };
+    let fixture = tempfile::tempdir().unwrap();
+    let locations: Vec<_> = ["a", "b"]
+        .into_iter()
+        .map(|name| {
+            let path = fixture.path().join(name);
+            std::fs::write(&path, "data").unwrap();
+            Location::from_local_path(&path)
+        })
+        .collect();
+    let view = FileView::new(Location::from_local_path(fixture.path()));
+    let parent = gtk::Window::new();
+    parent.set_child(Some(&view.widget));
+    parent.present();
+    let manager = OperationManager::default();
+    let cancelled = confirm_permanent_delete(&view, locations.clone(), manager.clone());
+    cancelled.response("cancel");
+    assert!(manager.records().is_empty());
+    assert!(fixture.path().join("a").exists());
+    let confirmed = confirm_permanent_delete(&view, locations, manager.clone());
+    confirmed.response("delete");
+    let context = glib::MainContext::default();
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while manager.active_count() > 0 {
+        context.iteration(false);
+        assert!(std::time::Instant::now() < end);
+    }
+    assert!(!fixture.path().join("a").exists() && !fixture.path().join("b").exists());
+    assert_eq!(
+        manager
+            .summary(manager.records()[0].id)
+            .unwrap()
+            .completed
+            .len(),
+        2
+    );
+    parent.close();
+    view.close();
+}
 use zorin_explorer::application::operations::{CancelResult, OperationCoordinator, OperationState};
 use zorin_explorer::core::contracts::*;
 use zorin_explorer::core::Location;
@@ -102,9 +409,9 @@ fn slice2_search_scope_incomplete_retry_clear_and_remote_activation() {
         .unwrap()
         .model()
         .unwrap()
-        .downcast::<gtk::SingleSelection>()
+        .downcast::<gtk::MultiSelection>()
         .unwrap()
-        .set_selected(0);
+        .select_item(0, true);
     view.search("report", SearchMode::Filename, false);
     let (request, done) = search.0.borrow_mut().remove(0);
     let result_location = Location::from_uri("smb://host/share/report%20one").unwrap();
@@ -140,9 +447,9 @@ fn slice2_search_scope_incomplete_retry_clear_and_remote_activation() {
     result_column
         .model()
         .unwrap()
-        .downcast::<gtk::SingleSelection>()
+        .downcast::<gtk::MultiSelection>()
         .unwrap()
-        .set_selected(0);
+        .select_item(0, true);
     result_column.emit_by_name::<()>("activate", &[&0u32]);
     assert_eq!(*activated.borrow(), Some(result_location));
     button(view.widget.upcast_ref(), "Retry search")
@@ -198,9 +505,9 @@ fn slice2_search_scope_incomplete_retry_clear_and_remote_activation() {
         .unwrap()
         .model()
         .unwrap()
-        .downcast::<gtk::SingleSelection>()
+        .downcast::<gtk::MultiSelection>()
         .unwrap()
-        .set_selected(0);
+        .select_item(0, true);
     view.navigate(Location::from_uri("smb://host/missing").unwrap());
     provider.advance(1);
     while context.pending() {
@@ -257,9 +564,9 @@ fn slice2_navigation_commits_after_success_and_refresh_restores_selection() {
     let model = column
         .model()
         .unwrap()
-        .downcast::<gtk::SingleSelection>()
+        .downcast::<gtk::MultiSelection>()
         .unwrap();
-    model.set_selected(0);
+    model.select_item(0, true);
     assert_eq!(
         view.tab_state().borrow().selection_keys,
         ["file:///test/selected"]
@@ -277,9 +584,9 @@ fn slice2_navigation_commits_after_success_and_refresh_restores_selection() {
     let model = column
         .model()
         .unwrap()
-        .downcast::<gtk::SingleSelection>()
+        .downcast::<gtk::MultiSelection>()
         .unwrap();
-    assert_eq!(model.selected(), 0);
+    assert!(model.is_selected(0));
     view.set_uri("smb://host/missing".into());
     assert_eq!(view.current_location(), root);
     provider.advance(1);

@@ -10,31 +10,7 @@ pub enum ContextTarget {
     SidebarLocation(Location),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ContextCommand {
-    Open,
-    OpenWith,
-    OpenInNewTab,
-    OpenInNewWindow,
-    OpenInTerminal,
-    NewFolder,
-    Cut,
-    Copy,
-    CopyFilename,
-    CopyFullPath,
-    CopyTo,
-    MoveTo,
-    Paste,
-    Rename,
-    MoveToTrash,
-    DeletePermanently,
-    Properties,
-    Refresh,
-    CloseTab,
-    CloseOtherTabs,
-    DuplicateTab,
-    ToggleQuickAccess,
-}
+pub use crate::application::commands::ContextCommand;
 
 /// One application-level answer for every command entry point.  Capability
 /// absence is deliberately treated as unavailable: UI metadata can be
@@ -55,25 +31,36 @@ pub struct CommandAvailability {
 
 impl CommandAvailability {
     pub fn for_selection(selection: &[FileItem], destination: Option<&Location>) -> Self {
+        let destination = destination.filter(|l| l.local_path().is_some()).map(|_| {
+            crate::core::contracts::CapabilitySnapshot {
+                supported: [Capability::Create].into_iter().collect(),
+                ..Default::default()
+            }
+        });
+        Self::for_capabilities(selection, destination.as_ref())
+    }
+
+    pub fn for_capabilities(
+        selection: &[FileItem],
+        destination: Option<&crate::core::contracts::CapabilitySnapshot>,
+    ) -> Self {
         let supports_all = |capability| {
             !selection.is_empty()
                 && selection
                     .iter()
                     .all(|item| item.capabilities().supports(capability))
         };
-        let can_paste = destination.is_some_and(|location| location.uri().starts_with("file:"));
+        let can_paste = destination.is_some_and(|snapshot| snapshot.supports(Capability::Create));
         let can_open = supports_all(Capability::Open);
         let can_use_local_adapter = selection.len() == 1 && selection[0].local_path().is_some();
-        // The compatibility operation manager still has a local execution
-        // adapter. A provider advertising a URI capability is not enough to
-        // enable an action that would otherwise be silently dropped.
-        let can_copy = can_use_local_adapter && supports_all(Capability::Copy);
-        let can_cut = can_use_local_adapter && supports_all(Capability::Move);
-        let can_rename =
-            can_use_local_adapter && selection.len() == 1 && supports_all(Capability::Rename);
+        // URI operations share the same executor. Unknown or absent provider
+        // capabilities remain unavailable for the whole selection.
+        let can_copy = supports_all(Capability::Copy);
+        let can_cut = supports_all(Capability::Move);
+        let can_rename = selection.len() == 1 && supports_all(Capability::Rename);
         let can_open_terminal = can_use_local_adapter && selection[0].is_dir() && can_open;
-        let can_trash = can_use_local_adapter && supports_all(Capability::Trash);
-        let can_delete = can_use_local_adapter && supports_all(Capability::Delete);
+        let can_trash = supports_all(Capability::Trash);
+        let can_delete = supports_all(Capability::Delete);
         let disabled_reason = if !can_trash && !selection.is_empty() {
             Some("This location does not support Trash")
         } else if !can_delete && !selection.is_empty() {
@@ -102,7 +89,7 @@ impl CommandAvailability {
             ContextCommand::Open | ContextCommand::OpenWith => self.can_open,
             ContextCommand::OpenInNewTab
             | ContextCommand::OpenInNewWindow
-            | ContextCommand::Properties => self.can_open && self.can_use_local_adapter,
+            | ContextCommand::Properties => self.can_open,
             ContextCommand::OpenInTerminal => self.can_open_terminal,
             ContextCommand::Cut | ContextCommand::MoveTo => self.can_cut,
             ContextCommand::Copy

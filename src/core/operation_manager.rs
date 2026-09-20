@@ -191,6 +191,33 @@ impl OperationManager {
         self.submit_inner(kind, sources, destination, None, false, None)
     }
 
+    /// URI entry point used by every interactive workflow. The coordinator
+    /// rechecks provider capabilities immediately before dispatch.
+    pub fn submit_locations(
+        &self,
+        kind: MutationKind,
+        sources: Vec<Location>,
+        destination: Option<Location>,
+        explicit_target: Option<Location>,
+        decision: Option<ConflictDecision>,
+        confirmed_delete: bool,
+    ) -> u64 {
+        self.enqueue(Submission {
+            request: OperationRequest {
+                id: OperationId(self.next_id.fetch_add(1, Ordering::Relaxed) + 1),
+                kind,
+                sources,
+                destination,
+                explicit_target,
+                capability_version: 1,
+                cancellable: gio::Cancellable::new(),
+            },
+            confirmed_delete,
+            decision,
+            retry_of: None,
+        })
+    }
+
     pub fn submit_to_target(&self, kind: OperationKind, source: PathBuf, target: PathBuf) -> u64 {
         self.submit_inner(
             kind,
@@ -303,7 +330,7 @@ impl OperationManager {
             std::thread::spawn(move || {
                 let context = glib::MainContext::new();
                 let _guard = context.acquire().unwrap();
-                let adapter = Rc::new(GioOperations::new(context.clone()));
+                let adapter = Rc::new(GioOperations::new_uri(context.clone()));
                 let coordinator = OperationCoordinator::new(adapter.clone());
                 loop {
                     match receive.recv_timeout(std::time::Duration::from_millis(2)) {

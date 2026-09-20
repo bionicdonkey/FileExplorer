@@ -1,5 +1,6 @@
 pub mod core;
 pub mod application {
+    pub mod commands;
     pub mod navigation;
     pub mod operations;
     pub mod search;
