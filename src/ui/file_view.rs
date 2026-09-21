@@ -12,7 +12,7 @@ use gtk::{
 };
 
 use crate::application::commands::{
-    ApplicationCommand, ClipboardAction, ClipboardPayload, DragProposal,
+    ApplicationCommand, ClipboardAction, ClipboardPayload, DragProposal, TransferCompletion,
 };
 use crate::application::navigation::NavigationCoordinator;
 use crate::core::directory_model::sort_items;
@@ -166,32 +166,13 @@ impl FileView {
             }
         });
         view.widget.add_controller(background);
-        let drop = gtk::DropTarget::new(
-            gtk::gdk::FileList::static_type(),
-            gtk::gdk::DragAction::COPY | gtk::gdk::DragAction::MOVE,
-        );
         let drop_view = view.clone();
-        drop.connect_drop(move |target, value, _, _| {
-            let Ok(files) = value.get::<gtk::gdk::FileList>() else {
-                return false;
-            };
-            let text: String = files
-                .files()
-                .iter()
-                .map(|file| format!("{}\r\n", file.uri()))
-                .collect();
-            let action = if target
-                .current_drop()
-                .and_then(|d| d.drag())
-                .is_some_and(|d| d.selected_action() == gtk::gdk::DragAction::MOVE)
-            {
-                ClipboardAction::Cut
-            } else {
-                ClipboardAction::Copy
-            };
-            drop_view.dispatch_drop(&text, action)
+        attach_async_drop(&view.widget, view.clone(), move || {
+            drop_view
+                .command_availability()
+                .can_paste
+                .then(|| drop_view.current_location())
         });
-        view.widget.add_controller(drop);
         view.refresh();
         view
     }
@@ -420,15 +401,28 @@ impl FileView {
         if !self.command_availability().can_paste {
             return false;
         }
+        self.dispatch_transfer(text, action, self.current_location(), false, None)
+    }
+
+    fn dispatch_transfer(
+        &self,
+        text: &str,
+        action: ClipboardAction,
+        destination: Location,
+        source_deletes_on_success: bool,
+        completion: Option<TransferCompletion>,
+    ) -> bool {
         let Ok(payload) = ClipboardPayload::parse(action, text) else {
             return false;
         };
-        let command = DragProposal {
+        let mut command = DragProposal {
             sources: payload.locations,
-            destination: self.current_location(),
+            destination,
             action,
         }
         .command();
+        command.completion = completion;
+        command.source_deletes_on_success = source_deletes_on_success;
         if let Some(callback) = self.on_application_command.borrow().as_ref() {
             callback(command);
             true
@@ -2211,32 +2205,148 @@ fn attach_folder_drop(
     view: FileView,
     item: impl Fn() -> Option<FileItem> + 'static,
 ) {
-    let target = gtk::DropTarget::new(
-        gtk::gdk::FileList::static_type(),
-        gtk::gdk::DragAction::COPY | gtk::gdk::DragAction::MOVE,
+    let target_view = view.clone();
+    attach_async_drop(widget, view, move || {
+        let folder = item()?;
+        (target_view
+            .navigation
+            .state
+            .borrow()
+            .has_available_directory()
+            && folder.is_dir()
+            && folder
+                .capabilities()
+                .supports(crate::core::contracts::Capability::Create))
+        .then(|| folder.location().clone())
+    });
+}
+
+fn drop_action(
+    actions: gtk::gdk::DragAction,
+    modifiers: gtk::gdk::ModifierType,
+) -> gtk::gdk::DragAction {
+    use gtk::gdk::{DragAction as A, ModifierType as M};
+    if modifiers.contains(M::SHIFT_MASK) && actions.contains(A::MOVE) {
+        A::MOVE
+    } else if actions.contains(A::COPY) {
+        A::COPY
+    } else if actions.contains(A::MOVE) {
+        A::MOVE
+    } else {
+        A::empty()
+    }
+}
+
+fn attach_async_drop(
+    widget: &impl IsA<gtk::Widget>,
+    view: FileView,
+    destination: impl Fn() -> Option<Location> + 'static,
+) {
+    use gtk::gdk::{ContentFormats, DragAction};
+    let target = gtk::DropTargetAsync::new(
+        Some(ContentFormats::new(&["text/uri-list"])),
+        DragAction::COPY | DragAction::MOVE,
     );
-    target.connect_drop(move |target, value, _, _| {
-        let Some(folder) = item() else {
-            return false;
-        };
-        let Ok(files) = value.get::<gtk::gdk::FileList>() else {
-            return false;
-        };
-        let text: String = files
-            .files()
-            .iter()
-            .map(|f| format!("{}\r\n", f.uri()))
-            .collect();
-        let action = if target
-            .current_drop()
-            .and_then(|d| d.drag())
-            .is_some_and(|d| d.selected_action() == gtk::gdk::DragAction::MOVE)
+    let destination = Rc::new(destination);
+    let negotiated = Rc::new(RefCell::new(None::<(gtk::gdk::Drop, DragAction)>));
+    let leaving = negotiated.clone();
+    target.connect_drag_leave(move |_, drop| {
+        if leaving
+            .borrow()
+            .as_ref()
+            .is_some_and(|(previous, _)| previous == drop)
         {
-            ClipboardAction::Cut
+            leaving.borrow_mut().take();
+        }
+    });
+    for enter in [true, false] {
+        let destination = destination.clone();
+        let negotiated = negotiated.clone();
+        let negotiate =
+            move |target: &gtk::DropTargetAsync, drop: &gtk::gdk::Drop, _: f64, _: f64| {
+                let action = if destination().is_some() {
+                    drop_action(drop.actions(), target.current_event_state())
+                } else {
+                    DragAction::empty()
+                };
+                *negotiated.borrow_mut() = Some((drop.clone(), action));
+                action
+            };
+        if enter {
+            target.connect_drag_enter(negotiate);
         } else {
-            ClipboardAction::Copy
+            target.connect_drag_motion(negotiate);
+        }
+    }
+    target.connect_drop(move |_, drop, _, _| {
+        let Some(destination) = destination() else {
+            return false;
         };
-        view.dispatch_drop_on(&folder, &text, action)
+        let action = negotiated
+            .borrow()
+            .as_ref()
+            .filter(|(previous, _)| previous == drop)
+            .map(|(_, action)| *action)
+            .unwrap_or_else(|| drop_action(drop.actions(), gtk::gdk::ModifierType::empty()));
+        if action.is_empty() || !drop.actions().contains(action) {
+            return false;
+        }
+        let source_deletes = action == DragAction::MOVE && drop.drag().is_none();
+        let drop = drop.clone();
+        let finish = drop.clone();
+        let completion = TransferCompletion::new(move |success| {
+            // Older GTK X11 sources emit dnd-finished even for a failed drop,
+            // deriving delete_data from the last selected action. Withdraw
+            // MOVE before rejecting so they cannot delete untransferred data.
+            if !success {
+                finish.status(DragAction::empty(), DragAction::empty());
+            }
+            finish.finish(if success { action } else { DragAction::empty() });
+        });
+        let view = view.clone();
+        glib::MainContext::default().spawn_local(async move {
+            // Read the wire format, including cross-process sources that have no
+            // GdkDrag object. URI validation and size limits precede dispatch.
+            let Ok((stream, _)) = drop
+                .read_future(&["text/uri-list"], glib::Priority::DEFAULT)
+                .await
+            else {
+                return;
+            };
+            let mut bytes = Vec::new();
+            loop {
+                let Ok(chunk) = stream
+                    .read_bytes_future(8192, glib::Priority::DEFAULT)
+                    .await
+                else {
+                    return;
+                };
+                if chunk.is_empty() {
+                    break;
+                }
+                bytes.extend_from_slice(chunk.as_ref());
+                if bytes.len() > 1024 * 1024 {
+                    return;
+                }
+            }
+            let Ok(text) = std::str::from_utf8(&bytes) else {
+                return;
+            };
+            view.dispatch_transfer(
+                text,
+                if action == DragAction::MOVE {
+                    ClipboardAction::Cut
+                } else {
+                    ClipboardAction::Copy
+                },
+                destination,
+                source_deletes,
+                Some(completion),
+            );
+        });
+        // Acceptance of responsibility is not completion; only the callback
+        // above acknowledges GTK after the whole coordinator batch terminates.
+        true
     });
     widget.add_controller(target);
 }

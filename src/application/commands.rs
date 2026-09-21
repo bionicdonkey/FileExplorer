@@ -164,6 +164,43 @@ impl ClipboardState {
     }
 }
 
+/// A one-shot terminal acknowledgement, shared across retries and conflict UI.
+/// Losing the command without executing it rejects the transfer safely.
+#[derive(Clone)]
+pub struct TransferCompletion(std::rc::Rc<CompletionInner>);
+struct CompletionInner(std::cell::RefCell<Option<Box<dyn FnOnce(bool)>>>);
+impl Drop for CompletionInner {
+    fn drop(&mut self) {
+        if let Some(done) = self.0.get_mut().take() {
+            done(false);
+        }
+    }
+}
+impl TransferCompletion {
+    pub fn new(done: impl FnOnce(bool) + 'static) -> Self {
+        Self(std::rc::Rc::new(CompletionInner(std::cell::RefCell::new(
+            Some(Box::new(done)),
+        ))))
+    }
+    pub fn complete(&self, success: bool) {
+        let done = self.0 .0.borrow_mut().take();
+        if let Some(done) = done {
+            done(success);
+        }
+    }
+}
+impl std::fmt::Debug for TransferCompletion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TransferCompletion")
+    }
+}
+impl PartialEq for TransferCompletion {
+    fn eq(&self, other: &Self) -> bool {
+        std::rc::Rc::ptr_eq(&self.0, &other.0)
+    }
+}
+impl Eq for TransferCompletion {}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ApplicationCommand {
     pub kind: ContextCommand,
@@ -171,6 +208,10 @@ pub struct ApplicationCommand {
     pub destination: Location,
     pub transfer: Option<ClipboardAction>,
     pub application: Option<gio::AppInfo>,
+    pub completion: Option<TransferCompletion>,
+    /// External MOVE protocols ask the source to delete only after we copy
+    /// every item successfully and acknowledge the negotiated move.
+    pub source_deletes_on_success: bool,
 }
 impl ApplicationCommand {
     pub fn route(kind: ContextCommand, selection: Vec<Location>, destination: Location) -> Self {
@@ -184,6 +225,8 @@ impl ApplicationCommand {
             destination,
             transfer: None,
             application: None,
+            completion: None,
+            source_deletes_on_success: false,
         }
     }
 }

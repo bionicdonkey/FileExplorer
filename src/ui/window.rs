@@ -10,7 +10,7 @@ use gtk::{
 };
 
 use crate::application::commands::{
-    route, ClipboardAction, ClipboardPayload, ClipboardState, Shortcut,
+    route, ClipboardAction, ClipboardPayload, ClipboardState, Shortcut, TransferCompletion,
 };
 use crate::core::contracts::{ConflictDecision, MutationKind};
 use crate::core::location::Location;
@@ -40,6 +40,60 @@ struct TabData {
 struct FileClipboard {
     state: ClipboardState,
     source_view: FileView,
+    provider: gtk::gdk::ContentProvider,
+}
+
+thread_local! {
+    // Windows on the same display share the cut lease, including its source
+    // highlight. The registry itself does not keep a clipboard owner alive.
+    static FILE_CLIPBOARDS: RefCell<Vec<(gtk::gdk::Clipboard, std::rc::Weak<RefCell<Option<FileClipboard>>>)>> = RefCell::new(Vec::new());
+}
+
+fn application_clipboard(system: &gtk::gdk::Clipboard) -> Rc<RefCell<Option<FileClipboard>>> {
+    FILE_CLIPBOARDS.with(|owners| {
+        let mut owners = owners.borrow_mut();
+        owners.retain(|(_, owner)| owner.strong_count() > 0);
+        if let Some(owner) = owners
+            .iter()
+            .find_map(|(clipboard, owner)| (clipboard == system).then(|| owner.upgrade()).flatten())
+        {
+            return owner;
+        }
+        let owner = Rc::new(RefCell::new(None));
+        watch_clipboard(system, &owner);
+        owners.push((system.clone(), Rc::downgrade(&owner)));
+        owner
+    })
+}
+
+fn clipboard_payload(
+    owner: &Rc<RefCell<Option<FileClipboard>>>,
+    system: &gtk::gdk::Clipboard,
+) -> Option<ClipboardPayload> {
+    let mut state = owner.borrow_mut();
+    if state
+        .as_ref()
+        .is_some_and(|c| system.content().as_ref() != Some(&c.provider))
+    {
+        if let Some(previous) = state.take() {
+            previous.source_view.set_pending_cut_locations(vec![]);
+        }
+    }
+    state.as_ref().and_then(|c| c.state.payload().cloned())
+}
+
+fn watch_clipboard(system: &gtk::gdk::Clipboard, owner: &Rc<RefCell<Option<FileClipboard>>>) {
+    let owner = Rc::downgrade(owner);
+    system.connect_changed(move |system| {
+        let system = system.clone();
+        let owner = owner.clone();
+        // set_content emits synchronously, before the new lease is installed.
+        glib::idle_add_local_once(move || {
+            if let Some(owner) = owner.upgrade() {
+                clipboard_payload(&owner, &system);
+            }
+        });
+    });
 }
 
 #[derive(Clone)]
@@ -148,24 +202,8 @@ impl ExplorerWindow {
             ViewPreferencesStore::load_default()
                 .unwrap_or_else(|_| ViewPreferencesStore::in_memory()),
         ));
-        let clipboard: Rc<RefCell<Option<FileClipboard>>> = Rc::new(RefCell::new(None));
-        let clipboard_changed = clipboard.clone();
-        gtk::prelude::WidgetExt::display(&window)
-            .clipboard()
-            .connect_changed(move |system| {
-                if !system.is_local()
-                    || !system
-                        .formats()
-                        .contains_type(gtk::gdk::FileList::static_type())
-                {
-                    let state = clipboard_changed.clone();
-                    glib::idle_add_local_once(move || {
-                        if let Some(previous) = state.borrow_mut().take() {
-                            previous.source_view.set_pending_cut_locations(vec![]);
-                        }
-                    });
-                }
-            });
+        let clipboard =
+            application_clipboard(&gtk::prelude::WidgetExt::display(&window).clipboard());
         for path in startup_paths {
             let location = Rc::new(RefCell::new(path.clone()));
             let view = FileView::from_location(path.clone());
@@ -896,10 +934,10 @@ fn wire_tab(
             .selected_target()
             .unwrap_or_else(|| ContextTarget::Background(intent.destination.clone()));
         let path = target_path(&target);
-        let clipboard_payload = command_clipboard
-            .borrow()
-            .as_ref()
-            .and_then(|c| c.state.payload().cloned());
+        let clipboard_payload = clipboard_payload(
+            &command_clipboard,
+            &command_view.widget.display().clipboard(),
+        );
         match command {
             ContextCommand::OpenWith => {
                 if let Some(application) = intent.application {
@@ -1006,6 +1044,7 @@ fn wire_tab(
                     *command_clipboard.borrow_mut() = Some(FileClipboard {
                         state,
                         source_view: command_view.clone(),
+                        provider,
                     });
                 }
             }
@@ -1044,15 +1083,20 @@ fn wire_tab(
             }
             ContextCommand::Paste => {
                 if let Some(action) = intent.transfer {
-                    start_uri_transfer(
+                    start_uri_transfer_with_completion(
                         &command_view,
                         ClipboardPayload {
-                            action,
+                            action: if intent.source_deletes_on_success {
+                                ClipboardAction::Copy
+                            } else {
+                                action
+                            },
                             locations: intent.selection,
                         },
                         intent.destination,
                         command_operations.clone(),
                         None,
+                        intent.completion,
                     );
                 } else if let Some(payload) = clipboard_payload {
                     start_uri_transfer(
@@ -1612,6 +1656,31 @@ fn start_uri_transfer(
     operations: OperationManager,
     clipboard: Option<Rc<RefCell<Option<FileClipboard>>>>,
 ) {
+    start_uri_transfer_with_completion(view, payload, destination, operations, clipboard, None);
+}
+
+#[derive(Clone, Default)]
+struct TransferBatch {
+    completion: Option<TransferCompletion>,
+    failed: Rc<std::cell::Cell<bool>>,
+    conflict_default: ConflictDefault,
+}
+impl TransferBatch {
+    fn finish(&self) {
+        if let Some(done) = &self.completion {
+            done.complete(!self.failed.get());
+        }
+    }
+}
+
+fn start_uri_transfer_with_completion(
+    view: &FileView,
+    payload: ClipboardPayload,
+    destination: Location,
+    operations: OperationManager,
+    clipboard: Option<Rc<RefCell<Option<FileClipboard>>>>,
+    completion: Option<TransferCompletion>,
+) {
     let clipboard = clipboard.and_then(|owner| {
         let generation = owner.borrow().as_ref().map(|c| c.state.generation())?;
         Some(ClipboardLease { owner, generation })
@@ -1624,6 +1693,13 @@ fn start_uri_transfer(
         clipboard,
         0,
         None,
+        TransferBatch {
+            completion,
+            conflict_default: ApplicationPreferences::load_default()
+                .unwrap_or_default()
+                .conflict_default,
+            ..Default::default()
+        },
     );
 }
 
@@ -1635,9 +1711,12 @@ fn transfer_next(
     clipboard: Option<ClipboardLease>,
     index: usize,
     decision: Option<ConflictDecision>,
+    batch: TransferBatch,
 ) {
     let Some(source) = payload.locations.get(index).cloned() else {
         view.refresh();
+        batch.failed.set(true);
+        batch.finish();
         return;
     };
     let kind = if payload.action == ClipboardAction::Cut {
@@ -1666,7 +1745,12 @@ fn transfer_next(
     }
     glib::timeout_add_local(std::time::Duration::from_millis(40), move || {
         let Some(record) = operations.records().into_iter().find(|r| r.id == id) else {
-            return glib::ControlFlow::Continue;
+            // History can be cleared between completion and this projection.
+            // With no terminal evidence, never acknowledge an external MOVE.
+            batch.failed.set(true);
+            batch.finish();
+            finish_cut(&clipboard, id, &view);
+            return glib::ControlFlow::Break;
         };
         if matches!(
             record.state,
@@ -1688,11 +1772,20 @@ fn transfer_next(
                 operations.clone(),
                 clipboard.clone(),
                 index,
+                batch.clone(),
             );
             return glib::ControlFlow::Break;
         }
         if let crate::core::OperationState::Failed(error) = &record.state {
             show_operation_error(&view, error);
+        }
+        if record.state != crate::core::OperationState::Completed
+            || decision == Some(ConflictDecision::Skip)
+            || !operations
+                .summary(id)
+                .is_some_and(|s| !s.completed.is_empty() && s.remaining.is_empty())
+        {
+            batch.failed.set(true);
         }
         if record.state == crate::core::OperationState::Cancelled
             && decision != Some(ConflictDecision::CancelRemaining)
@@ -1706,6 +1799,7 @@ fn transfer_next(
                 clipboard.clone(),
                 index + 1,
                 Some(ConflictDecision::CancelRemaining),
+                batch.clone(),
             );
             return glib::ControlFlow::Break;
         }
@@ -1713,6 +1807,7 @@ fn transfer_next(
             || matches!(record.state, crate::core::OperationState::Cancelled);
         if last {
             finish_cut(&clipboard, id, &view);
+            batch.finish();
         } else {
             transfer_next(
                 view.clone(),
@@ -1722,6 +1817,7 @@ fn transfer_next(
                 clipboard.clone(),
                 index + 1,
                 None,
+                batch.clone(),
             );
         }
         view.refresh();
@@ -1741,7 +1837,7 @@ fn finish_cut(clipboard: &Option<ClipboardLease>, id: u64, view: &FileView) {
             if current.state.payload().is_none() {
                 current.source_view.set_pending_cut_locations(vec![]);
                 current.source_view.refresh();
-                if view.widget.display().clipboard().is_local() {
+                if view.widget.display().clipboard().content().as_ref() == Some(&current.provider) {
                     let _ = view
                         .widget
                         .display()
@@ -1762,11 +1858,9 @@ fn show_transfer_conflict(
     operations: OperationManager,
     clipboard: Option<ClipboardLease>,
     index: usize,
+    batch: TransferBatch,
 ) {
-    let preference = ApplicationPreferences::load_default()
-        .unwrap_or_default()
-        .conflict_default;
-    let choice = match preference {
+    let choice = match batch.conflict_default {
         ConflictDefault::Replace => Some(ConflictDecision::Replace),
         ConflictDefault::KeepBoth => Some(ConflictDecision::KeepBoth),
         ConflictDefault::Skip => Some(ConflictDecision::Skip),
@@ -1781,6 +1875,7 @@ fn show_transfer_conflict(
             clipboard,
             index,
             Some(choice),
+            batch,
         );
         return;
     }
@@ -1814,6 +1909,7 @@ fn show_transfer_conflict(
             clipboard.clone(),
             index,
             Some(decision),
+            batch.clone(),
         );
     });
     dialog.present();
@@ -2340,8 +2436,233 @@ fn persist_options(store: &mut ViewPreferencesStore, path: &Path, options: ViewO
     let _ = store.save();
 }
 
+#[cfg(all(test, target_os = "linux"))]
+#[path = "dnd_tests.rs"]
+mod dnd_tests;
+
 #[cfg(test)]
 mod tests {
+    #[gtk::test]
+    fn slice3_windows_share_cut_lease_and_paste_the_new_owner() {
+        use super::*;
+        let fixture = tempfile::tempdir().unwrap();
+        let views = [
+            FileView::new(Location::from_local_path(fixture.path())),
+            FileView::new(Location::from_local_path(fixture.path())),
+        ];
+        let windows = [gtk::Window::new(), gtk::Window::new()];
+        for i in 0..2 {
+            windows[i].set_child(Some(&views[i].widget));
+        }
+        let system = views[0].widget.display().clipboard();
+        let first = application_clipboard(&system);
+        let second = application_clipboard(&views[1].widget.display().clipboard());
+        assert!(Rc::ptr_eq(&first, &second));
+        let publish = |owner: &Rc<RefCell<Option<FileClipboard>>>, view: &FileView, name: &str| {
+            let payload = ClipboardPayload {
+                action: ClipboardAction::Cut,
+                locations: vec![Location::from_local_path(&fixture.path().join(name))],
+            };
+            let provider = gtk::gdk::ContentProvider::for_bytes(
+                "text/uri-list",
+                &glib::Bytes::from_owned(payload.uri_list().into_bytes()),
+            );
+            system.set_content(Some(&provider)).unwrap();
+            let mut state = ClipboardState::default();
+            state.replace(payload.clone());
+            state.begin_paste(42);
+            let generation = state.generation();
+            *owner.borrow_mut() = Some(FileClipboard {
+                state,
+                source_view: view.clone(),
+                provider,
+            });
+            (
+                payload,
+                Some(ClipboardLease {
+                    owner: owner.clone(),
+                    generation,
+                }),
+            )
+        };
+        let (_, old_cut) = publish(&first, &views[0], "A");
+        let (b, new_cut) = publish(&second, &views[1], "B");
+        assert_eq!(clipboard_payload(&first, &system), Some(b.clone()));
+        finish_cut(&old_cut, 42, &views[0]);
+        assert_eq!(clipboard_payload(&second, &system), Some(b));
+        finish_cut(&new_cut, 42, &views[0]);
+        assert!(second.borrow().is_none());
+        assert!(system.content().is_none());
+        for window in windows {
+            window.close();
+        }
+        for view in views {
+            view.close();
+        }
+    }
+
+    #[gtk::test]
+    fn slice3_two_windows_follow_system_provider_and_old_cut_cannot_clear_replacement() {
+        use super::*;
+        // Previous tests relinquish the X11 selection asynchronously. Drain
+        // their SelectionClear before claiming a new owner in this fixture.
+        gtk::gdk::Display::default().unwrap().sync();
+        while glib::MainContext::default().pending() {
+            glib::MainContext::default().iteration(false);
+        }
+        let fixture = tempfile::tempdir().unwrap();
+        let first = FileView::new(Location::from_local_path(fixture.path()));
+        let second = FileView::new(Location::from_local_path(fixture.path()));
+        let windows = [gtk::Window::new(), gtk::Window::new()];
+        windows[0].set_child(Some(&first.widget));
+        windows[1].set_child(Some(&second.widget));
+        let system = first.widget.display().clipboard();
+        let publish = |view: &FileView, name: &str, action| {
+            let payload = ClipboardPayload {
+                action,
+                locations: vec![Location::from_local_path(&fixture.path().join(name))],
+            };
+            let provider = gtk::gdk::ContentProvider::new_union(&[
+                gtk::gdk::ContentProvider::for_value(
+                    &gtk::gdk::FileList::from_array(&[gio::File::for_uri(
+                        payload.locations[0].uri(),
+                    )])
+                    .to_value(),
+                ),
+                gtk::gdk::ContentProvider::for_bytes(
+                    "text/uri-list",
+                    &glib::Bytes::from_owned(payload.uri_list().into_bytes()),
+                ),
+                gtk::gdk::ContentProvider::for_bytes(
+                    "x-special/gnome-copied-files",
+                    &glib::Bytes::from_owned(
+                        format!(
+                            "{}\n{}",
+                            if action == ClipboardAction::Cut {
+                                "cut"
+                            } else {
+                                "copy"
+                            },
+                            payload.uri_list()
+                        )
+                        .into_bytes(),
+                    ),
+                ),
+            ]);
+            system.set_content(Some(&provider)).unwrap();
+            let mut state = ClipboardState::default();
+            state.replace(payload.clone());
+            state.begin_paste(42);
+            let owner = Rc::new(RefCell::new(Some(FileClipboard {
+                state,
+                source_view: view.clone(),
+                provider,
+            })));
+            watch_clipboard(&system, &owner);
+            (owner, payload)
+        };
+        for finish_before_paste in [false, true] {
+            let (owner_a, _) = publish(&first, "A", ClipboardAction::Cut);
+            let lease = Some(ClipboardLease {
+                generation: owner_a.borrow().as_ref().unwrap().state.generation(),
+                owner: owner_a.clone(),
+            });
+            let (owner_b, b) = publish(&second, "B", ClipboardAction::Copy);
+            let replacement = system.content().unwrap();
+            if finish_before_paste {
+                finish_cut(&lease, 42, &first);
+            }
+            assert!(
+                clipboard_payload(&owner_a, &system).is_none(),
+                "window 1 must not paste its stale A cache"
+            );
+            let read = Rc::new(RefCell::new(None));
+            let output = read.clone();
+            read_uri_clipboard(system.clone(), move |value| {
+                *output.borrow_mut() = Some(value)
+            });
+            let end = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            while read.borrow().is_none() {
+                glib::MainContext::default().iteration(false);
+                assert!(std::time::Instant::now() < end, "clipboard read stalled: finish_first={finish_before_paste}, local={}, formats={:?}, owner_matches={}", system.is_local(), system.formats(), system.content().as_ref() == Some(&replacement));
+            }
+            assert_eq!(read.borrow_mut().take().unwrap(), Some(b.clone()));
+            finish_cut(&lease, 42, &first);
+            assert_eq!(system.content(), Some(replacement));
+            assert_eq!(clipboard_payload(&owner_b, &system), Some(b));
+        }
+        system
+            .set_content(None::<&gtk::gdk::ContentProvider>)
+            .unwrap();
+        for window in windows {
+            window.close();
+        }
+        first.close();
+        second.close();
+    }
+
+    #[gtk::test]
+    fn slice3_drop_acknowledgement_waits_for_every_terminal_item() {
+        use super::*;
+        for (decision, expected) in [
+            (None, true),
+            (Some(ConflictDecision::Skip), false),
+            (Some(ConflictDecision::CancelRemaining), false),
+        ] {
+            let fixture = tempfile::tempdir().unwrap();
+            let destination = fixture.path().join("destination");
+            std::fs::create_dir(&destination).unwrap();
+            let sources: Vec<_> = ["a", "b"]
+                .into_iter()
+                .map(|name| {
+                    let path = fixture.path().join(name);
+                    std::fs::write(&path, name).unwrap();
+                    Location::from_local_path(&path)
+                })
+                .collect();
+            let view = FileView::new(Location::from_local_path(&destination));
+            let manager = OperationManager::default();
+            let result = Rc::new(RefCell::new(None));
+            let output = result.clone();
+            transfer_next(
+                view.clone(),
+                ClipboardPayload {
+                    action: ClipboardAction::Copy,
+                    locations: sources.clone(),
+                },
+                Location::from_local_path(&destination),
+                manager.clone(),
+                None,
+                0,
+                decision,
+                TransferBatch {
+                    completion: Some(TransferCompletion::new(move |success| {
+                        *output.borrow_mut() = Some(success)
+                    })),
+                    ..Default::default()
+                },
+            );
+            assert!(
+                result.borrow().is_none(),
+                "enqueue is not an acknowledgement"
+            );
+            let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while result.borrow().is_none() {
+                glib::MainContext::default().iteration(false);
+                assert!(std::time::Instant::now() < end);
+            }
+            assert_eq!(*result.borrow(), Some(expected));
+            assert_eq!(manager.active_count(), 0);
+            for source in sources {
+                assert!(
+                    source.local_path().unwrap().exists(),
+                    "external MOVE source remains until protocol acknowledgement"
+                );
+            }
+            view.close();
+        }
+    }
+
     #[gtk::test]
     fn slice3_system_clipboard_round_trip_validates_uri_transport_and_cut_action() {
         use super::*;
@@ -2399,6 +2720,7 @@ mod tests {
             None,
             0,
             Some(ConflictDecision::CancelRemaining),
+            TransferBatch::default(),
         );
         let context = glib::MainContext::default();
         let end = std::time::Instant::now() + std::time::Duration::from_secs(3);
@@ -2443,6 +2765,7 @@ mod tests {
         let clipboard = Rc::new(RefCell::new(Some(FileClipboard {
             state,
             source_view: view.clone(),
+            provider: gtk::gdk::ContentProvider::for_value(&"fixture".to_value()),
         })));
         start_uri_transfer(
             &view,

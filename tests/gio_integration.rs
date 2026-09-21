@@ -445,6 +445,16 @@ fn directory_listing_returns_owned_uri_metadata_on_owner_context() {
         Location::from_local_path(&dir.path().join("data.txt"))
     );
     assert!(file.capabilities.supports(Capability::Copy));
+    // Exercise the active repository projection, not a hand-built FileInfo.
+    let item = zorin_explorer::core::FileItem::from_snapshot(file);
+    let availability = zorin_explorer::ui::context_menu::CommandAvailability::for_capabilities(
+        &[item],
+        Some(&snapshot.capabilities),
+    );
+    assert!(availability.can_cut);
+    assert!(availability.allows(zorin_explorer::application::commands::ContextCommand::MoveTo));
+    assert!(availability.allows(zorin_explorer::application::commands::ContextCommand::Rename));
+    assert!(snapshot.capabilities.supports(Capability::Rename));
     assert!(snapshot.capabilities.supports(Capability::List));
     assert!(!snapshot.capabilities.stable_order);
     assert!(snapshot.next_page.is_none());

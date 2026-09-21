@@ -113,7 +113,7 @@ fn enumerate(request: &DirectoryRequest) -> Result<DirectorySnapshot, OperationE
         |error: glib::Error| OperationError::from_gio(&error, Some(&request.location), None);
     let file = gio::File::for_uri(request.location.uri());
     let info = file.query_info(
-        "standard::type,access::can-read,access::can-write,access::can-trash,access::can-delete",
+        "standard::type,access::can-read,access::can-write,access::can-rename,access::can-trash,access::can-delete",
         gio::FileQueryInfoFlags::NONE, Some(&request.cancellable),
     ).map_err(map_error)?;
     if info.file_type() == gio::FileType::Mountable {
@@ -126,7 +126,7 @@ fn enumerate(request: &DirectoryRequest) -> Result<DirectorySnapshot, OperationE
     let mut capabilities = FileItem::from_gio(&file, &info).capabilities().clone();
     capabilities.stable_order = false;
     let enumerator = file.enumerate_children(
-        "standard::name,standard::display-name,standard::type,standard::content-type,standard::size,standard::target-uri,time::modified,access::can-read,access::can-write,access::can-trash,access::can-delete",
+        "standard::name,standard::display-name,standard::type,standard::content-type,standard::size,standard::target-uri,time::modified,access::can-read,access::can-write,access::can-rename,access::can-trash,access::can-delete",
         gio::FileQueryInfoFlags::NONE, Some(&request.cancellable),
     ).map_err(map_error)?;
     let result = (|| {
