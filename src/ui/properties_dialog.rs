@@ -14,6 +14,7 @@ impl PropertiesDialog {
         let dialog = gtk::Dialog::new();
         dialog.set_title(Some("Properties"));
         dialog.set_transient_for(parent);
+        dialog.set_modal(true);
         dialog.set_default_size(520, 380);
         dialog.add_button("Close", gtk::ResponseType::Close);
         let content = dialog.content_area();
@@ -23,6 +24,8 @@ impl PropertiesDialog {
         content.set_margin_start(16);
         content.set_margin_end(16);
         let status = gtk::Label::new(Some("Loading properties…"));
+        let announcements = crate::ui::accessibility::AccessibleStatus::new();
+        content.append(&announcements.widget);
         status.set_wrap(true);
         status.set_selectable(true);
         content.append(&status);
@@ -46,11 +49,18 @@ impl PropertiesDialog {
             let value = gtk::Label::new(Some("Unavailable"));
             value.set_xalign(0.0);
             value.set_selectable(true);
+            value.set_wrap(true);
+            value.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+            value.set_max_width_chars(40);
+            value.update_relation(&[gtk::accessible::Relation::LabelledBy(&[label.upcast_ref()])]);
             grid.attach(&label, 0, row as i32, 1, 1);
             grid.attach(&value, 1, row as i32, 1, 1);
             values.push(value);
         }
-        content.append(&grid);
+        let scroll = gtk::ScrolledWindow::new();
+        scroll.set_vexpand(true);
+        scroll.set_child(Some(&grid));
+        content.append(&scroll);
         let cancel = gio::Cancellable::new();
         let cancel_close = cancel.clone();
         dialog.connect_response(move |dialog, _| {
@@ -68,9 +78,14 @@ impl PropertiesDialog {
             move |result| {
                 if weak.upgrade().is_none() || cancel_query.is_cancelled() { return; }
                 match result {
-                    Err(error) => status.set_text(&format!("Properties unavailable: {}", OperationError::from_gio(&error, Some(&location), None).message_key)),
+                    Err(error) => {
+                        let message = format!("Properties unavailable: {}", OperationError::from_gio(&error, Some(&location), None).message_key);
+                        status.set_text(&message);
+                        announcements.announce(&message, crate::ui::accessibility::StatusPriority::Urgent);
+                    },
                     Ok(info) => {
                         status.set_text("Properties");
+                        announcements.announce("Properties loaded", crate::ui::accessibility::StatusPriority::Polite);
                         for (index, attribute) in ["standard::display-name", "standard::content-type", "standard::size", "time::modified", "time::created", "owner::user", "owner::group", "unix::mode"].iter().enumerate() {
                             if !info.has_attribute(attribute) { continue; }
                             let text = match index {

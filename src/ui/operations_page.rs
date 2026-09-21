@@ -135,6 +135,7 @@ fn build_row(manager: &OperationManager, id: u64) -> RowWidgets {
     progress.set_show_text(true);
     container.append(&progress);
     let cancel = Button::with_label("Cancel");
+    crate::ui::accessibility::name_control(&cancel, "Cancel operation");
     cancel.set_halign(gtk::Align::End);
     let cancel_manager = manager.clone();
     cancel.connect_clicked(move |_| cancel_manager.cancel(id));
@@ -160,11 +161,18 @@ fn build_row(manager: &OperationManager, id: u64) -> RowWidgets {
 
 fn update_row(widgets: &RowWidgets, record: &OperationRecord, manager: &OperationManager) {
     let item = record
-        .sources
+        .source_uris
         .first()
-        .and_then(|path| path.file_name())
-        .and_then(|name| name.to_str())
-        .unwrap_or("item");
+        .and_then(|uri| crate::core::Location::from_uri(uri).ok())
+        .map(|location| location.display_name())
+        .or_else(|| {
+            record
+                .sources
+                .first()
+                .and_then(|path| path.file_name())
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "item".into());
     let action = match record.kind {
         OperationKind::Copy => "Copying",
         OperationKind::Move => "Moving",
@@ -212,6 +220,20 @@ fn update_row(widgets: &RowWidgets, record: &OperationRecord, manager: &Operatio
     widgets
         .cancel
         .set_sensitive(record.state != OperationState::CancelRequested);
+    widgets
+        .cancel
+        .update_property(&[gtk::accessible::Property::Description(&format!(
+            "{action} {item}. {}",
+            if record.state == OperationState::CancelRequested {
+                "Cancellation requested; waiting for the current item"
+            } else {
+                "Stop this operation; completed items are retained"
+            }
+        ))]);
+    widgets.progress.update_property(&[
+        gtk::accessible::Property::Label("Operation progress"),
+        gtk::accessible::Property::ValueText(&state_text),
+    ]);
     if active {
         let fraction = if record.total == 0 {
             0.0

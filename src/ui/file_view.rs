@@ -24,6 +24,7 @@ use crate::core::{
     SortDirection, SortField, ViewMode, ViewOptions,
 };
 use crate::infrastructure::gio_directory::GioDirectoryRepository;
+use crate::ui::accessibility::{AccessibleStatus, StatusPriority};
 use crate::ui::context_menu::{
     configure_command_button, delete_command, item_commands, open_with_apps, CommandAvailability,
     ContextCommand, ContextTarget,
@@ -125,6 +126,7 @@ impl FileView {
     ) -> Self {
         let scroll = ScrolledWindow::new();
         scroll.set_vexpand(true);
+        scroll.update_property(&[gtk::accessible::Property::Label("Files")]);
         let on_navigate = Rc::new(RefCell::new(None));
         let state = Rc::new(RefCell::new(TabState::new(current_location)));
         let view = Self {
@@ -166,6 +168,28 @@ impl FileView {
             }
         });
         view.widget.add_controller(background);
+        let keyboard_view = view.clone();
+        let keys = gtk::EventControllerKey::new();
+        keys.connect_key_pressed(move |_, key, _, modifiers| {
+            if !crate::ui::accessibility::context_menu_key(key, modifiers)
+                || keyboard_view.section_title().is_some()
+            {
+                return glib::Propagation::Proceed;
+            }
+            let target = keyboard_view
+                .selected_target()
+                .unwrap_or_else(|| ContextTarget::Background(keyboard_view.current_location()));
+            show_item_context_menu(
+                &keyboard_view.widget,
+                12.0,
+                12.0,
+                target,
+                &keyboard_view,
+                false,
+            );
+            glib::Propagation::Stop
+        });
+        view.widget.add_controller(keys);
         let drop_view = view.clone();
         attach_async_drop(&view.widget, view.clone(), move || {
             drop_view
@@ -266,6 +290,11 @@ impl FileView {
         let succeeded = matches!(state.status, NavigationStatus::Ready);
         drop(state);
         if succeeded {
+            AccessibleStatus::announce_for(
+                &self.widget,
+                &format!("Opened {}", location.display_name()),
+                StatusPriority::Polite,
+            );
             let state = self.navigation.state.borrow();
             let restored = state
                 .directory
@@ -296,6 +325,7 @@ impl FileView {
     fn show_error(&self) {
         let status = self.navigation.state.borrow().status.clone();
         if let NavigationStatus::Failed { error, .. } = status {
+            AccessibleStatus::announce_for(&self.widget, error.message_key, StatusPriority::Urgent);
             // Retain the successful listing and attach a non-modal retry message.
             let content = self.widget.child();
             self.widget.set_child(gtk::Widget::NONE);
@@ -638,6 +668,11 @@ impl FileView {
         self.widget.set_child(gtk::Widget::NONE);
         let layout = GtkBox::new(Orientation::Vertical, 8);
         let status = Label::new(Some(&outcome.status_text()));
+        AccessibleStatus::announce_for(
+            &self.widget,
+            &outcome.status_text(),
+            StatusPriority::Polite,
+        );
         status.set_wrap(true);
         status.set_xalign(0.0);
         layout.append(&status);
@@ -755,6 +790,22 @@ impl FileView {
 
     /// Repaints owned metadata; never enumerates or queries the filesystem.
     fn reload(&self) {
+        let owned_focus = self
+            .widget
+            .root()
+            .and_downcast::<gtk::Window>()
+            .and_then(|window| gtk::prelude::GtkWindowExt::focus(&window))
+            .is_some_and(|focused| {
+                focused == self.widget.clone().upcast::<gtk::Widget>()
+                    || focused.is_ancestor(&self.widget)
+            });
+        self.reload_content();
+        if owned_focus {
+            self.widget.child_focus(gtk::DirectionType::TabForward);
+        }
+    }
+
+    fn reload_content(&self) {
         let state = self.navigation.state.borrow().clone();
         let options = self.options();
         let mut items = match state.content {
@@ -762,6 +813,11 @@ impl FileView {
                 if !matches!(state.status, NavigationStatus::Loading(_)) =>
             {
                 let content = GtkBox::new(Orientation::Vertical, 12);
+                AccessibleStatus::announce_for(
+                    &self.widget,
+                    "This location is unavailable. Reconnect or close the tab.",
+                    StatusPriority::Urgent,
+                );
                 content.append(&Label::new(Some("This location is unavailable")));
                 content.append(&Label::new(Some(&location.display_name())));
                 let reconnect = Button::with_label("Reconnect");
@@ -1000,6 +1056,10 @@ impl FileView {
             availability_view.select_items(items);
         });
         let view = ColumnView::new(Some(selection.clone()));
+        view.update_property(&[
+            gtk::accessible::Property::Label("Files"),
+            gtk::accessible::Property::MultiSelectable(true),
+        ]);
         view.set_reorderable(true);
         view.set_show_row_separators(true);
         view.add_css_class(if options.view_mode == ViewMode::CompactList {
@@ -1107,6 +1167,10 @@ impl FileView {
         let selected_keys = self.navigation.state.borrow().selection_keys.clone();
         let layout = options.grid_size.grid_layout();
         let grid = FlowBox::new();
+        grid.update_property(&[
+            gtk::accessible::Property::Label("Files"),
+            gtk::accessible::Property::MultiSelectable(true),
+        ]);
         grid.set_selection_mode(gtk::SelectionMode::Multiple);
         grid.set_activate_on_single_click(false);
         grid.set_valign(gtk::Align::Start);
@@ -1177,6 +1241,14 @@ impl FileView {
             });
             tile.add_controller(gesture);
             grid.append(&tile);
+            if let Some(child) = tile.parent().and_downcast::<gtk::FlowBoxChild>() {
+                child.update_property(&[gtk::accessible::Property::Label(item.name())]);
+                if self.pending_cut.borrow().contains(item.location()) {
+                    child.update_property(&[gtk::accessible::Property::Description(
+                        "Cut; ready to move",
+                    )]);
+                }
+            }
             if selected_keys.iter().any(|key| key == item.identity_key()) {
                 if let Some(child) = tile.parent().and_downcast::<gtk::FlowBoxChild>() {
                     grid.select_child(&child);
@@ -1280,6 +1352,7 @@ fn show_item_context_menu(
 ) {
     let popover = Popover::new();
     popover.set_parent(parent);
+    crate::ui::accessibility::restore_popover_focus(&popover, parent);
     popover.set_autohide(true);
     popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
     let menu = GtkBox::new(Orientation::Vertical, 2);

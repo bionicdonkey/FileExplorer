@@ -1,6 +1,131 @@
 use std::rc::Rc;
 
 #[gtk::test]
+fn slice4_platform_layout_renders_large_text_narrow_rtl_and_high_contrast() {
+    use adw::prelude::AdwApplicationWindowExt;
+    use std::cell::RefCell;
+    use zorin_explorer::ui::header::HeaderControls;
+    adw::init().unwrap();
+    let provider = gtk::CssProvider::new();
+    let errors = Rc::new(RefCell::new(Vec::new()));
+    let output = errors.clone();
+    provider.connect_parsing_error(move |_, _, error| output.borrow_mut().push(error.to_string()));
+    provider.load_from_string(include_str!("../resources/style.css"));
+    assert!(
+        errors.borrow().is_empty(),
+        "CSS errors: {:?}",
+        errors.borrow()
+    );
+    let display = gtk::gdk::Display::default().unwrap();
+    gtk::style_context_add_provider_for_display(
+        &display,
+        &provider,
+        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
+    let settings = gtk::Settings::default().unwrap();
+    let old_font = settings.gtk_font_name();
+    let old_animations = settings.is_gtk_enable_animations();
+    let old_direction = gtk::Widget::default_direction();
+    let application = adw::Application::builder()
+        .application_id("io.github.explorer.AccessibilityFixture")
+        .build();
+    application.register(None::<&gio::Cancellable>).unwrap();
+    for (name, width, font, rtl, high_contrast, animations) in [
+        ("normal", 1000, "Sans 11", false, false, true),
+        ("narrow", 560, "Sans 11", false, false, true),
+        ("large-text", 560, "Sans 22", false, false, true),
+        ("rtl", 560, "Sans 22", true, false, true),
+        ("high-contrast", 560, "Sans 22", false, true, true),
+        ("reduced-motion", 560, "Sans 22", true, true, false),
+    ] {
+        settings.set_gtk_font_name(Some(font));
+        settings.set_gtk_enable_animations(animations);
+        gtk::Widget::set_default_direction(if rtl {
+            gtk::TextDirection::Rtl
+        } else {
+            gtk::TextDirection::Ltr
+        });
+        let window = adw::ApplicationWindow::new(&application);
+        window.set_default_size(width, 500);
+        window.set_direction(if rtl {
+            gtk::TextDirection::Rtl
+        } else {
+            gtk::TextDirection::Ltr
+        });
+        if high_contrast {
+            window.add_css_class("high-contrast");
+        }
+        let header = HeaderControls::new(Rc::new(RefCell::new(
+            Location::from_uri(
+                "smb://server/share/Long%20folder%20name/Another%20long%20folder/Final%20folder",
+            )
+            .unwrap(),
+        )));
+        let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        toolbar.append(&gtk::SearchEntry::new());
+        for label in ["Sort", "Group", "View"] {
+            let menu = gtk::Popover::new();
+            menu.set_child(Some(&gtk::Button::with_label("Fixture option")));
+            toolbar.append(
+                &gtk::MenuButton::builder()
+                    .label(label)
+                    .popover(&menu)
+                    .build(),
+            );
+        }
+        let body = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        body.append(&header.widget);
+        body.append(&toolbar);
+        let sidebar = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        sidebar.append(&gtk::Button::with_label("Network & online"));
+        body.append(&sidebar);
+        window.set_content(Some(&body));
+        window.present();
+        let context = glib::MainContext::default();
+        let end = std::time::Instant::now() + std::time::Duration::from_millis(150);
+        while std::time::Instant::now() < end {
+            context.iteration(false);
+        }
+        assert!(
+            window.width() <= width,
+            "{name}: content forced width {} beyond {width}",
+            window.width()
+        );
+        assert!(
+            body.measure(gtk::Orientation::Horizontal, -1).0 <= width,
+            "{name}: toolbar minimum {} would clip at {width}",
+            body.measure(gtk::Orientation::Horizontal, -1).0
+        );
+        assert!(header.widget.height() > 0);
+        assert_eq!(
+            header.widget.direction(),
+            if rtl {
+                gtk::TextDirection::Rtl
+            } else {
+                gtk::TextDirection::Ltr
+            }
+        );
+        let paintable = gtk::WidgetPaintable::new(Some(&window));
+        let snapshot = gtk::Snapshot::new();
+        paintable.snapshot(&snapshot, window.width() as f64, window.height() as f64);
+        let node = snapshot.to_node().expect("mapped fixture must render");
+        let texture = window.renderer().unwrap().render_texture(&node, None);
+        assert!(texture.width() > 0 && texture.height() > 0);
+        if let Ok(directory) = std::env::var("EXPLORER_A11Y_SNAPSHOT_DIR") {
+            std::fs::create_dir_all(&directory).unwrap();
+            texture
+                .save_to_png(std::path::Path::new(&directory).join(format!("{name}.png")))
+                .unwrap();
+        }
+        window.close();
+    }
+    settings.set_gtk_font_name(old_font.as_deref());
+    settings.set_gtk_enable_animations(old_animations);
+    gtk::Widget::set_default_direction(old_direction);
+    gtk::style_context_remove_provider_for_display(&display, &provider);
+}
+
+#[gtk::test]
 fn slice3_multiple_selection_routes_one_uri_command_and_drag_payload() {
     use std::cell::RefCell;
     use zorin_explorer::{

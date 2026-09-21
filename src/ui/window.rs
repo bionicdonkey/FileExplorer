@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+use crate::ui::accessibility::{name_control, AccessibleStatus, StatusPriority};
 use adw::prelude::*;
 use adw::{Application, ApplicationWindow, HeaderBar, TabPage, TabView, ToolbarView};
 use gtk::{
@@ -165,6 +166,14 @@ impl ExplorerWindow {
         let operations_button = Button::from_icon_name("view-list-symbolic");
         operations_button.add_css_class("flat");
         operations_button.set_tooltip_text(Some("File operations"));
+        for (button, name) in [
+            (&sidebar_button, "Show or hide sidebar"),
+            (&new_tab, "New tab (Ctrl+T)"),
+            (&preferences_button, "Preferences"),
+            (&operations_button, "File operations"),
+        ] {
+            name_control(button, name);
+        }
         let operations_tabs = tabs.view.clone();
         let operations_manager = operations.clone();
         operations_button.connect_clicked(move |_| {
@@ -336,8 +345,20 @@ impl ExplorerWindow {
                         gio::MountUnmountFlags::NONE,
                         Some(&operation),
                         Some(&cancellable),
-                        move |_| {
+                        move |result| {
                             let _keep_operation_alive = &keep_operation;
+                            match result {
+                                Ok(()) => AccessibleStatus::announce_for(
+                                    &operation_window,
+                                    "Location unmounted",
+                                    StatusPriority::Polite,
+                                ),
+                                Err(error) => AccessibleStatus::announce_for(
+                                    &operation_window,
+                                    &format!("Unmount failed: {error}"),
+                                    StatusPriority::Urgent,
+                                ),
+                            }
                             operation_window.disconnect(cancel_handler);
                             if let Some(sidebar) = sidebar.borrow().as_ref() {
                                 sidebar.refresh();
@@ -383,6 +404,8 @@ impl ExplorerWindow {
             .placeholder_text("Search this folder")
             .hexpand(true)
             .build();
+        name_control(&search, "Search this folder (Ctrl+F)");
+        let shortcut_search = search.clone();
         let status = Label::new(Some("Ready"));
         status.set_halign(Align::Start);
         status.add_css_class("dim-label");
@@ -437,14 +460,39 @@ impl ExplorerWindow {
         ));
         body.append(&content);
         body.append(&status);
+        let announcements = AccessibleStatus::new();
+        announcements.widget.set_margin_start(8);
+        announcements.widget.set_margin_end(8);
+        announcements.watch_operations(operations.clone());
+        body.append(&announcements.widget);
         let toolbar = ToolbarView::new();
         toolbar.add_top_bar(&header);
         toolbar.set_content(Some(&body));
         window.set_content(Some(&toolbar));
+        let style = adw::StyleManager::default();
+        if style.is_high_contrast() {
+            window.add_css_class("high-contrast");
+        }
+        let style_window = window.downgrade();
+        style.connect_high_contrast_notify(move |style| {
+            if let Some(window) = style_window.upgrade() {
+                if style.is_high_contrast() {
+                    window.add_css_class("high-contrast");
+                } else {
+                    window.remove_css_class("high-contrast");
+                }
+            }
+        });
 
         let collapsible_sidebar = sidebar.widget.clone();
-        sidebar_button.connect_clicked(move |_| {
+        sidebar_button.update_state(&[gtk::accessible::State::Expanded(Some(
+            sidebar.widget.is_visible(),
+        ))]);
+        sidebar_button.connect_clicked(move |button| {
             collapsible_sidebar.set_visible(!collapsible_sidebar.is_visible());
+            button.update_state(&[gtk::accessible::State::Expanded(Some(
+                collapsible_sidebar.is_visible(),
+            ))]);
         });
 
         let startup_pages = tabs_data
@@ -481,7 +529,91 @@ impl ExplorerWindow {
         let shortcut_preferences = preferences.clone();
         let shortcut_header = header_controls.clone();
         let shortcuts = gtk::EventControllerKey::new();
+        let shortcut_new_tab = new_tab.downgrade();
+        let shortcut_sidebar = sidebar.widget.clone();
+        let shortcut_window = window.downgrade();
+        let shortcut_navigation_sidebar = sidebar.clone();
         shortcuts.connect_key_pressed(move |_, key, _, modifiers| {
+            let navigation = if key == gtk::gdk::Key::F5 {
+                Some(NavigationAction::Refresh)
+            } else if modifiers.contains(gtk::gdk::ModifierType::ALT_MASK) {
+                match key {
+                    gtk::gdk::Key::Left => Some(NavigationAction::Back),
+                    gtk::gdk::Key::Right => Some(NavigationAction::Forward),
+                    gtk::gdk::Key::Up => Some(NavigationAction::Up),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            if let Some(action) = navigation {
+                if let Some(index) = selected_index(&shortcut_tabs, &shortcut_data) {
+                    handle_navigation_action(
+                        index,
+                        action,
+                        &shortcut_data,
+                        &shortcut_tabs,
+                        &shortcut_header,
+                        &shortcut_preferences,
+                        &shortcut_navigation_sidebar,
+                    );
+                }
+                return glib::Propagation::Stop;
+            }
+            if key == gtk::gdk::Key::F2 {
+                dispatch_active_file_command(
+                    ContextCommand::Rename,
+                    &shortcut_data,
+                    &shortcut_tabs,
+                );
+                return glib::Propagation::Stop;
+            }
+            let control = modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK);
+            if control {
+                match key.to_unicode().map(|c| c.to_ascii_lowercase()) {
+                    Some('f') => {
+                        shortcut_search.grab_focus();
+                        return glib::Propagation::Stop;
+                    }
+                    Some('t') => {
+                        if let Some(button) = shortcut_new_tab.upgrade() {
+                            button.emit_clicked();
+                        }
+                        return glib::Propagation::Stop;
+                    }
+                    Some('w') => {
+                        if let Some(page) = shortcut_tabs.selected_page() {
+                            shortcut_tabs.close_page(&page);
+                        }
+                        return glib::Propagation::Stop;
+                    }
+                    _ => {}
+                }
+                if key == gtk::gdk::Key::Page_Down {
+                    shortcut_tabs.select_next_page();
+                    return glib::Propagation::Stop;
+                }
+                if key == gtk::gdk::Key::Page_Up {
+                    shortcut_tabs.select_previous_page();
+                    return glib::Propagation::Stop;
+                }
+            }
+            if key == gtk::gdk::Key::F6 {
+                let focused = shortcut_window
+                    .upgrade()
+                    .and_then(|w| gtk::prelude::GtkWindowExt::focus(&w));
+                let in_sidebar = focused
+                    .as_ref()
+                    .is_some_and(|w| w.is_ancestor(&shortcut_sidebar));
+                if in_sidebar {
+                    shortcut_tabs.child_focus(gtk::DirectionType::TabForward);
+                } else if shortcut_sidebar.is_visible() {
+                    shortcut_sidebar.child_focus(gtk::DirectionType::TabForward);
+                } else {
+                    shortcut_header.focus_location();
+                }
+                return glib::Propagation::Stop;
+            }
             if key
                 .to_unicode()
                 .is_some_and(|key| key.eq_ignore_ascii_case(&'l'))
@@ -1945,6 +2077,7 @@ fn schedule_refresh(view: FileView, operations: OperationManager, operation_id: 
 }
 
 fn show_operation_error(view: &FileView, error: &str) {
+    AccessibleStatus::announce_for(&view.widget, error, StatusPriority::Urgent);
     let parent = view.widget.root().and_downcast::<gtk::Window>();
     let dialog = adw::MessageDialog::new(
         parent.as_ref(),
@@ -1963,6 +2096,11 @@ pub fn confirm_permanent_delete(
     locations: Vec<Location>,
     operations: OperationManager,
 ) -> adw::MessageDialog {
+    AccessibleStatus::announce_for(
+        &view.widget,
+        "Confirm permanent deletion. This cannot be undone. Cancel is the default.",
+        StatusPriority::Urgent,
+    );
     let parent = view.widget.root().and_downcast::<gtk::Window>();
     let dialog = adw::MessageDialog::new(
         parent.as_ref(),

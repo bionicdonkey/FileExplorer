@@ -9,3 +9,4 @@ pub mod sidebar;
 pub mod tab_layout;
 pub mod tabs;
 pub mod window;
+pub mod accessibility;

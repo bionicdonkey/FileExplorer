@@ -37,12 +37,17 @@ pub struct LocationBar {
     breadcrumbs: GtkBox,
     stack: Stack,
     on_navigate: Rc<RefCell<Option<Box<dyn Fn(Location)>>>>,
+    committed_uri: Rc<RefCell<String>>,
 }
 
 impl LocationBar {
     pub fn new(initial: &Location) -> Self {
         let entry = Entry::builder().hexpand(true).build();
         entry.set_tooltip_text(Some("Location (Ctrl+L)"));
+        entry.update_property(&[
+            gtk::accessible::Property::Label("Location"),
+            gtk::accessible::Property::KeyShortcuts("Control+l"),
+        ]);
         entry.add_css_class("monospace");
         entry.add_css_class("location-entry");
         entry.set_text(initial.uri());
@@ -51,9 +56,38 @@ impl LocationBar {
         breadcrumbs.add_css_class("location-bar");
         let stack = Stack::new();
         stack.set_hexpand(true);
-        stack.add_named(&breadcrumbs, Some("breadcrumbs"));
+        // Long paths scroll without increasing the window's minimum width.
+        let breadcrumb_scroll = gtk::ScrolledWindow::new();
+        breadcrumb_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Never);
+        breadcrumb_scroll.set_propagate_natural_width(false);
+        breadcrumb_scroll.set_min_content_width(40);
+        breadcrumb_scroll.set_child(Some(&breadcrumbs));
+        stack.set_hhomogeneous(false);
+        stack.set_transition_type(gtk::StackTransitionType::None);
+        stack.add_named(&breadcrumb_scroll, Some("breadcrumbs"));
         stack.add_named(&entry, Some("entry"));
         stack.set_visible_child_name("breadcrumbs");
+        let committed_uri = Rc::new(RefCell::new(initial.uri().to_owned()));
+        let cancel_uri = committed_uri.clone();
+        let cancel_stack = stack.downgrade();
+        let cancel_entry = entry.downgrade();
+        let keys = gtk::EventControllerKey::new();
+        keys.connect_key_pressed(move |_, key, _, _| {
+            if key != gtk::gdk::Key::Escape {
+                return glib::Propagation::Proceed;
+            }
+            if let (Some(stack), Some(entry)) = (cancel_stack.upgrade(), cancel_entry.upgrade()) {
+                entry.set_text(&cancel_uri.borrow());
+                entry.remove_css_class("error");
+                entry.reset_state(gtk::AccessibleState::Invalid);
+                entry.reset_property(gtk::AccessibleProperty::Description);
+                entry.set_tooltip_text(Some("Location (Ctrl+L)"));
+                stack.set_visible_child_name("breadcrumbs");
+                stack.child_focus(gtk::DirectionType::TabForward);
+            }
+            glib::Propagation::Stop
+        });
+        entry.add_controller(keys);
 
         let click = GestureClick::new();
         click.set_button(1);
@@ -75,6 +109,7 @@ impl LocationBar {
             breadcrumbs,
             stack,
             on_navigate,
+            committed_uri,
         };
         bar.set_uri(initial.uri());
         bar
@@ -86,10 +121,24 @@ impl LocationBar {
             match LocationInput::parse(entry.text().as_str()) {
                 Ok(location) => {
                     entry.remove_css_class("error");
+                    entry.reset_state(gtk::AccessibleState::Invalid);
+                    entry.reset_property(gtk::AccessibleProperty::Description);
+                    entry.set_tooltip_text(Some("Location (Ctrl+L)"));
                     callback(location);
                     stack.set_visible_child_name("breadcrumbs");
                 }
                 Err(_) => {
+                    entry.update_state(&[gtk::accessible::State::Invalid(
+                        gtk::AccessibleInvalidState::True,
+                    )]);
+                    entry.update_property(&[gtk::accessible::Property::Description(
+                        "Enter an absolute path or a URI without credentials",
+                    )]);
+                    crate::ui::accessibility::AccessibleStatus::announce_for(
+                        entry,
+                        "Enter an absolute path or a URI without credentials",
+                        crate::ui::accessibility::StatusPriority::Urgent,
+                    );
                     entry.add_css_class("error");
                     entry.set_tooltip_text(Some(
                         "Enter an absolute path or a URI without credentials",
@@ -105,15 +154,27 @@ impl LocationBar {
     }
 
     pub fn set_location(&self, path: &std::path::Path) {
+        self.clear_validation_error();
+        *self.committed_uri.borrow_mut() = Location::from_local_path(path).uri().to_owned();
         self.entry.set_text(&path.display().to_string());
         self.render_breadcrumbs(path);
         self.stack.set_visible_child_name("breadcrumbs");
     }
 
     pub fn set_uri(&self, uri: &str) {
+        self.clear_validation_error();
+        *self.committed_uri.borrow_mut() = uri.to_owned();
         self.entry.set_text(uri);
         self.render_uri_breadcrumbs(uri);
         self.stack.set_visible_child_name("breadcrumbs");
+    }
+
+    fn clear_validation_error(&self) {
+        self.entry.remove_css_class("error");
+        self.entry.reset_state(gtk::AccessibleState::Invalid);
+        self.entry
+            .reset_property(gtk::AccessibleProperty::Description);
+        self.entry.set_tooltip_text(Some("Location (Ctrl+L)"));
     }
 
     pub fn focus_location(&self) {
@@ -255,6 +316,9 @@ impl LocationBar {
                     if let (Some(button), Ok(info)) = (weak.upgrade(), result) {
                         if !info.display_name().is_empty() {
                             button.set_label(&info.display_name());
+                            button.update_property(&[gtk::accessible::Property::Label(
+                                &info.display_name(),
+                            )]);
                         }
                     }
                 },
@@ -270,6 +334,15 @@ impl LocationBar {
     }
 
     fn connect_location_breadcrumb(&self, button: &Button, location: Location, edit_after: bool) {
+        button.update_property(&[
+            gtk::accessible::Property::Label(button.label().as_deref().unwrap_or("Home")),
+            gtk::accessible::Property::Description(if edit_after {
+                "Current location. Activate to edit location"
+            } else {
+                "Open parent location"
+            }),
+        ]);
+        button.set_tooltip_text(Some(&location.redacted()));
         let handler = self.on_navigate.clone();
         let stack = self.stack.clone();
         let entry = self.entry.clone();
@@ -334,6 +407,10 @@ impl HeaderControls {
         let navigation = GtkBox::new(Orientation::Horizontal, 0);
         navigation.add_css_class("linked");
         for button in [&back, &forward, &up, &refresh] {
+            crate::ui::accessibility::name_control(
+                button,
+                button.tooltip_text().as_deref().unwrap(),
+            );
             button.add_css_class("flat");
             navigation.append(button);
         }

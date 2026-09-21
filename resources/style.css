@@ -79,7 +79,7 @@
 }
 
 .breadcrumb-separator {
-  color: alpha(@window_fg_color, 0.38);
+  color: @window_fg_color;
 }
 
 .explorer-sidebar {
@@ -91,7 +91,6 @@ button.sidebar-section-heading {
   margin-bottom: 3px;
   padding-left: 4px;
   border-radius: 6px;
-  text-align: left;
 }
 
 button.sidebar-section-heading:hover,
@@ -152,7 +151,7 @@ button.sidebar-location.selected {
 /* Location glyphs support their labels rather than competing with the active
  * system accent.  The selected row retains the normal theme foreground. */
 image.sidebar-location-icon {
-  color: alpha(@window_fg_color, 0.58);
+  color: @window_fg_color;
 }
 
 button.sidebar-expander {
@@ -162,7 +161,44 @@ button.sidebar-expander {
   border-radius: 6px;
 }
 
-.cut-pending { opacity: 0.48; }
+.cut-pending { border: 1px dashed @window_fg_color; }
+.cut-pending label { font-style: italic; }
+
+/* Preserve theme text contrast. Focus and current location remain visible
+ * without relying on a faint background tint or motion. Native GTK widgets
+ * follow gtk-enable-animations; the location stack has no custom transitions. */
+button:focus-visible, entry:focus-visible, flowboxchild:focus-visible,
+columnview row:focus-visible, tab:focus-visible {
+  outline: 2px solid @accent_color;
+  outline-offset: -2px;
+}
+
+button.sidebar-location.selected,
+button.sidebar-section-heading.selected {
+  font-weight: bold;
+  border: 1px solid @accent_color;
+}
+
+.high-contrast button:focus-visible,
+.high-contrast entry:focus-visible,
+.high-contrast flowboxchild:focus-visible,
+.high-contrast columnview row:focus-visible {
+  outline-color: @window_fg_color;
+}
+
+.high-contrast button.sidebar-location.selected,
+.high-contrast button.sidebar-section-heading.selected,
+.high-contrast .operation-row {
+  border: 1px solid @window_fg_color;
+}
+
+.high-contrast .dim-label { opacity: 1; }
+
+/* Logical margins in widget code mirror indentation under RTL. */
+button.sidebar-section-heading:dir(rtl) {
+  padding-left: 0;
+  padding-right: 4px;
+}
 
 .operation-row {
   padding: 10px;

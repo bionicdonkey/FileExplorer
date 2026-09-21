@@ -70,9 +70,23 @@ impl Sidebar {
         sidebar.refresh();
 
         let refresh_on_mount = sidebar.clone();
-        gio::VolumeMonitor::get().connect_mount_added(move |_, _| refresh_on_mount.refresh());
+        gio::VolumeMonitor::get().connect_mount_added(move |_, mount| {
+            crate::ui::accessibility::AccessibleStatus::announce_for(
+                &refresh_on_mount.widget,
+                &format!("Connected {}", mount.name()),
+                crate::ui::accessibility::StatusPriority::Polite,
+            );
+            refresh_on_mount.refresh();
+        });
         let refresh_on_unmount = sidebar.clone();
-        gio::VolumeMonitor::get().connect_mount_removed(move |_, _| refresh_on_unmount.refresh());
+        gio::VolumeMonitor::get().connect_mount_removed(move |_, mount| {
+            crate::ui::accessibility::AccessibleStatus::announce_for(
+                &refresh_on_unmount.widget,
+                &format!("Disconnected {}", mount.name()),
+                crate::ui::accessibility::StatusPriority::Urgent,
+            );
+            refresh_on_unmount.refresh();
+        });
         sidebar
     }
 
@@ -81,6 +95,9 @@ impl Sidebar {
     }
 
     pub fn refresh(&self) {
+        let focused_name = gtk::prelude::GtkWindowExt::focus(&self.mount_parent)
+            .filter(|widget| widget.is_ancestor(&self.widget))
+            .map(|widget| widget.widget_name());
         while let Some(child) = self.content.first_child() {
             self.content.remove(&child);
         }
@@ -95,11 +112,16 @@ impl Sidebar {
                 if should_show_devices_heading(&section.title, index) {
                     let device_heading = GtkBox::new(Orientation::Horizontal, 0);
                     let devices_toggle = ToggleButton::new();
+                    devices_toggle.set_widget_name("sidebar-expand-devices");
                     devices_toggle.add_css_class("flat");
                     devices_toggle.add_css_class("sidebar-section-toggle");
                     devices_toggle.add_css_class("sidebar-subsection-toggle");
                     let devices_expanded = self.model.borrow().preferences().devices_expanded();
                     devices_toggle.set_active(devices_expanded);
+                    crate::ui::accessibility::name_expander(
+                        &devices_toggle,
+                        "Expand or collapse Devices",
+                    );
                     devices_toggle.set_child(Some(&Image::from_icon_name(if devices_expanded {
                         "pan-down-symbolic"
                     } else {
@@ -146,6 +168,7 @@ impl Sidebar {
 
             let heading_row = GtkBox::new(Orientation::Horizontal, 0);
             let toggle = ToggleButton::new();
+            toggle.set_widget_name(&format!("sidebar-expand-section-{}", section.title));
             toggle.add_css_class("flat");
             toggle.add_css_class("sidebar-section-toggle");
             let section_title = section.title.to_owned();
@@ -155,6 +178,10 @@ impl Sidebar {
                 .preferences()
                 .section_expanded(&section_title);
             toggle.set_active(expanded);
+            crate::ui::accessibility::name_expander(
+                &toggle,
+                &format!("Expand or collapse {}", section.title),
+            );
             rows.set_visible(expanded);
             toggle.set_child(Some(&Image::from_icon_name(if expanded {
                 "pan-down-symbolic"
@@ -179,6 +206,7 @@ impl Sidebar {
             });
             heading_row.append(&toggle);
             let heading = Button::with_label(&section.title);
+            heading.set_widget_name(&format!("sidebar-section-{}", section.title));
             heading.set_hexpand(true);
             heading.set_halign(gtk::Align::Fill);
             heading.add_css_class("flat");
@@ -186,6 +214,8 @@ impl Sidebar {
             heading.add_css_class("sidebar-section-heading");
             if self.active_section.borrow().as_deref() == Some(section.title.as_str()) {
                 heading.add_css_class("selected");
+                heading
+                    .update_property(&[gtk::accessible::Property::Description("Current section")]);
             }
             let action = self.on_action.clone();
             let section_title = section.title.clone();
@@ -195,8 +225,10 @@ impl Sidebar {
             if section.title == "Network & online" {
                 heading.set_hexpand(true);
                 let add = Button::from_icon_name("list-add-symbolic");
+                add.set_widget_name("sidebar-add-network");
                 add.add_css_class("flat");
                 add.set_tooltip_text(Some("Add network location"));
+                crate::ui::accessibility::name_control(&add, "Add network location");
                 let action = self.on_action.clone();
                 add.connect_clicked(move |_| action(SidebarAction::AddNetworkLocation));
                 heading_row.append(&heading);
@@ -220,12 +252,31 @@ impl Sidebar {
         if let Some(manager) = self.operation_manager.borrow().as_ref() {
             if let Some(summary) = active_summary(&manager.records()) {
                 let button = Button::with_label(&summary);
+                button.set_widget_name("sidebar-operations");
                 button.add_css_class("flat");
                 button.add_css_class("sidebar-operation-summary");
                 button.set_halign(gtk::Align::Fill);
                 let action = self.on_action.clone();
                 button.connect_clicked(move |_| action(SidebarAction::OpenOperations));
                 self.content.append(&button);
+            }
+        }
+        if let Some(name) = focused_name {
+            fn restore(widget: &gtk::Widget, name: &str) -> bool {
+                if widget.widget_name() == name && widget.is_visible() && widget.is_sensitive() {
+                    return widget.grab_focus();
+                }
+                let mut child = widget.first_child();
+                while let Some(next) = child {
+                    if restore(&next, name) {
+                        return true;
+                    }
+                    child = next.next_sibling();
+                }
+                false
+            }
+            if !restore(self.content.upcast_ref(), &name) {
+                self.content.child_focus(gtk::DirectionType::TabForward);
             }
         }
     }
@@ -325,6 +376,11 @@ impl Sidebar {
         children.set_visible(false);
         if node.expandable {
             let expander = ToggleButton::new();
+            expander.set_widget_name(&format!("sidebar-expand-{}", node.location.uri()));
+            crate::ui::accessibility::name_expander(
+                &expander,
+                &format!("Expand or collapse {}", node.location.label()),
+            );
             expander.add_css_class("flat");
             expander.add_css_class("sidebar-expander");
             let initially_expanded = model
@@ -480,12 +536,15 @@ impl Sidebar {
         }
 
         let button = Button::new();
+        button.set_widget_name(&format!("sidebar-location-{}", node.location.uri()));
+        crate::ui::accessibility::name_control(&button, node.location.label());
         button.set_hexpand(true);
         button.set_halign(gtk::Align::Fill);
         button.add_css_class("flat");
         button.add_css_class("sidebar-location");
         if active_path.borrow().as_ref() == Some(node.location.location()) {
             button.add_css_class("selected");
+            button.update_property(&[gtk::accessible::Property::Description("Current location")]);
         }
         let button_content = GtkBox::new(Orientation::Horizontal, 8);
         button_content.set_margin_top(4);
@@ -542,10 +601,10 @@ impl Sidebar {
         let location = location.clone();
         let gesture = GestureClick::new();
         gesture.set_button(3);
-        gesture.connect_pressed(move |gesture, _, x, y| {
-            gesture.set_state(gtk::EventSequenceState::Claimed);
+        let popup = Rc::new(move |x: f64, y: f64| {
             let popover = Popover::new();
             popover.set_parent(&context_button);
+            crate::ui::accessibility::restore_popover_focus(&popover, &context_button);
             popover.set_autohide(true);
             popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
             let menu = GtkBox::new(Orientation::Vertical, 2);
@@ -679,7 +738,22 @@ impl Sidebar {
             popover.set_child(Some(&menu));
             popover.popup();
         });
+        let pointer_popup = popup.clone();
+        gesture.connect_pressed(move |gesture, _, x, y| {
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+            pointer_popup(x, y);
+        });
         button.add_controller(gesture);
+        let keys = gtk::EventControllerKey::new();
+        keys.connect_key_pressed(move |_, key, _, modifiers| {
+            if crate::ui::accessibility::context_menu_key(key, modifiers) {
+                popup(0.0, 0.0);
+                glib::Propagation::Stop
+            } else {
+                glib::Propagation::Proceed
+            }
+        });
+        button.add_controller(keys);
     }
 }
 

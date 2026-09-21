@@ -68,10 +68,10 @@ impl TabStrip {
         let gesture = GestureClick::new();
         gesture.set_button(3);
         let bar = self.bar.clone();
-        gesture.connect_pressed(move |gesture, _, x, y| {
-            gesture.set_state(gtk::EventSequenceState::Claimed);
+        let popup = std::rc::Rc::new(move |x: f64, y: f64| {
             let popover = Popover::new();
             popover.set_parent(&bar);
+            crate::ui::accessibility::restore_popover_focus(&popover, &bar);
             popover.set_autohide(true);
             popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
             let menu = GtkBox::new(Orientation::Vertical, 2);
@@ -94,7 +94,22 @@ impl TabStrip {
             popover.set_child(Some(&menu));
             popover.popup();
         });
+        let pointer_popup = popup.clone();
+        gesture.connect_pressed(move |gesture, _, x, y| {
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+            pointer_popup(x, y);
+        });
         self.bar.add_controller(gesture);
+        let keys = gtk::EventControllerKey::new();
+        keys.connect_key_pressed(move |_, key, _, modifiers| {
+            if crate::ui::accessibility::context_menu_key(key, modifiers) {
+                popup(0.0, 0.0);
+                glib::Propagation::Stop
+            } else {
+                glib::Propagation::Proceed
+            }
+        });
+        self.bar.add_controller(keys);
     }
 }
 
@@ -102,6 +117,7 @@ fn overflow_button(icon_name: &str, tooltip: &str) -> Button {
     let button = Button::from_icon_name(icon_name);
     button.add_css_class("flat");
     button.set_tooltip_text(Some(tooltip));
+    crate::ui::accessibility::name_control(&button, tooltip);
     button.set_visible(false);
     button
 }
