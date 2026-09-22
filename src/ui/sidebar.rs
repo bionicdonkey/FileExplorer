@@ -160,9 +160,9 @@ impl Sidebar {
                     rows.append(&device_rows);
                 }
                 if has_devices && index > 0 {
-                    self.append_node(&device_rows, node, 1);
+                    self.append_node(&device_rows, node, 1, &section.title);
                 } else {
-                    self.append_node(&rows, node, 0);
+                    self.append_node(&rows, node, 0, &section.title);
                 }
             }
 
@@ -346,11 +346,12 @@ impl Sidebar {
         self.refresh();
     }
 
-    fn append_node(&self, parent: &GtkBox, node: SidebarNode, depth: i32) {
+    fn append_node(&self, parent: &GtkBox, node: SidebarNode, depth: i32, section: &str) {
         Self::append_node_inner(
             parent,
             node,
             depth,
+            vec![section.to_owned()],
             self.model.clone(),
             self.on_action.clone(),
             self.active_path.clone(),
@@ -362,11 +363,18 @@ impl Sidebar {
         parent: &GtkBox,
         node: SidebarNode,
         depth: i32,
+        mut occurrence: Vec<String>,
         model: Rc<RefCell<SidebarModel>>,
         on_action: Rc<dyn Fn(SidebarAction)>,
         active_path: Rc<RefCell<Option<Location>>>,
         mount_parent: gtk::Window,
     ) {
+        // A URI may occur in several sections or under several ancestors in
+        // one section. Keep the whole ancestry, without position indices that
+        // change when another sibling is inserted. JSON escapes delimiters in
+        // section titles/URIs so distinct paths cannot alias one focus key.
+        occurrence.push(node.location.uri());
+        let focus_key = serde_json::to_string(&occurrence).expect("string paths serialize");
         let row = GtkBox::new(Orientation::Vertical, 0);
         let header = GtkBox::new(Orientation::Horizontal, 0);
         header.set_margin_start(depth * 16);
@@ -376,7 +384,7 @@ impl Sidebar {
         children.set_visible(false);
         if node.expandable {
             let expander = ToggleButton::new();
-            expander.set_widget_name(&format!("sidebar-expand-{}", node.location.uri()));
+            expander.set_widget_name(&format!("sidebar-expand-{focus_key}"));
             crate::ui::accessibility::name_expander(
                 &expander,
                 &format!("Expand or collapse {}", node.location.label()),
@@ -437,6 +445,7 @@ impl Sidebar {
                             &children_for_toggle,
                             initial_children,
                             depth,
+                            occurrence.clone(),
                             children_model.clone(),
                             children_action.clone(),
                             children_active_path.clone(),
@@ -463,6 +472,7 @@ impl Sidebar {
                         let active_after_mount = children_active_path.clone();
                         let parent_after_mount = children_mount_parent.clone();
                         let location_after_mount = child_location.clone();
+                        let occurrence_after_mount = occurrence.clone();
                         if is_mountable {
                             location_file.mount_mountable(
                                 gio::MountMountFlags::NONE,
@@ -490,6 +500,7 @@ impl Sidebar {
                                         &children_after_mount,
                                         loaded,
                                         depth,
+                                        occurrence_after_mount.clone(),
                                         model_after_mount.clone(),
                                         action_after_mount.clone(),
                                         active_after_mount.clone(),
@@ -514,6 +525,7 @@ impl Sidebar {
                                         &children_after_mount,
                                         loaded,
                                         depth,
+                                        occurrence_after_mount.clone(),
                                         model_after_mount.clone(),
                                         action_after_mount.clone(),
                                         active_after_mount.clone(),
@@ -536,7 +548,7 @@ impl Sidebar {
         }
 
         let button = Button::new();
-        button.set_widget_name(&format!("sidebar-location-{}", node.location.uri()));
+        button.set_widget_name(&format!("sidebar-location-{focus_key}"));
         crate::ui::accessibility::name_control(&button, node.location.label());
         button.set_hexpand(true);
         button.set_halign(gtk::Align::Fill);
@@ -573,6 +585,7 @@ impl Sidebar {
         parent: &GtkBox,
         children: Vec<SidebarNode>,
         depth: i32,
+        occurrence: Vec<String>,
         model: Rc<RefCell<SidebarModel>>,
         on_action: Rc<dyn Fn(SidebarAction)>,
         active_path: Rc<RefCell<Option<Location>>>,
@@ -583,6 +596,7 @@ impl Sidebar {
                 parent,
                 child,
                 depth + 1,
+                occurrence.clone(),
                 model.clone(),
                 on_action.clone(),
                 active_path.clone(),

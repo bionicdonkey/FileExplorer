@@ -15,6 +15,262 @@ fn descendants(widget: &gtk::Widget) -> Vec<gtk::Widget> {
     result
 }
 
+fn sidebar_section_rows(sidebar: &gtk::ScrolledWindow, title: &str) -> gtk::Widget {
+    descendants(sidebar.upcast_ref())
+        .into_iter()
+        .find(|w| {
+            w.clone().downcast::<gtk::Button>().ok().is_some_and(|b| {
+                b.has_css_class("sidebar-section-heading") && b.label().as_deref() == Some(title)
+            })
+        })
+        .unwrap()
+        .parent()
+        .unwrap()
+        .next_sibling()
+        .unwrap()
+}
+
+#[gtk::test]
+fn slice4_sidebar_duplicate_home_restores_the_user_section_occurrence() {
+    use zorin_explorer::{
+        core::sidebar_model::{SidebarModel, SidebarPreferences},
+        ui::sidebar::Sidebar,
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let mut preferences = SidebarPreferences::in_memory();
+    preferences.pin_location(Location::from_local_path(directory.path()));
+    let model = Rc::new(RefCell::new(SidebarModel::new(
+        preferences,
+        directory.path().into(),
+    )));
+    let user_section = model.borrow().sections()[1].title.clone();
+    model
+        .borrow_mut()
+        .preferences_mut()
+        .set_section_expanded(user_section.clone(), true);
+    model
+        .borrow_mut()
+        .preferences_mut()
+        .set_section_expanded("Quick access", true);
+    let window = gtk::Window::new();
+    let sidebar = Sidebar::new(model, &window, |_| {});
+    window.set_child(Some(&sidebar.widget));
+    window.present();
+    let rows = sidebar_section_rows(&sidebar.widget, &user_section);
+    let home = descendants(&rows)
+        .into_iter()
+        .find(|w| {
+            w.has_css_class("sidebar-location") && w.tooltip_text().as_deref() == Some("Home")
+        })
+        .unwrap();
+    home.grab_focus();
+    sidebar.refresh();
+    let focused = gtk::prelude::GtkWindowExt::focus(&window).unwrap();
+    let user_rows = sidebar_section_rows(&sidebar.widget, &user_section);
+    assert!(
+        focused.is_ancestor(&user_rows),
+        "Home must stay in the user section, not jump to Quick access"
+    );
+    assert_eq!(focused.tooltip_text().as_deref(), Some("Home"));
+    window.close();
+}
+
+#[gtk::test]
+fn slice4_sidebar_duplicate_tree_expander_restores_its_ancestor_occurrence() {
+    use zorin_explorer::{
+        core::sidebar_model::{SidebarModel, SidebarPreferences},
+        ui::sidebar::Sidebar,
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let child = directory.path().join("Child");
+    std::fs::create_dir_all(child.join("Grandchild")).unwrap();
+    let mut preferences = SidebarPreferences::in_memory();
+    // Put the direct pin before the same URI nested beneath the Home pin.
+    preferences.pin_location(Location::from_local_path(&child));
+    preferences.pin_location(Location::from_local_path(directory.path()));
+    preferences.set_section_expanded("Quick access", true);
+    let model = Rc::new(RefCell::new(SidebarModel::new(
+        preferences,
+        directory.path().into(),
+    )));
+    let window = gtk::Window::new();
+    let sidebar = Sidebar::new(model, &window, |_| {});
+    window.set_child(Some(&sidebar.widget));
+    window.present();
+    let rows = sidebar_section_rows(&sidebar.widget, "Quick access");
+    let home_row = rows.last_child().unwrap();
+    let home_expander = home_row
+        .first_child()
+        .unwrap()
+        .first_child()
+        .unwrap()
+        .downcast::<gtk::ToggleButton>()
+        .unwrap();
+    home_expander.set_active(true);
+    let nested = descendants(&home_row)
+        .into_iter()
+        .find_map(|w| {
+            w.downcast::<gtk::ToggleButton>()
+                .ok()
+                .filter(|b| b.tooltip_text().as_deref() == Some("Expand or collapse Child"))
+        })
+        .unwrap();
+    nested.set_active(true);
+    nested.grab_focus();
+    sidebar.refresh();
+    let refreshed_rows = sidebar_section_rows(&sidebar.widget, "Quick access");
+    let refreshed_home = refreshed_rows.last_child().unwrap();
+    let focused = gtk::prelude::GtkWindowExt::focus(&window).unwrap();
+    assert!(
+        focused.is_ancestor(&refreshed_home),
+        "nested expander must not jump to the direct pin for the same URI"
+    );
+    assert_eq!(
+        focused.tooltip_text().as_deref(),
+        Some("Expand or collapse Child")
+    );
+    assert!(focused.downcast::<gtk::ToggleButton>().unwrap().is_active());
+    window.close();
+}
+
+#[gtk::test]
+fn slice4_list_cut_description_is_cleared_on_replacement_and_unbind() {
+    use glib::translate::ToGlibPtr;
+    use zorin_explorer::{
+        core::{GroupField, ViewMode, ViewOptions},
+        ui::file_view::FileView,
+    };
+    let context = glib::MainContext::default();
+    let directory = tempfile::tempdir().unwrap();
+    let cut = directory.path().join("a-cut.txt");
+    std::fs::write(&cut, "cut").unwrap();
+    std::fs::write(directory.path().join("b-plain.txt"), "plain").unwrap();
+    for mode in [ViewMode::DetailedList, ViewMode::CompactList] {
+        let view = FileView::new(Location::from_local_path(directory.path()));
+        view.set_options(ViewOptions {
+            view_mode: mode,
+            group_field: GroupField::Type,
+            ..Default::default()
+        });
+        view.set_pending_cut_locations(vec![Location::from_local_path(&cut)]);
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while view.column_view().is_none() {
+            context.iteration(false);
+            assert!(std::time::Instant::now() < end);
+        }
+        let column = view.column_view().unwrap();
+        let selection = column
+            .model()
+            .unwrap()
+            .downcast::<gtk::MultiSelection>()
+            .unwrap();
+        let store = selection
+            .model()
+            .unwrap()
+            .downcast::<gio::ListStore>()
+            .unwrap();
+        assert_eq!(store.n_items(), 3, "one real group heading and two files");
+        let heading = store.item(0).unwrap();
+        let cut_row = store.item(1).unwrap();
+        let plain_row = store.item(2).unwrap();
+        store.remove_all();
+        let bound = Rc::new(RefCell::new(Vec::<gtk::Widget>::new()));
+        let unbound = Rc::new(RefCell::new(Vec::new()));
+        for index in 0..column.columns().n_items() {
+            let factory = column
+                .columns()
+                .item(index)
+                .unwrap()
+                .downcast::<gtk::ColumnViewColumn>()
+                .unwrap()
+                .factory()
+                .unwrap()
+                .downcast::<gtk::SignalListItemFactory>()
+                .unwrap();
+            let bound = bound.clone();
+            factory.connect_bind(move |_, item| {
+                bound.borrow_mut().push(
+                    item.downcast_ref::<gtk::ListItem>()
+                        .unwrap()
+                        .child()
+                        .unwrap(),
+                );
+            });
+            let unbound = unbound.clone();
+            factory.connect_unbind(move |_, item| {
+                let cell = item
+                    .downcast_ref::<gtk::ListItem>()
+                    .unwrap()
+                    .child()
+                    .unwrap();
+                unbound.borrow_mut().push(gtk::test_accessible_has_property(
+                    &cell,
+                    gtk::AccessibleProperty::Description,
+                ));
+            });
+        }
+        store.append(&cut_row);
+        let window = gtk::Window::new();
+        window.set_default_size(900, 300);
+        window.set_child(Some(&view.widget));
+        window.present();
+        while bound.borrow().len() < column.columns().n_items() as usize {
+            context.iteration(false);
+            assert!(std::time::Instant::now() < end);
+        }
+        let cells = bound.borrow().clone();
+        for cell in &cells {
+            assert!(
+                gtk::test_accessible_has_property(cell, gtk::AccessibleProperty::Description),
+                "{mode:?}: every cut list cell must expose its cut state"
+            );
+            let expected = std::ffi::CString::new("Cut; ready to move").unwrap();
+            // GTK's public test API returns NULL when the actual accessible
+            // string matches; this checks the AT property, not the tooltip.
+            let mismatch = unsafe {
+                gtk::ffi::gtk_test_accessible_check_property(
+                    cell.upcast_ref::<gtk::Accessible>().to_glib_none().0,
+                    gtk::ffi::GTK_ACCESSIBLE_PROPERTY_DESCRIPTION,
+                    expected.as_ptr(),
+                )
+            };
+            let failure: Option<glib::GString> =
+                unsafe { glib::translate::from_glib_full(mismatch) };
+            assert!(failure.is_none(), "{failure:?}");
+        }
+        for replacement in [&plain_row, &cut_row, &heading] {
+            bound.borrow_mut().clear();
+            store.splice(0, 1, &[replacement.clone()]);
+            while bound.borrow().len() < cells.len() {
+                context.iteration(false);
+                assert!(std::time::Instant::now() < end);
+            }
+            assert!(
+                unbound
+                    .borrow()
+                    .iter()
+                    .all(|has_description| !has_description),
+                "the real unbind callback must clear the cut description"
+            );
+            let is_cut = replacement == &cut_row;
+            for cell in bound.borrow().iter() {
+                assert_eq!(
+                    gtk::test_accessible_has_property(cell, gtk::AccessibleProperty::Description),
+                    is_cut,
+                    "{mode:?}: normal/group cells must not retain a cut description"
+                );
+                assert_eq!(cell.has_css_class("cut-pending"), is_cut);
+            }
+        }
+        assert!(
+            !unbound.borrow().is_empty(),
+            "the fixture must observe real GTK unbinds"
+        );
+        view.close();
+        window.close();
+    }
+}
+
 #[gtk::test]
 fn slice4_icon_controls_have_explicit_accessible_names() {
     let header = HeaderControls::new(Rc::new(RefCell::new(Location::home())));

@@ -1827,8 +1827,15 @@ fn column_factory(column: ListColumn, thumbnails: bool, view: FileView) -> Signa
             return;
         };
         list_item.set_selectable(matches!(&*row, ListRow::File(_)));
-        if matches!(&*row, ListRow::File(item) if bind_view.pending_cut.borrow().contains(item.location())) { child.add_css_class("cut-pending"); }
-        else { child.remove_css_class("cut-pending"); }
+        if matches!(&*row, ListRow::File(item) if bind_view.pending_cut.borrow().contains(item.location())) {
+            child.add_css_class("cut-pending");
+            child.update_property(&[gtk::accessible::Property::Description("Cut; ready to move")]);
+        } else {
+            // GTK reuses cells for different files and group headings. Clear
+            // both projections so a previous cut row cannot label the next.
+            child.remove_css_class("cut-pending");
+            child.reset_property(gtk::AccessibleProperty::Description);
+        }
         match (&*row, column) {
             (ListRow::Group(group), ListColumn::Name) => {
                 let line = child.downcast::<GtkBox>().expect("name cells use a box");
@@ -1874,6 +1881,15 @@ fn column_factory(column: ListColumn, thumbnails: bool, view: FileView) -> Signa
                 .downcast::<Label>()
                 .expect("metadata cells use labels")
                 .set_label(&item.display_size()),
+        }
+    });
+    factory.connect_unbind(|_, list_item| {
+        if let Some(child) = list_item
+            .downcast_ref::<gtk::ListItem>()
+            .and_then(|item| item.child())
+        {
+            child.remove_css_class("cut-pending");
+            child.reset_property(gtk::AccessibleProperty::Description);
         }
     });
     factory
@@ -1944,6 +1960,81 @@ mod tests {
     use crate::core::sidebar_model::SidebarSection;
     use crate::core::{FileItem, GroupField, Location, ViewMode, ViewOptions};
     use crate::ui::context_menu::{CommandAvailability, ContextCommand, ContextTarget};
+
+    #[gtk::test]
+    fn slice4_reused_list_cells_clear_cut_descriptions_for_files_and_groups() {
+        use super::{column_factory, ListRow};
+        use crate::core::ListColumn;
+        use gtk::prelude::*;
+        let directory = tempfile::tempdir().unwrap();
+        let cut_path = directory.path().join("cut.txt");
+        let plain_path = directory.path().join("plain.txt");
+        fs::write(&cut_path, "cut").unwrap();
+        fs::write(&plain_path, "plain").unwrap();
+        let cut = FileItem::from_path(&cut_path).unwrap();
+        let plain = FileItem::from_path(&plain_path).unwrap();
+        let view = FileView::new(Location::from_local_path(directory.path()));
+        view.set_pending_cut_locations(vec![cut.location().clone()]);
+        for column in [
+            ListColumn::Name,
+            ListColumn::Type,
+            ListColumn::Size,
+            ListColumn::DateModified,
+        ] {
+            let row = glib::BoxedAnyObject::new(ListRow::File(cut.clone()));
+            let store = gio::ListStore::new::<glib::BoxedAnyObject>();
+            store.append(&row);
+            let factory = column_factory(column, false, view.clone());
+            let bound = std::rc::Rc::new(std::cell::RefCell::new(None));
+            let capture = bound.clone();
+            factory.connect_bind(move |_, item| {
+                *capture.borrow_mut() = Some(item.downcast_ref::<gtk::ListItem>().unwrap().clone());
+            });
+            let list = gtk::ListView::new(
+                Some(gtk::NoSelection::new(Some(store))),
+                Some(factory.clone()),
+            );
+            let window = gtk::Window::new();
+            window.set_child(Some(&list));
+            window.present();
+            let context = glib::MainContext::default();
+            let end = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            while bound.borrow().is_none() {
+                context.iteration(false);
+                assert!(std::time::Instant::now() < end);
+            }
+            let item = bound.borrow().clone().unwrap();
+            let cell = item.child().unwrap();
+            assert!(gtk::test_accessible_has_property(
+                &cell,
+                gtk::AccessibleProperty::Description
+            ));
+            // Drive the production bind handler with the same native ListItem
+            // and cell. Model splicing alone may allocate new cells instead of
+            // reusing them on a particular GTK version, hiding stale state.
+            for replacement in [
+                ListRow::File(plain.clone()),
+                ListRow::Group("Documents".into()),
+            ] {
+                row.replace(replacement);
+                factory.emit_by_name::<()>("bind", &[&item]);
+                assert_eq!(item.child().as_ref(), Some(&cell));
+                assert!(!gtk::test_accessible_has_property(
+                    &cell,
+                    gtk::AccessibleProperty::Description
+                ));
+                assert!(!cell.has_css_class("cut-pending"));
+                row.replace(ListRow::File(cut.clone()));
+                factory.emit_by_name::<()>("bind", &[&item]);
+                assert!(gtk::test_accessible_has_property(
+                    &cell,
+                    gtk::AccessibleProperty::Description
+                ));
+            }
+            window.close();
+        }
+        view.close();
+    }
 
     #[test]
     fn section_overview_preserves_and_restores_a_remote_location() {
