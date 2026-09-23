@@ -36,7 +36,11 @@ enum ListRow {
     File(FileItem),
 }
 
-fn append_model_page(store: &gio::ListStore, items: Vec<FileItem>, group_field: GroupField) {
+fn append_model_page(
+    store: &gio::ListStore,
+    items: Vec<FileItem>,
+    group_field: GroupField,
+) -> Vec<(Location, u32)> {
     let mut groups = std::collections::HashSet::new();
     if group_field != GroupField::None {
         for index in 0..store.n_items() {
@@ -47,7 +51,9 @@ fn append_model_page(store: &gio::ListStore, items: Vec<FileItem>, group_field: 
             }
         }
     }
+    let first_index = store.n_items();
     let mut rows = Vec::with_capacity(items.len());
+    let mut file_indexes = Vec::with_capacity(items.len());
     for item in items {
         if let Some(group) = crate::core::directory_model::group_label(
             &item,
@@ -58,9 +64,11 @@ fn append_model_page(store: &gio::ListStore, items: Vec<FileItem>, group_field: 
                 rows.push(glib::BoxedAnyObject::new(ListRow::Group(group)));
             }
         }
+        file_indexes.push((item.location().clone(), first_index + rows.len() as u32));
         rows.push(glib::BoxedAnyObject::new(ListRow::File(item)));
     }
     store.extend_from_slice(&rows);
+    file_indexes
 }
 
 fn filesystem_space(path: &Path) -> Option<(u64, u64)> {
@@ -110,6 +118,8 @@ pub struct FileView {
     is_quick_access_location: Rc<RefCell<Option<Rc<dyn Fn(&Location) -> bool>>>>,
     model_store: Rc<RefCell<Option<gio::ListStore>>>,
     folder_store: Rc<RefCell<Option<gio::ListStore>>>,
+    model_row_index: Rc<RefCell<std::collections::HashMap<Location, u32>>>,
+    folder_row_index: Rc<RefCell<std::collections::HashMap<Location, u32>>>,
     rendered_generation: Rc<std::cell::Cell<Option<u64>>>,
     rendered_count: Rc<std::cell::Cell<usize>>,
     directory_monitor: Rc<RefCell<Option<(Location, gio::FileMonitor)>>>,
@@ -190,6 +200,8 @@ impl FileView {
             is_quick_access_location: Rc::new(RefCell::new(None)),
             model_store: Default::default(),
             folder_store: Default::default(),
+            model_row_index: Default::default(),
+            folder_row_index: Default::default(),
             rendered_generation: Default::default(),
             rendered_count: Default::default(),
             directory_monitor: Default::default(),
@@ -312,6 +324,8 @@ impl FileView {
         }
         self.model_store.borrow_mut().take();
         self.folder_store.borrow_mut().take();
+        self.model_row_index.borrow_mut().clear();
+        self.folder_row_index.borrow_mut().clear();
         self.widget.set_child(gtk::Widget::NONE);
         for controller in self.controllers.borrow_mut().drain(..) {
             self.widget.remove_controller(&controller);
@@ -441,28 +455,56 @@ impl FileView {
             cache.insert(entry.location.clone(), entry.clone());
         }
         drop(cache);
-        let Some(store) = self.model_store.borrow().clone() else {
+        let metadata_by_location: std::collections::HashMap<_, _> = metadata
+            .into_iter()
+            .map(|entry| (entry.location.clone(), entry))
+            .collect();
+        self.apply_visible_metadata_to_store(
+            self.model_store.borrow().as_ref(),
+            &self.model_row_index.borrow(),
+            &metadata_by_location,
+        );
+        self.apply_visible_metadata_to_store(
+            self.folder_store.borrow().as_ref(),
+            &self.folder_row_index.borrow(),
+            &metadata_by_location,
+        );
+    }
+
+    /// Replaces only backing rows named by the response. The source-list
+    /// replacement emits GTK's normal items-changed signal, keeping its
+    /// incremental sort/filter wrappers in sync without scanning the store.
+    fn apply_visible_metadata_to_store(
+        &self,
+        store: Option<&gio::ListStore>,
+        row_index: &std::collections::HashMap<Location, u32>,
+        metadata: &std::collections::HashMap<Location, crate::core::contracts::VisibleMetadata>,
+    ) {
+        let Some(store) = store else {
             return;
         };
-        for index in 0..store.n_items() {
+        for (location, entry) in metadata {
+            let Some(&index) = row_index.get(location) else {
+                continue;
+            };
             let Some(object) = store.item(index).and_downcast::<glib::BoxedAnyObject>() else {
                 continue;
             };
             let ListRow::File(item) = &*object.borrow::<ListRow>() else {
                 continue;
             };
-            if let Some(entry) = metadata
-                .iter()
-                .find(|entry| entry.location == *item.location())
-            {
-                store.splice(
-                    index,
-                    1,
-                    &[glib::BoxedAnyObject::new(ListRow::File(
-                        item.with_visible_metadata(entry),
-                    ))],
-                );
+            // A view may have reloaded after the asynchronous query started.
+            // Keep a stale index from ever changing a different URI.
+            if item.location() != location {
+                continue;
             }
+            store.splice(
+                index,
+                1,
+                &[glib::BoxedAnyObject::new(ListRow::File(
+                    item.with_visible_metadata(entry),
+                ))],
+            );
         }
     }
 
@@ -1048,6 +1090,8 @@ impl FileView {
     fn reload(&self) {
         self.model_store.borrow_mut().take();
         self.folder_store.borrow_mut().take();
+        self.model_row_index.borrow_mut().clear();
+        self.folder_row_index.borrow_mut().clear();
         self.rendered_generation.set(None);
         let owned_focus = self
             .widget
@@ -1445,12 +1489,16 @@ impl FileView {
         use crate::application::performance::PagedSnapshot;
         let store = gio::ListStore::new::<glib::BoxedAnyObject>();
         *self.model_store.borrow_mut() = Some(store.clone());
+        self.model_row_index.borrow_mut().clear();
         let mut pages = PagedSnapshot::new(items.to_vec());
         if let Some(page) = pages.next_page() {
-            append_model_page(&store, page, options.group_field);
+            self.model_row_index
+                .borrow_mut()
+                .extend(append_model_page(&store, page, options.group_field));
         }
         let weak = store.downgrade();
         let group_field = options.group_field;
+        let row_index = self.model_row_index.clone();
         let filter_options = options.clone();
         let options = options.clone();
         let filter = CustomFilter::new(move |object| {
@@ -1531,7 +1579,9 @@ impl FileView {
                 return glib::ControlFlow::Break;
             };
             if let Some(page) = pages.next_page() {
-                append_model_page(&store, page, group_field);
+                row_index
+                    .borrow_mut()
+                    .extend(append_model_page(&store, page, group_field));
                 return glib::ControlFlow::Continue;
             }
             if sorted.pending() > 0 {
@@ -1618,9 +1668,13 @@ impl FileView {
         let (folders_to_add, files_to_add): (Vec<_>, Vec<_>) = additions
             .into_iter()
             .partition(|item| folders.is_some() && item.is_dir());
-        append_model_page(&store, files_to_add, options.group_field);
+        self.model_row_index
+            .borrow_mut()
+            .extend(append_model_page(&store, files_to_add, options.group_field));
         if let Some(folders) = folders {
-            append_model_page(&folders, folders_to_add, options.group_field);
+            self.folder_row_index
+                .borrow_mut()
+                .extend(append_model_page(&folders, folders_to_add, options.group_field));
         }
         true
     }
@@ -1911,6 +1965,7 @@ impl FileView {
         if self.use_recycled_model(items.len()) {
             let folders_view = self.recycled_grid(&folders, options);
             *self.folder_store.borrow_mut() = self.model_store.borrow_mut().take();
+            *self.folder_row_index.borrow_mut() = std::mem::take(&mut *self.model_row_index.borrow_mut());
             let folders_scroll = ScrolledWindow::builder()
                 .min_content_height(120)
                 .max_content_height(240)
@@ -2781,6 +2836,64 @@ mod tests {
         assert!(requests.contains(first.location()));
         assert!(requests.contains(second.location()));
         window.close();
+        view.close();
+    }
+
+    #[gtk::test]
+    fn slice5_visible_metadata_updates_file_and_folder_backing_rows() {
+        use super::ListRow;
+        use crate::core::contracts::VisibleMetadata;
+        use crate::infrastructure::mock_provider::{MockConfig, MockProvider};
+        use glib::prelude::Cast;
+
+        let context = glib::MainContext::default();
+        let root = Location::from_uri("smb://fixture/share").unwrap();
+        let provider = std::rc::Rc::new(MockProvider::new(context, MockConfig::default()));
+        let view = FileView::new_with_repository(root, provider);
+        let directory = tempfile::tempdir().unwrap();
+        let folder_path = directory.path().join("folder");
+        let file_path = directory.path().join("file.txt");
+        std::fs::create_dir(&folder_path).unwrap();
+        std::fs::write(&file_path, b"fixture").unwrap();
+        let folder = FileItem::from_path(&folder_path).unwrap();
+        let file = FileItem::from_path(&file_path).unwrap();
+        let folders = gio::ListStore::new::<glib::BoxedAnyObject>();
+        let files = gio::ListStore::new::<glib::BoxedAnyObject>();
+        folders.append(&glib::BoxedAnyObject::new(ListRow::File(folder.clone())));
+        files.append(&glib::BoxedAnyObject::new(ListRow::File(file.clone())));
+        *view.folder_store.borrow_mut() = Some(folders.clone());
+        *view.model_store.borrow_mut() = Some(files.clone());
+        view.folder_row_index
+            .borrow_mut()
+            .insert(folder.location().clone(), 0);
+        view.model_row_index
+            .borrow_mut()
+            .insert(file.location().clone(), 0);
+
+        view.apply_visible_metadata(vec![
+            VisibleMetadata {
+                location: folder.location().clone(),
+                size: Some(111),
+                modified: None,
+                content_type: None,
+            },
+            VisibleMetadata {
+                location: file.location().clone(),
+                size: Some(222),
+                modified: None,
+                content_type: None,
+            },
+        ]);
+
+        let size_at = |store: &gio::ListStore| {
+            let object = store.item(0).unwrap().downcast::<glib::BoxedAnyObject>().unwrap();
+            let ListRow::File(item) = &*object.borrow::<ListRow>() else {
+                panic!("fixture row must be a file");
+            };
+            item.size()
+        };
+        assert_eq!(size_at(&folders), 111, "folder cells receive visible metadata");
+        assert_eq!(size_at(&files), 222, "file cells receive visible metadata");
         view.close();
     }
 
