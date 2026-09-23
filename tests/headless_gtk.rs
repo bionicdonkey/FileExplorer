@@ -629,6 +629,52 @@ fn slice5_streamed_refresh_restores_selection_from_a_later_page() {
 }
 
 #[gtk::test]
+fn slice5_stream_pages_yield_to_incremental_sort_until_complete() {
+    use zorin_explorer::{
+        core::{ViewMode, ViewOptions},
+        ui::file_view::FileView,
+    };
+    let root = Location::from_uri("smb://scale/incremental-sort").unwrap();
+    let backend = Rc::new(scale_fixture::StreamingRepository::new(
+        scale_fixture::entries(&root, 1_024),
+    ));
+    let view = FileView::new_with_repository(root, backend);
+    view.set_options(ViewOptions {
+        view_mode: ViewMode::DetailedList,
+        ..Default::default()
+    });
+    let window = gtk::Window::builder()
+        .default_width(800)
+        .default_height(500)
+        .child(&view.widget)
+        .build();
+    window.present();
+
+    scale_pump_until(|| view.column_view().is_some());
+    let selection = view
+        .column_view()
+        .unwrap()
+        .model()
+        .unwrap()
+        .downcast::<gtk::MultiSelection>()
+        .unwrap();
+    let sorted = selection
+        .model()
+        .unwrap()
+        .downcast::<gtk::SortListModel>()
+        .expect("large streamed directories must retain the incremental sort wrapper");
+    assert!(
+        sorted.is_incremental(),
+        "streamed pages must use GTK incremental sorting instead of synchronous full sorts"
+    );
+    scale_pump_until(|| !view.has_pending_navigation() && selection.n_items() == 1_024);
+    scale_pump_until(|| sorted.pending() == 0);
+
+    view.close();
+    window.close();
+}
+
+#[gtk::test]
 fn slice4_platform_layout_renders_large_text_narrow_rtl_and_high_contrast() {
     use adw::prelude::AdwApplicationWindowExt;
     use std::cell::RefCell;

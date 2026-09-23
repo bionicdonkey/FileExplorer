@@ -122,6 +122,7 @@ pub struct FileView {
     folder_row_index: Rc<RefCell<std::collections::HashMap<Location, u32>>>,
     rendered_generation: Rc<std::cell::Cell<Option<u64>>>,
     rendered_count: Rc<std::cell::Cell<usize>>,
+    stream_append_retry_scheduled: Rc<std::cell::Cell<bool>>,
     directory_monitor: Rc<RefCell<Option<(Location, gio::FileMonitor)>>>,
     monitor_refresh_pending: Rc<std::cell::Cell<bool>>,
     controllers: Rc<RefCell<Vec<gtk::EventController>>>,
@@ -204,6 +205,7 @@ impl FileView {
             folder_row_index: Default::default(),
             rendered_generation: Default::default(),
             rendered_count: Default::default(),
+            stream_append_retry_scheduled: Default::default(),
             directory_monitor: Default::default(),
             monitor_refresh_pending: Default::default(),
             controllers: Default::default(),
@@ -373,7 +375,7 @@ impl FileView {
         // A stream extends the existing model in bounded pages. Replacing the
         // widget here would repeatedly reset scrolling, focus and cell caches.
         if self.append_directory_page() {
-            if !self.has_pending_navigation() {
+            if !self.has_pending_navigation() && !self.has_unrendered_directory_entries() {
                 if let Some(keys) = self.stream_selection.borrow_mut().take() {
                     self.restore_stream_selection(keys);
                 }
@@ -1559,7 +1561,7 @@ impl FileView {
         });
         let filtered = FilterListModel::new(Some(store), Some(filter));
         let sorted = SortListModel::new(Some(filtered), Some(sorter));
-        sorted.set_incremental(false);
+        sorted.set_incremental(true);
         let selection = MultiSelection::new(Some(sorted.clone()));
         let populating = Rc::new(std::cell::Cell::new(false));
         let population = populating.clone();
@@ -1574,10 +1576,13 @@ impl FileView {
                 .collect::<std::collections::HashSet<_>>(),
         ));
         let selection_keys = keys.clone();
-        glib::idle_add_local(move || {
+        glib::idle_add_local_full(glib::Priority::LOW, move || {
             let Some(store) = weak.upgrade() else {
                 return glib::ControlFlow::Break;
             };
+            if sorted.pending() > 0 {
+                return glib::ControlFlow::Continue;
+            }
             if let Some(page) = pages.next_page() {
                 row_index
                     .borrow_mut()
@@ -1640,6 +1645,67 @@ impl FileView {
                 .is_some_and(|snapshot| snapshot.next_page.is_some())
     }
 
+    fn has_pending_incremental_sort(&self) -> bool {
+        fn pending(widget: &gtk::Widget) -> bool {
+            let model = widget
+                .downcast_ref::<ColumnView>()
+                .and_then(|view| view.model())
+                .or_else(|| {
+                    widget
+                        .downcast_ref::<gtk::GridView>()
+                        .and_then(|view| view.model())
+                });
+            if model
+                .and_downcast::<MultiSelection>()
+                .and_then(|selection| selection.model())
+                .and_downcast::<SortListModel>()
+                .is_some_and(|model| model.is_incremental() && model.pending() > 0)
+            {
+                return true;
+            }
+            let mut child = widget.first_child();
+            while let Some(next) = child {
+                if pending(&next) {
+                    return true;
+                }
+                child = next.next_sibling();
+            }
+            false
+        }
+        pending(self.widget.upcast_ref())
+    }
+
+    fn has_unrendered_directory_entries(&self) -> bool {
+        let state = self.navigation.state.borrow();
+        self.rendered_generation.get() == Some(state.navigation_generation)
+            && state
+                .directory
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.entries.len() > self.rendered_count.get())
+    }
+
+    fn schedule_directory_page_append(&self) {
+        if self.stream_append_retry_scheduled.replace(true) {
+            return;
+        }
+        let view = self.clone();
+        glib::idle_add_local_full(glib::Priority::LOW, move || {
+            if matches!(
+                view.navigation.state.borrow().status,
+                NavigationStatus::Closed
+            ) {
+                view.stream_append_retry_scheduled.set(false);
+                return glib::ControlFlow::Break;
+            }
+            if view.has_pending_incremental_sort() {
+                return glib::ControlFlow::Continue;
+            }
+            view.stream_append_retry_scheduled.set(false);
+            view.navigation_finished();
+            glib::ControlFlow::Break
+        });
+    }
+
     fn append_directory_page(&self) -> bool {
         let state = self.navigation.state.borrow();
         if self.rendered_generation.get() != Some(state.navigation_generation)
@@ -1655,14 +1721,20 @@ impl FileView {
         let Some(store) = store else {
             return false;
         };
+        if self.has_pending_incremental_sort() {
+            drop(state);
+            self.schedule_directory_page_append();
+            return true;
+        }
         let options = self.options();
-        let additions: Vec<_> = snapshot
-            .entries
+        let start = self.rendered_count.get();
+        let end = (start + crate::application::performance::PAGE_SIZE).min(snapshot.entries.len());
+        let additions: Vec<_> = snapshot.entries[start..end]
             .iter()
-            .skip(self.rendered_count.get())
             .map(FileItem::from_snapshot)
             .collect();
-        self.rendered_count.set(snapshot.entries.len());
+        self.rendered_count.set(end);
+        let more_entries = end < snapshot.entries.len();
         drop(state);
         let folders = self.folder_store.borrow().clone();
         let (folders_to_add, files_to_add): (Vec<_>, Vec<_>) = additions
@@ -1675,6 +1747,9 @@ impl FileView {
             self.folder_row_index
                 .borrow_mut()
                 .extend(append_model_page(&folders, folders_to_add, options.group_field));
+        }
+        if more_entries {
+            self.schedule_directory_page_append();
         }
         true
     }
