@@ -379,6 +379,16 @@ pub struct EntrySnapshot {
     pub capabilities: CapabilitySnapshot,
 }
 
+/// Advisory attributes loaded after a row enters GTK's visible viewport.
+/// Identity and core actions remain available while this optional data loads.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VisibleMetadata {
+    pub location: Location,
+    pub size: Option<u64>,
+    pub modified: Option<SystemTime>,
+    pub content_type: Option<String>,
+}
+
 /// Offset paging requires stable provider order. Each page has a fresh request
 /// ID and exactly one completion; the application merges pages by canonical URI.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

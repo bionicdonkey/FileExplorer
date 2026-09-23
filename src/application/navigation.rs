@@ -42,6 +42,13 @@ impl NavigationCoordinator {
     ) -> Option<gio::FileMonitor> {
         self.repository.watch(location, Box::new(changed))
     }
+    pub fn inspect_visible_metadata(
+        &self,
+        locations: Vec<Location>,
+        done: crate::core::ports::VisibleMetadataCallback,
+    ) {
+        self.repository.inspect_visible_metadata(locations, done);
+    }
     pub fn retry(&self, changed: impl FnMut(bool) + 'static) -> bool {
         let request = self.state.borrow_mut().begin_retry();
         self.dispatch(request, changed)

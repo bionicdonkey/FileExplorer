@@ -6,9 +6,9 @@ use gio::prelude::*;
 use glib::prelude::ToValue;
 use gtk::prelude::*;
 use gtk::{
-    Box as GtkBox, Button, ColumnView, ColumnViewColumn, CustomSorter, FlowBox, GestureClick,
-    Image, Label, MultiSelection, Orientation, Popover, ScrolledWindow, Separator,
-    SignalListItemFactory, SortListModel,
+    Box as GtkBox, Button, ColumnView, ColumnViewColumn, CustomFilter, CustomSorter,
+    FilterListModel, FlowBox, GestureClick, Image, Label, MultiSelection, Orientation, Popover,
+    ScrolledWindow, Separator, SignalListItemFactory, SortListModel,
 };
 
 use crate::application::commands::{
@@ -116,6 +116,11 @@ pub struct FileView {
     monitor_refresh_pending: Rc<std::cell::Cell<bool>>,
     controllers: Rc<RefCell<Vec<gtk::EventController>>>,
     stream_selection: Rc<RefCell<Option<Vec<String>>>>,
+    visible_metadata: Rc<
+        RefCell<
+            crate::application::performance::VisibleCache<crate::core::contracts::VisibleMetadata>,
+        >,
+    >,
 }
 
 impl FileView {
@@ -191,6 +196,9 @@ impl FileView {
             monitor_refresh_pending: Default::default(),
             controllers: Default::default(),
             stream_selection: Default::default(),
+            visible_metadata: Rc::new(RefCell::new(
+                crate::application::performance::VisibleCache::new(Default::default()),
+            )),
         };
         let background_view = view.clone();
         let background = GestureClick::new();
@@ -402,6 +410,62 @@ impl FileView {
         self.reload();
     }
 
+    fn request_visible_metadata(&self, item: &FileItem) {
+        let mut cache = self.visible_metadata.borrow_mut();
+        if cache.get(item.location()).is_some() {
+            return;
+        }
+        cache.insert(
+            item.location().clone(),
+            crate::core::contracts::VisibleMetadata {
+                location: item.location().clone(),
+                size: None,
+                modified: None,
+                content_type: None,
+            },
+        );
+        drop(cache);
+        let view = self.clone();
+        self.navigation.inspect_visible_metadata(
+            vec![item.location().clone()],
+            Box::new(move |metadata| view.apply_visible_metadata(metadata)),
+        );
+    }
+
+    fn apply_visible_metadata(&self, metadata: Vec<crate::core::contracts::VisibleMetadata>) {
+        if metadata.is_empty() {
+            return;
+        }
+        let mut cache = self.visible_metadata.borrow_mut();
+        for entry in &metadata {
+            cache.insert(entry.location.clone(), entry.clone());
+        }
+        drop(cache);
+        let Some(store) = self.model_store.borrow().clone() else {
+            return;
+        };
+        for index in 0..store.n_items() {
+            let Some(object) = store.item(index).and_downcast::<glib::BoxedAnyObject>() else {
+                continue;
+            };
+            let ListRow::File(item) = &*object.borrow::<ListRow>() else {
+                continue;
+            };
+            if let Some(entry) = metadata
+                .iter()
+                .find(|entry| entry.location == *item.location())
+            {
+                store.splice(
+                    index,
+                    1,
+                    &[glib::BoxedAnyObject::new(ListRow::File(
+                        item.with_visible_metadata(entry),
+                    ))],
+                );
+            }
+        }
+    }
+
     fn watch_committed_directory(&self) {
         let state = self.navigation.state.borrow();
         if !matches!(state.status, NavigationStatus::Ready) {
@@ -426,6 +490,7 @@ impl FileView {
                 return;
             }
             invalidate_thumbnails();
+            view.visible_metadata.borrow_mut().invalidate();
             let view = view.clone();
             glib::timeout_add_local_once(std::time::Duration::from_millis(100), move || {
                 view.monitor_refresh_pending.set(false);
@@ -1051,7 +1116,6 @@ impl FileView {
                 Some(snapshot) => snapshot
                     .entries
                     .iter()
-                    .filter(|entry| options.show_hidden || !entry.display_name.starts_with('.'))
                     .map(FileItem::from_snapshot)
                     .collect(),
                 None => {
@@ -1381,13 +1445,21 @@ impl FileView {
         use crate::application::performance::PagedSnapshot;
         let store = gio::ListStore::new::<glib::BoxedAnyObject>();
         *self.model_store.borrow_mut() = Some(store.clone());
-        let mut pages = PagedSnapshot::new(items.to_vec(), options);
+        let mut pages = PagedSnapshot::new(items.to_vec());
         if let Some(page) = pages.next_page() {
             append_model_page(&store, page, options.group_field);
         }
         let weak = store.downgrade();
         let group_field = options.group_field;
+        let filter_options = options.clone();
         let options = options.clone();
+        let filter = CustomFilter::new(move |object| {
+            let object = object.downcast_ref::<glib::BoxedAnyObject>().unwrap();
+            match &*object.borrow::<ListRow>() {
+                ListRow::Group(_) => true,
+                ListRow::File(item) => filter_options.show_hidden || !item.name().starts_with('.'),
+            }
+        });
         let sorter = CustomSorter::new(move |a, b| {
             let a = a
                 .downcast_ref::<glib::BoxedAnyObject>()
@@ -1437,7 +1509,8 @@ impl FileView {
             };
             folders.then(order).into()
         });
-        let sorted = SortListModel::new(Some(store), Some(sorter));
+        let filtered = FilterListModel::new(Some(store), Some(filter));
+        let sorted = SortListModel::new(Some(filtered), Some(sorter));
         sorted.set_incremental(true);
         let selection = MultiSelection::new(Some(sorted.clone()));
         let populating = Rc::new(std::cell::Cell::new(false));
@@ -1537,7 +1610,6 @@ impl FileView {
             .entries
             .iter()
             .skip(self.rendered_count.get())
-            .filter(|entry| options.show_hidden || !entry.display_name.starts_with('.'))
             .map(FileItem::from_snapshot)
             .collect();
         self.rendered_count.set(snapshot.entries.len());
@@ -2422,6 +2494,11 @@ fn column_factory_layout(
         let Some(child) = list_item.child() else {
             return;
         };
+        if let ListRow::File(item) = &*row {
+            // GTK binds only live/recycled viewport cells, so this is the
+            // production visible-range boundary for advisory metadata work.
+            bind_view.request_visible_metadata(item);
+        }
         list_item.set_selectable(matches!(&*row, ListRow::File(_)));
         if matches!(&*row, ListRow::File(item) if bind_view.pending_cut.borrow().contains(item.location())) {
             child.add_css_class("cut-pending");
@@ -2635,6 +2712,75 @@ mod tests {
             }
             window.close();
         }
+        view.close();
+    }
+
+    #[gtk::test]
+    fn slice5_rebound_virtual_cells_request_each_new_uri_once() {
+        use super::{column_factory, ListRow};
+        use crate::core::contracts::{Capability, CapabilitySnapshot, EntryKind, EntrySnapshot};
+        use crate::core::ListColumn;
+        use crate::infrastructure::mock_provider::{MockConfig, MockProvider};
+        use gtk::prelude::*;
+
+        let context = glib::MainContext::default();
+        let root = Location::from_uri("smb://fixture/share").unwrap();
+        let provider = std::rc::Rc::new(MockProvider::new(context.clone(), MockConfig::default()));
+        let snapshot = |name: &str| EntrySnapshot {
+            location: Location::from_uri(&format!("{}/{}", root.uri(), name)).unwrap(),
+            display_name: name.into(),
+            kind: EntryKind::File,
+            size: Some(7),
+            modified: None,
+            content_type: Some("text/plain".into()),
+            capabilities: CapabilitySnapshot {
+                supported: [Capability::List].into_iter().collect(),
+                ..Default::default()
+            },
+        };
+        let first = FileItem::from_snapshot(&snapshot("first.txt"));
+        let second = FileItem::from_snapshot(&snapshot("second.txt"));
+        let view = FileView::new_with_repository(root, provider.clone());
+        let row = glib::BoxedAnyObject::new(ListRow::File(first.clone()));
+        let store = gio::ListStore::new::<glib::BoxedAnyObject>();
+        store.append(&row);
+        let factory = column_factory(ListColumn::Name, false, view.clone());
+        let bound = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let capture = bound.clone();
+        factory.connect_bind(move |_, item| {
+            *capture.borrow_mut() = Some(item.downcast_ref::<gtk::ListItem>().unwrap().clone());
+        });
+        let list = gtk::ListView::new(
+            Some(gtk::NoSelection::new(Some(store))),
+            Some(factory.clone()),
+        );
+        let window = gtk::Window::new();
+        window.set_child(Some(&list));
+        window.present();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while bound.borrow().is_none() {
+            context.iteration(false);
+            assert!(std::time::Instant::now() < deadline);
+        }
+        let bound = bound.borrow().clone().unwrap();
+        assert_eq!(
+            provider.visible_metadata_requests(),
+            vec![first.location().clone()]
+        );
+
+        row.replace(ListRow::File(second.clone()));
+        factory.emit_by_name::<()>("bind", &[&bound]);
+        row.replace(ListRow::File(first.clone()));
+        factory.emit_by_name::<()>("bind", &[&bound]);
+        let requests = provider.visible_metadata_requests();
+        assert_eq!(
+            requests.len(),
+            2,
+            "rebinding a cached URI must not repeat I/O"
+        );
+        assert!(requests.contains(first.location()));
+        assert!(requests.contains(second.location()));
+        window.close();
         view.close();
     }
 

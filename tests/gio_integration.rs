@@ -414,7 +414,7 @@ fn directory_listing_preserves_non_utf8_filename_identity() {
 }
 
 #[test]
-fn directory_listing_returns_owned_uri_metadata_on_owner_context() {
+fn directory_listing_returns_owned_uri_identity_without_eager_advisory_metadata() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("data.txt"), "hello").unwrap();
     std::fs::create_dir(dir.path().join("folder")).unwrap();
@@ -438,22 +438,26 @@ fn directory_listing_returns_owned_uri_metadata_on_owner_context() {
         .iter()
         .find(|entry| entry.display_name == "data.txt")
         .unwrap();
-    assert_eq!(file.size, Some(5));
+    // Paged enumeration returns identity and display data immediately; advisory metadata
+    // is loaded only when a view marks the corresponding row visible.
+    assert_eq!(file.size, None);
+    assert_eq!(file.modified, None);
+    assert_eq!(file.content_type, None);
     assert_eq!(file.kind, EntryKind::File);
     assert_eq!(
         file.location,
         Location::from_local_path(&dir.path().join("data.txt"))
     );
-    assert!(file.capabilities.supports(Capability::Copy));
+    assert!(!file.capabilities.supports(Capability::Copy));
     // Exercise the active repository projection, not a hand-built FileInfo.
     let item = zorin_explorer::core::FileItem::from_snapshot(file);
     let availability = zorin_explorer::ui::context_menu::CommandAvailability::for_capabilities(
         &[item],
         Some(&snapshot.capabilities),
     );
-    assert!(availability.can_cut);
-    assert!(availability.allows(zorin_explorer::application::commands::ContextCommand::MoveTo));
-    assert!(availability.allows(zorin_explorer::application::commands::ContextCommand::Rename));
+    assert!(!availability.can_cut);
+    assert!(!availability.allows(zorin_explorer::application::commands::ContextCommand::MoveTo));
+    assert!(!availability.allows(zorin_explorer::application::commands::ContextCommand::Rename));
     assert!(snapshot.capabilities.supports(Capability::Rename));
     assert!(snapshot.capabilities.supports(Capability::List));
     assert!(!snapshot.capabilities.stable_order);

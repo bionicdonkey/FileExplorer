@@ -78,6 +78,7 @@ struct MockState {
     capabilities: CapabilitySnapshot,
     operation_behavior: MockOperationBehavior,
     search_behavior: MockSearchBehavior,
+    visible_metadata_requests: Vec<Location>,
 }
 
 #[derive(Clone)]
@@ -103,6 +104,7 @@ impl MockProvider {
                 capabilities: CapabilitySnapshot::default(),
                 operation_behavior: MockOperationBehavior::default(),
                 search_behavior: MockSearchBehavior::default(),
+                visible_metadata_requests: Vec::new(),
             })),
         }
     }
@@ -148,6 +150,10 @@ impl MockProvider {
 
     pub fn set_search_behavior(&self, behavior: MockSearchBehavior) {
         self.state.borrow_mut().search_behavior = behavior;
+    }
+
+    pub fn visible_metadata_requests(&self) -> Vec<Location> {
+        self.state.borrow().visible_metadata_requests.clone()
     }
 
     /// Make due work ready in submission order for equal deadlines. This never
@@ -598,6 +604,33 @@ impl PendingOperation {
 }
 
 impl DirectoryRepository for MockProvider {
+    fn inspect_visible_metadata(&self, locations: Vec<Location>, done: VisibleMetadataCallback) {
+        self.state
+            .borrow_mut()
+            .visible_metadata_requests
+            .extend(locations.clone());
+        self.schedule(Box::new(move |provider| {
+            let state = provider.state.borrow();
+            let metadata = locations
+                .into_iter()
+                .filter_map(|location| {
+                    state
+                        .directories
+                        .values()
+                        .flat_map(|fixture| fixture.entries.iter())
+                        .find(|entry| entry.location == location)
+                        .map(|entry| VisibleMetadata {
+                            location,
+                            size: entry.size,
+                            modified: entry.modified,
+                            content_type: entry.content_type.clone(),
+                        })
+                })
+                .collect();
+            done(metadata);
+        }));
+    }
+
     fn list(&self, request: DirectoryRequest, done: DirectoryCallback) {
         self.schedule(Box::new(move |provider| {
             let outcome = if request.cancellable.is_cancelled() {

@@ -12,6 +12,7 @@
 use super::contracts::*;
 
 pub type DirectoryCallback = Box<dyn FnOnce(RequestCompletion<DirectorySnapshot>)>;
+pub type VisibleMetadataCallback = Box<dyn FnOnce(Vec<VisibleMetadata>)>;
 /// Ordered pages from one enumeration cursor, ending in exactly one page with
 /// no continuation or a terminal failure/cancellation. No tree pre-count.
 pub type DirectoryPageSink = Box<dyn FnMut(RequestCompletion<DirectorySnapshot>)>;
@@ -23,6 +24,15 @@ pub trait DirectoryRepository {
     fn list(&self, request: DirectoryRequest, done: DirectoryCallback);
     fn list_pages(&self, request: DirectoryRequest, mut sink: DirectoryPageSink) {
         self.list(request, Box::new(move |result| sink(result)));
+    }
+    /// Requests advisory row metadata only for rows currently visible in a view.
+    /// It must not delay listing identity or capability checks.
+    fn inspect_visible_metadata(
+        &self,
+        _locations: Vec<crate::core::Location>,
+        done: VisibleMetadataCallback,
+    ) {
+        done(Vec::new());
     }
     /// Watch only this directory; never recursively walk a remote tree.
     fn watch(

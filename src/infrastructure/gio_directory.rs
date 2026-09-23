@@ -43,6 +43,42 @@ impl DirectoryRepository for GioDirectoryRepository {
         });
         Some(monitor)
     }
+    fn inspect_visible_metadata(&self, locations: Vec<Location>, done: VisibleMetadataCallback) {
+        self.context.spawn_local(async move {
+            let metadata = gio::spawn_blocking(move || {
+                locations
+                    .into_iter()
+                    .filter_map(|location| {
+                        let info = gio::File::for_uri(location.uri())
+                            .query_info(
+                                "standard::fast-content-type,standard::size,time::modified",
+                                gio::FileQueryInfoFlags::NONE,
+                                gio::Cancellable::NONE,
+                            )
+                            .ok()?;
+                        Some(VisibleMetadata {
+                            location,
+                            size: info
+                                .has_attribute("standard::size")
+                                .then(|| info.size() as u64),
+                            modified: info.has_attribute("time::modified").then(|| {
+                                std::time::UNIX_EPOCH
+                                    + std::time::Duration::from_secs(
+                                        info.attribute_uint64("time::modified"),
+                                    )
+                            }),
+                            content_type: info
+                                .attribute_string("standard::fast-content-type")
+                                .map(|value| value.to_string()),
+                        })
+                    })
+                    .collect()
+            })
+            .await
+            .unwrap_or_default();
+            done(metadata);
+        });
+    }
     fn list_pages(&self, request: DirectoryRequest, mut sink: DirectoryPageSink) {
         let (send, receive) = std::sync::mpsc::sync_channel(2);
         let worker = request.clone();
@@ -208,10 +244,13 @@ fn enumerate_with_pages(
     };
     // Fast content type comes from directory/name metadata. Do not sniff every
     // file's contents just to populate a model; image decoding is visible-only.
-    let enumerator = file.enumerate_children(
-        "standard::name,standard::display-name,standard::type,standard::fast-content-type,standard::size,standard::target-uri,time::modified,access::can-read,access::can-write,access::can-rename,access::can-trash,access::can-delete",
-        gio::FileQueryInfoFlags::NONE, Some(&request.cancellable),
-    ).map_err(map_error)?;
+    let enumerator = file
+        .enumerate_children(
+            "standard::name,standard::display-name,standard::type,standard::target-uri",
+            gio::FileQueryInfoFlags::NONE,
+            Some(&request.cancellable),
+        )
+        .map_err(map_error)?;
     let result = (|| {
         let mut entries = Vec::new();
         let mut offset = 0;
@@ -219,9 +258,6 @@ fn enumerate_with_pages(
             .next_file(Some(&request.cancellable))
             .map_err(map_error)?
         {
-            if let Some(content_type) = info.attribute_string("standard::fast-content-type") {
-                info.set_content_type(&content_type);
-            }
             let item = FileItem::from_gio(&file, &info);
             entries.push(EntrySnapshot {
                 location: item.location().clone(),
@@ -232,11 +268,9 @@ fn enumerate_with_pages(
                     gio::FileType::Regular => EntryKind::File,
                     _ => EntryKind::Other,
                 },
-                size: info.has_attribute("standard::size").then(|| item.size()),
-                modified: info
-                    .has_attribute("time::modified")
-                    .then(|| item.modified()),
-                content_type: info.content_type().map(|s| s.to_string()),
+                size: None,
+                modified: None,
+                content_type: None,
                 capabilities: item.capabilities().clone(),
             });
             if entries.len() == 128 {

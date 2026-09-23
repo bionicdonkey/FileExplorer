@@ -43,6 +43,23 @@ impl FileItem {
                 .unwrap_or_else(|| "application/octet-stream".into()),
         }
     }
+
+    /// Incorporates optional attributes returned after GTK has bound this row.
+    /// The canonical item identity and capability projection never change here.
+    pub fn with_visible_metadata(&self, metadata: &super::contracts::VisibleMetadata) -> Self {
+        debug_assert_eq!(self.location, metadata.location);
+        let mut item = self.clone();
+        if let Some(size) = metadata.size {
+            item.size = size;
+        }
+        if let Some(modified) = metadata.modified {
+            item.modified = modified;
+        }
+        if let Some(content_type) = &metadata.content_type {
+            item.content_type = content_type.clone();
+        }
+        item
+    }
     pub fn from_dir_entry(entry: &DirEntry) -> io::Result<Self> {
         // DirEntry::metadata() describes the link itself. fs::metadata follows
         // it, which lets a symbolic link to a folder behave like a folder.

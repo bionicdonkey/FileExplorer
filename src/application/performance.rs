@@ -1,5 +1,5 @@
 //! Bounded chunks for main-context model work and URI-keyed visible-row caches.
-use crate::core::{FileItem, Location, ViewOptions};
+use crate::core::{FileItem, Location};
 use std::collections::VecDeque;
 use std::time::Duration;
 
@@ -9,26 +9,18 @@ pub const PAGE_SIZE: usize = 128;
 /// GTK's incremental sorter merges those chunks without blocking input.
 pub struct PagedSnapshot {
     items: std::vec::IntoIter<FileItem>,
-    show_hidden: bool,
 }
 impl PagedSnapshot {
-    pub fn new(items: Vec<FileItem>, options: &ViewOptions) -> Self {
+    pub fn new(items: Vec<FileItem>) -> Self {
         Self {
             items: items.into_iter(),
-            show_hidden: options.show_hidden,
         }
     }
     pub fn next_page(&mut self) -> Option<Vec<FileItem>> {
         if self.items.len() == 0 {
             return None;
         }
-        Some(
-            self.items
-                .by_ref()
-                .take(PAGE_SIZE)
-                .filter(|item| self.show_hidden || !item.name().starts_with('.'))
-                .collect(),
-        )
+        Some(self.items.by_ref().take(PAGE_SIZE).collect())
     }
 }
 
