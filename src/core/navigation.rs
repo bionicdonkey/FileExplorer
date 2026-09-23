@@ -22,6 +22,9 @@ impl NavigationHistory {
             self.entries.truncate(cursor + 1);
         }
         self.entries.push(path);
+        if self.entries.len() > super::application_preferences::MAX_HISTORY_RECORDS {
+            self.entries.remove(0);
+        }
         self.cursor = Some(self.entries.len() - 1);
     }
 
@@ -120,6 +123,7 @@ pub struct TabState {
     pub status: NavigationStatus,
     pending: Option<NavigationRequest>,
     retry: Option<(Location, HistoryCommit)>,
+    page_keys: std::collections::HashSet<Location>,
 }
 
 impl TabState {
@@ -134,6 +138,7 @@ impl TabState {
             status: NavigationStatus::Idle,
             pending: None,
             retry: None,
+            page_keys: Default::default(),
         }
     }
     pub fn begin_navigation(&mut self, location: Location) -> Option<NavigationRequest> {
@@ -181,6 +186,7 @@ impl TabState {
             return None;
         }
         self.cancel_pending();
+        self.page_keys.clear();
         self.navigation_generation = self
             .navigation_generation
             .checked_add(1)
@@ -274,6 +280,105 @@ impl TabState {
             }
         }
         true
+    }
+    /// Streaming pages use the same generation and request id. The first page
+    /// commits history; later pages only extend that committed directory.
+    pub fn apply_directory_page(
+        &mut self,
+        generation: u64,
+        mut result: RequestCompletion<DirectorySnapshot>,
+    ) -> bool {
+        let Some(mut pending) = self.pending.clone() else {
+            return false;
+        };
+        if generation != self.navigation_generation || result.id != pending.request.id {
+            return false;
+        }
+        if let RequestOutcome::Succeeded(snapshot) = &result.outcome {
+            if snapshot.location.requested != pending.request.location
+                || snapshot.next_page.is_some_and(|next| {
+                    next.limit == 0
+                        || next.offset != pending.request.page.offset + snapshot.entries.len()
+                        || next.offset <= pending.request.page.offset
+                })
+                || (pending.request.page.offset > 0
+                    && self
+                        .directory
+                        .as_ref()
+                        .is_some_and(|previous| previous.location != snapshot.location))
+            {
+                return self.apply_directory_result(
+                    generation,
+                    RequestCompletion {
+                        id: result.id,
+                        outcome: RequestOutcome::Failed(OperationError::new(
+                            OperationErrorKind::InvalidRequest,
+                            Some(&pending.request.location),
+                            None,
+                        )),
+                    },
+                );
+            }
+        }
+        let next = match &mut result.outcome {
+            RequestOutcome::Succeeded(snapshot)
+                if snapshot.location.requested == pending.request.location =>
+            {
+                snapshot.next_page.take()
+            }
+            _ => None,
+        };
+        if pending.request.page.offset > 0 {
+            if let RequestOutcome::Succeeded(snapshot) = &mut result.outcome {
+                if let Some(previous) = &mut self.directory {
+                    previous.entries.extend(
+                        std::mem::take(&mut snapshot.entries)
+                            .into_iter()
+                            .filter(|entry| self.page_keys.insert(entry.location.clone())),
+                    );
+                    previous.next_page = next;
+                    previous.capabilities = snapshot.capabilities.clone();
+                    if let Some(next) = next {
+                        pending.request.page = next;
+                        self.pending = Some(pending);
+                    } else {
+                        self.pending = None;
+                        self.selection_keys.retain(|key| {
+                            previous
+                                .entries
+                                .iter()
+                                .any(|entry| entry.location.uri() == key)
+                        });
+                    }
+                    return true;
+                }
+            }
+        }
+        let selected = self.selection_keys.clone();
+        let same_location = matches!(&result.outcome, RequestOutcome::Succeeded(snapshot) if snapshot.location.resolved == self.location);
+        if let RequestOutcome::Succeeded(snapshot) = &mut result.outcome {
+            snapshot
+                .entries
+                .retain(|entry| self.page_keys.insert(entry.location.clone()));
+        }
+        let accepted = self.apply_directory_result(generation, result);
+        if accepted && matches!(self.status, NavigationStatus::Ready) {
+            if let Some(next) = next {
+                if next.offset <= pending.request.page.offset {
+                    return true;
+                }
+                pending.request.page = next;
+                pending.commit = HistoryCommit::Replace;
+                self.pending = Some(pending);
+                if same_location {
+                    self.selection_keys = selected;
+                }
+                if let Some(snapshot) = &mut self.directory {
+                    snapshot.next_page = Some(next);
+                }
+            }
+        }
+        accepted
     }
     pub fn cancel_pending(&mut self) {
         if let Some(pending) = self.pending.take() {

@@ -189,7 +189,11 @@ impl ExplorerWindow {
                         for notice in session.notices {
                             eprintln!("Saved tabs recovery notice: {notice:?}");
                         }
-                        session.locations
+                        session
+                            .locations
+                            .into_iter()
+                            .take(crate::core::application_preferences::MAX_SESSION_TABS)
+                            .collect()
                     }
                     Err(error) => {
                         eprintln!("Saved tabs could not be recovered: {error}");

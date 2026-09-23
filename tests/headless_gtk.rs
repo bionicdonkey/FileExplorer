@@ -1,4 +1,511 @@
 use std::rc::Rc;
+#[path = "support/scale_fixture.rs"]
+mod scale_fixture;
+
+#[track_caller]
+fn scale_pump_until(mut ready: impl FnMut() -> bool) {
+    let context = glib::MainContext::default();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while !ready() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "scale fixture did not settle"
+        );
+        context.iteration(false);
+    }
+}
+
+#[track_caller]
+fn scale_first_frame(view: &zorin_explorer::ui::file_view::FileView) {
+    scale_pump_until(|| {
+        view.column_view().is_some_and(|list| {
+            list.height() > 0 && list.model().is_some_and(|model| model.n_items() > 0)
+        })
+    });
+    let paintable = gtk::WidgetPaintable::new(Some(&view.widget));
+    scale_pump_until(|| {
+        let snapshot = gtk::Snapshot::new();
+        paintable.snapshot(
+            &snapshot,
+            view.widget.width() as f64,
+            view.widget.height() as f64,
+        );
+        snapshot.to_node().is_some()
+    });
+}
+
+#[gtk::test]
+fn slice5_cold_warm_local_remote_frames_and_fifty_tabs_meet_p95_budgets() {
+    use std::time::{Duration, Instant};
+    use zorin_explorer::{application::performance::assert_p95, ui::file_view::FileView};
+    println!("Benchmark environment: {:#?}", scale_fixture::environment());
+    let directory = tempfile::tempdir().unwrap();
+    for n in 0..10_000 {
+        std::fs::write(directory.path().join(format!("file-{n:05}")), b"fixture").unwrap();
+    }
+    let local = Location::from_local_path(directory.path());
+    let remote = Location::from_uri("smb://scale/share").unwrap();
+    let backend = Rc::new(scale_fixture::StreamingRepository::new(
+        scale_fixture::entries(&remote, 10_000),
+    ));
+    let window = gtk::Window::builder()
+        .default_width(800)
+        .default_height(500)
+        .build();
+    window.present();
+    for remote_fixture in [false, true] {
+        let mut cold = Vec::new();
+        let mut warm = Vec::new();
+        let mut acknowledgements = Vec::new();
+        let mut stalls = Vec::new();
+        for run in 0..31 {
+            if run == 0 {
+                println!(
+                    "Starting {} cold warm-up",
+                    if remote_fixture { "remote" } else { "local" }
+                );
+            }
+            let started = Instant::now();
+            let view = if remote_fixture {
+                FileView::new_with_repository(remote.clone(), backend.clone())
+            } else {
+                FileView::from_location(local.clone())
+            };
+            window.set_child(Some(&view.widget));
+            let acknowledgement = started.elapsed();
+            scale_first_frame(&view);
+            if run == 0 {
+                println!("First cold frame rendered");
+            }
+            let elapsed = if remote_fixture {
+                backend.response_started.get().unwrap().elapsed()
+            } else {
+                started.elapsed()
+            };
+            assert!(
+                view.has_pending_navigation(),
+                "first content must precede full enumeration"
+            );
+            if run > 0 {
+                cold.push(elapsed);
+                acknowledgements.push(acknowledgement);
+            }
+            let context = glib::MainContext::default();
+            while view.has_pending_navigation() {
+                let tick = Instant::now();
+                let dispatched = context.iteration(false);
+                if run > 0 && dispatched {
+                    stalls.push(tick.elapsed());
+                }
+            }
+            assert_eq!(
+                view.tab_state()
+                    .borrow()
+                    .directory
+                    .as_ref()
+                    .unwrap()
+                    .entries
+                    .len(),
+                10_000
+            );
+            let previous = view.column_view().unwrap();
+            let started = Instant::now();
+            view.navigate(if remote_fixture {
+                remote.clone()
+            } else {
+                local.clone()
+            });
+            if run == 0 {
+                println!("Starting warm refresh");
+            }
+            let acknowledgement = started.elapsed();
+            scale_pump_until(|| {
+                view.column_view()
+                    .is_some_and(|current| current != previous)
+            });
+            scale_first_frame(&view);
+            let elapsed = if remote_fixture {
+                backend.response_started.get().unwrap().elapsed()
+            } else {
+                started.elapsed()
+            };
+            if run > 0 {
+                warm.push(elapsed);
+                acknowledgements.push(acknowledgement);
+            }
+            scale_pump_until(|| !view.has_pending_navigation());
+            window.set_child(gtk::Widget::NONE);
+            view.close();
+        }
+        let budget = if remote_fixture {
+            Duration::from_secs(1)
+        } else {
+            Duration::from_millis(500)
+        };
+        assert_p95(
+            if remote_fixture {
+                "remote cold first frame after backend response"
+            } else {
+                "local cold first frame"
+            },
+            &cold,
+            budget,
+        );
+        assert_p95(
+            if remote_fixture {
+                "remote warm first frame after backend response"
+            } else {
+                "local warm first frame"
+            },
+            &warm,
+            budget,
+        );
+        assert_p95(
+            "navigation acknowledgement",
+            &acknowledgements,
+            Duration::from_millis(100),
+        );
+        assert_p95(
+            "10,000-entry page processing main-context turn",
+            &stalls,
+            Duration::from_millis(100),
+        );
+        assert!(
+            stalls
+                .iter()
+                .all(|stall| *stall < Duration::from_millis(100)),
+            "a page blocked the main context for over 100 ms"
+        );
+    }
+    let provider = Rc::new(scale_fixture::StreamingRepository::new(
+        scale_fixture::entries(&remote, 128),
+    ));
+    let mut tab_times = Vec::new();
+    let mut warm_tab_times = Vec::new();
+    for run in 0..31 {
+        let tabs = adw::TabView::new();
+        window.set_child(Some(&tabs));
+        let mut views = Vec::new();
+        for _ in 0..50 {
+            let started = Instant::now();
+            let view = FileView::new_with_repository(remote.clone(), provider.clone());
+            tabs.append(&view.widget);
+            if run > 0 {
+                tab_times.push(started.elapsed());
+            }
+            views.push(view);
+        }
+        scale_pump_until(|| views.iter().all(|view| !view.has_pending_navigation()));
+        assert_eq!(tabs.n_pages(), 50);
+        for index in 0..50 {
+            let started = Instant::now();
+            tabs.set_selected_page(&tabs.nth_page(index));
+            glib::MainContext::default().iteration(false);
+            if run > 0 {
+                warm_tab_times.push(started.elapsed());
+            }
+        }
+        for view in views {
+            view.close();
+        }
+        window.set_child(gtk::Widget::NONE);
+    }
+    assert_p95(
+        "50-tab creation acknowledgement",
+        &tab_times,
+        Duration::from_millis(100),
+    );
+    assert_p95(
+        "50-tab warm selection and event turn",
+        &warm_tab_times,
+        Duration::from_millis(100),
+    );
+    window.close();
+}
+
+#[gtk::test]
+fn slice5_page_sized_grid_recycles_rows() {
+    use zorin_explorer::{
+        core::{FileItem, ViewMode, ViewOptions},
+        ui::file_view::FileView,
+    };
+    let context = glib::MainContext::default();
+    let root = Location::from_uri("smb://fixture/share").unwrap();
+    let provider = Rc::new(MockProvider::new(context, MockConfig::default()));
+    let view = FileView::new_with_repository(root.clone(), provider);
+    view.set_options(ViewOptions {
+        view_mode: ViewMode::IconGrid,
+        ..Default::default()
+    });
+    view.show_search_results(
+        scale_fixture::entries(&root, 128)
+            .iter()
+            .map(FileItem::from_snapshot)
+            .collect(),
+    );
+    view.widget
+        .child()
+        .unwrap()
+        .downcast::<gtk::GridView>()
+        .expect("a full streaming page must use a recycled grid, not an eager FlowBox");
+    view.close();
+}
+
+#[gtk::test]
+fn slice5_large_grid_recycles_visible_rows() {
+    use zorin_explorer::{
+        core::{FileItem, ViewMode, ViewOptions},
+        ui::file_view::FileView,
+    };
+    let context = glib::MainContext::default();
+    let root = Location::from_uri("smb://fixture/share").unwrap();
+    let provider = Rc::new(MockProvider::new(context.clone(), MockConfig::default()));
+    let view = FileView::new_with_repository(root, provider.clone());
+    view.set_options(ViewOptions {
+        view_mode: ViewMode::IconGrid,
+        ..Default::default()
+    });
+    view.show_search_results(
+        (0..10_000)
+            .map(|n| {
+                FileItem::from_snapshot(&EntrySnapshot {
+                    location: Location::from_uri(&format!("smb://fixture/share/{n}")).unwrap(),
+                    display_name: format!("file-{n:05}"),
+                    kind: EntryKind::File,
+                    size: Some(n),
+                    modified: None,
+                    content_type: None,
+                    capabilities: CapabilitySnapshot::default(),
+                })
+            })
+            .collect(),
+    );
+    let grid = view
+        .widget
+        .child()
+        .unwrap()
+        .downcast::<gtk::GridView>()
+        .expect("large grids must use a recycled model");
+    let window = gtk::Window::new();
+    window.set_default_size(800, 500);
+    window.set_child(Some(&view.widget));
+    window.present();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while grid.model().unwrap().n_items() < 10_000 || grid.height() == 0 {
+        assert!(std::time::Instant::now() < deadline);
+        context.iteration(false);
+    }
+    fn count(widget: &gtk::Widget) -> usize {
+        let mut result = 1;
+        let mut child = widget.first_child();
+        while let Some(next) = child {
+            result += count(&next);
+            child = next.next_sibling();
+        }
+        result
+    }
+    assert!(
+        count(grid.upcast_ref()) < 5000,
+        "visible widget count must not scale with directory size"
+    );
+    grid.model().unwrap().select_item(9999, true);
+    assert_eq!(view.selected_items()[0].name(), "file-09999");
+    view.set_options(ViewOptions {
+        view_mode: ViewMode::DetailedList,
+        ..Default::default()
+    });
+    let model = view.column_view().unwrap().model().unwrap();
+    while model.n_items() < 10_000 {
+        context.iteration(false);
+    }
+    while context.pending() {
+        context.iteration(false);
+    }
+    assert_eq!(
+        model.selection().size(),
+        1,
+        "model replacement must restore URI selection after incremental population"
+    );
+    assert_eq!(view.selected_items()[0].name(), "file-09999");
+    let weak = view.widget.downgrade();
+    window.close();
+    window.set_child(gtk::Widget::NONE);
+    view.close();
+    provider.advance(1);
+    drop(model);
+    drop(grid);
+    drop(view);
+    drop(window);
+    while context.pending() {
+        context.iteration(false);
+    }
+    scale_pump_until(|| weak.upgrade().is_none());
+}
+
+#[gtk::test]
+fn slice5_visible_thumbnail_is_scaled_and_invalidated_by_directory_monitor() {
+    use zorin_explorer::{
+        core::{ViewMode, ViewOptions},
+        ui::file_view::FileView,
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("image.png");
+    let pixbuf =
+        gtk::gdk_pixbuf::Pixbuf::new(gtk::gdk_pixbuf::Colorspace::Rgb, true, 8, 1024, 1024)
+            .unwrap();
+    pixbuf.fill(0xff0000ff);
+    pixbuf.savev(&file, "png", &[]).unwrap();
+    let view = FileView::from_location(Location::from_local_path(directory.path()));
+    view.set_options(ViewOptions {
+        view_mode: ViewMode::IconGrid,
+        ..Default::default()
+    });
+    let window = gtk::Window::builder()
+        .default_width(500)
+        .default_height(400)
+        .child(&view.widget)
+        .build();
+    window.present();
+    fn texture(widget: &gtk::Widget) -> Option<gtk::gdk::Texture> {
+        if let Some(image) = widget.downcast_ref::<gtk::Image>() {
+            if let Some(texture) = image.paintable().and_downcast::<gtk::gdk::Texture>() {
+                return Some(texture);
+            }
+        }
+        let mut child = widget.first_child();
+        while let Some(next) = child {
+            if let Some(found) = texture(&next) {
+                return Some(found);
+            }
+            child = next.next_sibling();
+        }
+        None
+    }
+    scale_pump_until(|| texture(view.widget.upcast_ref()).is_some());
+    let before = texture(view.widget.upcast_ref()).unwrap();
+    assert_eq!((before.width(), before.height()), (256, 256));
+    pixbuf.fill(0x0000ffff);
+    pixbuf.savev(&file, "png", &[]).unwrap();
+    scale_pump_until(|| texture(view.widget.upcast_ref()).is_some_and(|after| after != before));
+    let after = texture(view.widget.upcast_ref()).unwrap();
+    let mut before_pixels = vec![0u8; 256 * 256 * 4];
+    let mut after_pixels = before_pixels.clone();
+    before.download(&mut before_pixels, 256 * 4);
+    after.download(&mut after_pixels, 256 * 4);
+    assert_ne!(
+        before_pixels, after_pixels,
+        "a monitor refresh must not reuse stale cached pixels"
+    );
+    view.close();
+    window.close();
+}
+
+#[gtk::test]
+fn slice5_incremental_grouping_and_hidden_filter_preserve_all_visible_rows() {
+    use zorin_explorer::{
+        core::{FileItem, GroupField, ViewMode, ViewOptions},
+        ui::file_view::FileView,
+    };
+    let context = glib::MainContext::default();
+    let root = Location::from_uri("smb://scale/grouping").unwrap();
+    let provider = Rc::new(MockProvider::new(context.clone(), MockConfig::default()));
+    let view = FileView::new_with_repository(root.clone(), provider.clone());
+    let mut entries = scale_fixture::entries(&root, 500);
+    for (index, entry) in entries.iter_mut().enumerate() {
+        entry.kind = EntryKind::File;
+        if index % 2 == 0 {
+            entry.display_name = format!(".{}", entry.display_name);
+        }
+    }
+    view.set_options(ViewOptions {
+        view_mode: ViewMode::DetailedList,
+        group_field: GroupField::Size,
+        ..Default::default()
+    });
+    view.show_search_results(entries.iter().map(FileItem::from_snapshot).collect());
+    let window = gtk::Window::builder()
+        .default_width(800)
+        .default_height(500)
+        .child(&view.widget)
+        .build();
+    window.present();
+    scale_first_frame(&view);
+    let model = view.column_view().unwrap().model().unwrap();
+    scale_pump_until(|| model.n_items() == 251); // 250 ordinary rows + Small heading.
+    view.set_options(ViewOptions {
+        view_mode: ViewMode::DetailedList,
+        group_field: GroupField::Size,
+        show_hidden: true,
+        ..Default::default()
+    });
+    let model = view.column_view().unwrap().model().unwrap();
+    scale_pump_until(|| model.n_items() == 502); // 500 rows + Empty and Small headings.
+    while context.pending() {
+        context.iteration(false);
+    }
+    model.select_all();
+    assert_eq!(
+        view.selected_items().len(),
+        500,
+        "group headings must not enter file commands"
+    );
+    view.close();
+    provider.advance(1);
+    while context.pending() {
+        context.iteration(false);
+    }
+    window.close();
+}
+
+#[gtk::test]
+fn slice5_streamed_refresh_restores_selection_from_a_later_page() {
+    use zorin_explorer::{
+        core::{ViewMode, ViewOptions},
+        ui::file_view::FileView,
+    };
+    let root = Location::from_uri("smb://scale/selection").unwrap();
+    let backend = Rc::new(scale_fixture::StreamingRepository::new(
+        scale_fixture::entries(&root, 500),
+    ));
+    let view = FileView::new_with_repository(root.clone(), backend);
+    view.set_options(ViewOptions {
+        view_mode: ViewMode::DetailedList,
+        ..Default::default()
+    });
+    let window = gtk::Window::builder()
+        .default_width(800)
+        .default_height(500)
+        .child(&view.widget)
+        .build();
+    window.present();
+    scale_pump_until(|| !view.has_pending_navigation());
+    while glib::MainContext::default().pending() {
+        glib::MainContext::default().iteration(false);
+    }
+    view.column_view()
+        .unwrap()
+        .model()
+        .unwrap()
+        .select_item(499, true);
+    assert_eq!(view.selected_items()[0].name(), "file-00499");
+    view.navigate(root);
+    scale_pump_until(|| !view.has_pending_navigation());
+    while glib::MainContext::default().pending() {
+        glib::MainContext::default().iteration(false);
+    }
+    assert_eq!(
+        view.column_view()
+            .unwrap()
+            .model()
+            .unwrap()
+            .selection()
+            .size(),
+        1
+    );
+    assert_eq!(view.selected_items()[0].name(), "file-00499");
+    view.close();
+    window.close();
+}
 
 #[gtk::test]
 fn slice4_platform_layout_renders_large_text_narrow_rtl_and_high_contrast() {

@@ -16,26 +16,33 @@ impl NavigationCoordinator {
     pub fn new(state: Rc<RefCell<TabState>>, repository: Rc<dyn DirectoryRepository>) -> Self {
         Self { state, repository }
     }
-    pub fn navigate(&self, location: Location, changed: impl FnOnce(bool) + 'static) -> bool {
+    pub fn navigate(&self, location: Location, changed: impl FnMut(bool) + 'static) -> bool {
         let request = self.state.borrow_mut().begin_navigation(location);
         self.dispatch(request, changed)
     }
-    pub fn refresh(&self, changed: impl FnOnce(bool) + 'static) -> bool {
+    pub fn refresh(&self, changed: impl FnMut(bool) + 'static) -> bool {
         let request = self.state.borrow_mut().begin_refresh();
         self.dispatch(request, changed)
     }
-    pub fn back(&self, changed: impl FnOnce(bool) + 'static) -> bool {
+    pub fn back(&self, changed: impl FnMut(bool) + 'static) -> bool {
         let request = self.state.borrow_mut().begin_back();
         self.dispatch(request, changed)
     }
-    pub fn forward(&self, changed: impl FnOnce(bool) + 'static) -> bool {
+    pub fn forward(&self, changed: impl FnMut(bool) + 'static) -> bool {
         let request = self.state.borrow_mut().begin_forward();
         self.dispatch(request, changed)
     }
     pub fn close_tab(&self) {
         self.state.borrow_mut().close();
     }
-    pub fn retry(&self, changed: impl FnOnce(bool) + 'static) -> bool {
+    pub fn watch(
+        &self,
+        location: &Location,
+        changed: impl Fn() + 'static,
+    ) -> Option<gio::FileMonitor> {
+        self.repository.watch(location, Box::new(changed))
+    }
+    pub fn retry(&self, changed: impl FnMut(bool) + 'static) -> bool {
         let request = self.state.borrow_mut().begin_retry();
         self.dispatch(request, changed)
     }
@@ -51,19 +58,19 @@ impl NavigationCoordinator {
     fn dispatch(
         &self,
         request: Option<NavigationRequest>,
-        changed: impl FnOnce(bool) + 'static,
+        mut changed: impl FnMut(bool) + 'static,
     ) -> bool {
         let Some(request) = request else {
             return false;
         };
         let state = Rc::downgrade(&self.state);
-        self.repository.list(
+        self.repository.list_pages(
             request.request,
             Box::new(move |result| {
                 let accepted = state.upgrade().is_some_and(|state| {
                     state
                         .borrow_mut()
-                        .apply_directory_result(request.generation, result)
+                        .apply_directory_page(request.generation, result)
                 });
                 changed(accepted);
             }),

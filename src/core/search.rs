@@ -30,8 +30,16 @@ impl SearchHistory {
                 entries: Vec::new(),
             });
         }
-        let stored: StoredSearchHistory = serde_json::from_slice(&fs::read(&path)?)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let mut stored: StoredSearchHistory =
+            super::application_preferences::read_bounded_state(&path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+                .unwrap_or_default();
+        let excess = stored
+            .entries
+            .len()
+            .saturating_sub(super::application_preferences::MAX_HISTORY_RECORDS);
+        stored.entries.drain(..excess);
         Ok(Self {
             path: Some(path),
             entries: stored.entries,
@@ -44,7 +52,7 @@ impl SearchHistory {
 
     pub fn record(&mut self, term: &str) {
         let term = term.trim();
-        if term.is_empty() {
+        if term.is_empty() || term.len() > 4096 {
             return;
         }
         self.entries.retain(|entry| entry.term != term);
@@ -52,6 +60,11 @@ impl SearchHistory {
             term: term.to_owned(),
             recorded_at: now(),
         });
+        let excess = self
+            .entries
+            .len()
+            .saturating_sub(super::application_preferences::MAX_HISTORY_RECORDS);
+        self.entries.drain(..excess);
     }
 
     pub fn prune(&mut self, retention_days: u32) {
@@ -97,7 +110,7 @@ impl SearchHistory {
             entries: self.entries.clone(),
         })
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        fs::write(path, bytes)
+        super::application_preferences::write_bounded_state(path, &bytes)
     }
 }
 

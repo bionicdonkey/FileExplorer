@@ -12,12 +12,26 @@
 use super::contracts::*;
 
 pub type DirectoryCallback = Box<dyn FnOnce(RequestCompletion<DirectorySnapshot>)>;
+/// Ordered pages from one enumeration cursor, ending in exactly one page with
+/// no continuation or a terminal failure/cancellation. No tree pre-count.
+pub type DirectoryPageSink = Box<dyn FnMut(RequestCompletion<DirectorySnapshot>)>;
 pub type CapabilityCallback = Box<dyn FnOnce(RequestCompletion<CapabilitySnapshot>)>;
 pub type OperationSink = Box<dyn FnMut(OperationEvent)>;
 pub type SearchCallback = Box<dyn FnOnce(SearchCompletion)>;
 
 pub trait DirectoryRepository {
     fn list(&self, request: DirectoryRequest, done: DirectoryCallback);
+    fn list_pages(&self, request: DirectoryRequest, mut sink: DirectoryPageSink) {
+        self.list(request, Box::new(move |result| sink(result)));
+    }
+    /// Watch only this directory; never recursively walk a remote tree.
+    fn watch(
+        &self,
+        _location: &crate::core::Location,
+        _changed: Box<dyn Fn()>,
+    ) -> Option<gio::FileMonitor> {
+        None
+    }
 }
 
 pub trait FileOperations {

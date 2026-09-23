@@ -36,6 +36,33 @@ enum ListRow {
     File(FileItem),
 }
 
+fn append_model_page(store: &gio::ListStore, items: Vec<FileItem>, group_field: GroupField) {
+    let mut groups = std::collections::HashSet::new();
+    if group_field != GroupField::None {
+        for index in 0..store.n_items() {
+            if let Some(object) = store.item(index).and_downcast::<glib::BoxedAnyObject>() {
+                if let ListRow::Group(group) = &*object.borrow::<ListRow>() {
+                    groups.insert(group.clone());
+                }
+            }
+        }
+    }
+    let mut rows = Vec::with_capacity(items.len());
+    for item in items {
+        if let Some(group) = crate::core::directory_model::group_label(
+            &item,
+            group_field,
+            std::time::SystemTime::now(),
+        ) {
+            if groups.insert(group.clone()) {
+                rows.push(glib::BoxedAnyObject::new(ListRow::Group(group)));
+            }
+        }
+        rows.push(glib::BoxedAnyObject::new(ListRow::File(item)));
+    }
+    store.extend_from_slice(&rows);
+}
+
 fn filesystem_space(path: &Path) -> Option<(u64, u64)> {
     gio::File::for_path(path)
         .query_filesystem_info("filesystem::size,filesystem::free", gio::Cancellable::NONE)
@@ -81,6 +108,14 @@ pub struct FileView {
     on_command_availability_changed: Rc<RefCell<Option<Box<dyn Fn(CommandAvailability)>>>>,
     pending_cut: Rc<RefCell<Vec<Location>>>,
     is_quick_access_location: Rc<RefCell<Option<Rc<dyn Fn(&Location) -> bool>>>>,
+    model_store: Rc<RefCell<Option<gio::ListStore>>>,
+    folder_store: Rc<RefCell<Option<gio::ListStore>>>,
+    rendered_generation: Rc<std::cell::Cell<Option<u64>>>,
+    rendered_count: Rc<std::cell::Cell<usize>>,
+    directory_monitor: Rc<RefCell<Option<(Location, gio::FileMonitor)>>>,
+    monitor_refresh_pending: Rc<std::cell::Cell<bool>>,
+    controllers: Rc<RefCell<Vec<gtk::EventController>>>,
+    stream_selection: Rc<RefCell<Option<Vec<String>>>>,
 }
 
 impl FileView {
@@ -148,6 +183,14 @@ impl FileView {
             on_command_availability_changed: Rc::new(RefCell::new(None)),
             pending_cut: Rc::new(RefCell::new(Vec::new())),
             is_quick_access_location: Rc::new(RefCell::new(None)),
+            model_store: Default::default(),
+            folder_store: Default::default(),
+            rendered_generation: Default::default(),
+            rendered_count: Default::default(),
+            directory_monitor: Default::default(),
+            monitor_refresh_pending: Default::default(),
+            controllers: Default::default(),
+            stream_selection: Default::default(),
         };
         let background_view = view.clone();
         let background = GestureClick::new();
@@ -167,7 +210,8 @@ impl FileView {
                 )
             }
         });
-        view.widget.add_controller(background);
+        view.widget.add_controller(background.clone());
+        view.controllers.borrow_mut().push(background.upcast());
         let keyboard_view = view.clone();
         let keys = gtk::EventControllerKey::new();
         keys.connect_key_pressed(move |_, key, _, modifiers| {
@@ -189,14 +233,16 @@ impl FileView {
             );
             glib::Propagation::Stop
         });
-        view.widget.add_controller(keys);
+        view.widget.add_controller(keys.clone());
+        view.controllers.borrow_mut().push(keys.upcast());
         let drop_view = view.clone();
-        attach_async_drop(&view.widget, view.clone(), move || {
+        let drop_controller = attach_async_drop(&view.widget, view.clone(), move || {
             drop_view
                 .command_availability()
                 .can_paste
                 .then(|| drop_view.current_location())
         });
+        view.controllers.borrow_mut().push(drop_controller.upcast());
         view.refresh();
         view
     }
@@ -253,6 +299,22 @@ impl FileView {
     pub fn close(&self) {
         self.search.clear();
         self.navigation.close_tab();
+        if let Some((_, monitor)) = self.directory_monitor.borrow_mut().take() {
+            monitor.cancel();
+        }
+        self.model_store.borrow_mut().take();
+        self.folder_store.borrow_mut().take();
+        self.widget.set_child(gtk::Widget::NONE);
+        for controller in self.controllers.borrow_mut().drain(..) {
+            self.widget.remove_controller(&controller);
+        }
+        self.on_navigate.borrow_mut().take();
+        self.on_location_committed.borrow_mut().take();
+        self.on_close.borrow_mut().take();
+        self.on_context_command.borrow_mut().take();
+        self.on_application_command.borrow_mut().take();
+        self.on_options_changed.borrow_mut().take();
+        self.on_command_availability_changed.borrow_mut().take();
     }
 
     pub fn set_close_handler(&self, callback: impl Fn() + 'static) {
@@ -285,6 +347,17 @@ impl FileView {
     }
 
     fn navigation_finished(&self) {
+        self.watch_committed_directory();
+        // A stream extends the existing model in bounded pages. Replacing the
+        // widget here would repeatedly reset scrolling, focus and cell caches.
+        if self.append_directory_page() {
+            if !self.has_pending_navigation() {
+                if let Some(keys) = self.stream_selection.borrow_mut().take() {
+                    self.restore_stream_selection(keys);
+                }
+            }
+            return;
+        }
         let state = self.navigation.state.borrow();
         let location = state.location.clone();
         let succeeded = matches!(state.status, NavigationStatus::Ready);
@@ -296,6 +369,9 @@ impl FileView {
                 StatusPriority::Polite,
             );
             let state = self.navigation.state.borrow();
+            let stream_keys = state
+                .has_pending_navigation()
+                .then(|| state.selection_keys.clone());
             let restored = state
                 .directory
                 .as_ref()
@@ -315,11 +391,55 @@ impl FileView {
                 .unwrap_or_default();
             drop(state);
             self.select_items(restored);
+            if let Some(keys) = stream_keys {
+                self.navigation.state.borrow_mut().selection_keys = keys.clone();
+                *self.stream_selection.borrow_mut() = Some(keys);
+            }
             if let Some(callback) = self.on_location_committed.borrow().as_ref() {
                 callback(location);
             }
         }
         self.reload();
+    }
+
+    fn watch_committed_directory(&self) {
+        let state = self.navigation.state.borrow();
+        if !matches!(state.status, NavigationStatus::Ready) {
+            return;
+        }
+        let location = state.location.clone();
+        drop(state);
+        if self
+            .directory_monitor
+            .borrow()
+            .as_ref()
+            .is_some_and(|(current, _)| *current == location)
+        {
+            return;
+        }
+        if let Some((_, monitor)) = self.directory_monitor.borrow_mut().take() {
+            monitor.cancel();
+        }
+        let view = self.clone();
+        if let Some(monitor) = self.navigation.watch(&location, move || {
+            if view.monitor_refresh_pending.replace(true) {
+                return;
+            }
+            invalidate_thumbnails();
+            let view = view.clone();
+            glib::timeout_add_local_once(std::time::Duration::from_millis(100), move || {
+                view.monitor_refresh_pending.set(false);
+                if !matches!(
+                    view.navigation.state.borrow().status,
+                    NavigationStatus::Closed
+                ) && !view.is_showing_search_results()
+                {
+                    view.refresh();
+                }
+            });
+        }) {
+            *self.directory_monitor.borrow_mut() = Some((location, monitor));
+        }
     }
 
     fn show_error(&self) {
@@ -383,6 +503,76 @@ impl FileView {
         *self.selected_target.borrow_mut() = items.first().map(file_target);
         *self.selection.borrow_mut() = items;
         self.notify_command_availability_changed();
+        if self.stream_selection.borrow().is_some() && self.has_pending_navigation() {
+            *self.stream_selection.borrow_mut() =
+                Some(self.navigation.state.borrow().selection_keys.clone());
+        }
+    }
+
+    fn restore_stream_selection(&self, keys: Vec<String>) {
+        if keys.is_empty() {
+            return;
+        }
+        fn models(widget: &gtk::Widget, result: &mut Vec<gtk::SelectionModel>) {
+            if let Some(view) = widget.downcast_ref::<ColumnView>() {
+                if let Some(model) = view.model() {
+                    result.push(model);
+                }
+                return;
+            }
+            if let Some(view) = widget.downcast_ref::<gtk::GridView>() {
+                if let Some(model) = view.model() {
+                    result.push(model);
+                }
+                return;
+            }
+            let mut child = widget.first_child();
+            while let Some(next) = child {
+                models(&next, result);
+                child = next.next_sibling();
+            }
+        }
+        let mut selection_models = Vec::new();
+        models(self.widget.upcast_ref(), &mut selection_models);
+        let keys: std::collections::HashSet<_> = keys.into_iter().collect();
+        let view = self.clone();
+        let generation = self.navigation.state.borrow().navigation_generation;
+        glib::idle_add_local(move || {
+            if view.navigation.state.borrow().navigation_generation != generation
+                || matches!(
+                    view.navigation.state.borrow().status,
+                    NavigationStatus::Closed
+                )
+            {
+                return glib::ControlFlow::Break;
+            }
+            if selection_models.iter().any(|model| {
+                model
+                    .downcast_ref::<MultiSelection>()
+                    .and_then(|model| model.model())
+                    .and_downcast::<SortListModel>()
+                    .is_some_and(|model| model.pending() > 0)
+            }) {
+                return glib::ControlFlow::Continue;
+            }
+            let mut restored = Vec::new();
+            for model in &selection_models {
+                let selected = gtk::Bitset::new_empty();
+                for index in 0..model.n_items() {
+                    if let Some(object) = model.item(index).and_downcast::<glib::BoxedAnyObject>() {
+                        if let ListRow::File(item) = &*object.borrow::<ListRow>() {
+                            if keys.contains(item.identity_key()) {
+                                selected.add(index);
+                                restored.push(item.clone());
+                            }
+                        }
+                    }
+                }
+                model.set_selection(&selected, &gtk::Bitset::new_range(0, model.n_items()));
+            }
+            view.select_items(restored);
+            glib::ControlFlow::Break
+        });
     }
 
     fn select_context_item(&self, item: &FileItem) {
@@ -726,6 +916,7 @@ impl FileView {
     }
 
     pub fn refresh(&self) {
+        invalidate_thumbnails();
         self.clear_search_results();
         if !self.has_pending_navigation() && self.section_title().is_some() {
             self.reload();
@@ -790,6 +981,9 @@ impl FileView {
 
     /// Repaints owned metadata; never enumerates or queries the filesystem.
     fn reload(&self) {
+        self.model_store.borrow_mut().take();
+        self.folder_store.borrow_mut().take();
+        self.rendered_generation.set(None);
         let owned_focus = self
             .widget
             .root()
@@ -800,6 +994,18 @@ impl FileView {
                     || focused.is_ancestor(&self.widget)
             });
         self.reload_content();
+        let state = self.navigation.state.borrow();
+        if matches!(state.content, TabContent::Directory(_)) && self.model_store.borrow().is_some()
+        {
+            self.rendered_generation
+                .set(Some(state.navigation_generation));
+            self.rendered_count.set(
+                state
+                    .directory
+                    .as_ref()
+                    .map_or(0, |snapshot| snapshot.entries.len()),
+            );
+        }
         if owned_focus {
             self.widget.child_focus(gtk::DirectionType::TabForward);
         }
@@ -861,7 +1067,9 @@ impl FileView {
                 }
             },
         };
-        sort_items(&mut items, &options);
+        if items.len() <= crate::application::performance::PAGE_SIZE {
+            sort_items(&mut items, &options);
+        }
         self.render(items, &options);
         self.show_search_status();
         self.show_error();
@@ -991,6 +1199,9 @@ impl FileView {
             ViewMode::DetailedList | ViewMode::CompactList => self
                 .widget
                 .set_child(Some(&self.column_view_for(&items, options))),
+            ViewMode::IconGrid if self.use_recycled_model(items.len()) => self
+                .widget
+                .set_child(Some(&self.recycled_grid(&items, options))),
             ViewMode::IconGrid => self
                 .widget
                 .set_child(Some(&self.grid_view(&items, options))),
@@ -1001,6 +1212,9 @@ impl FileView {
     }
 
     fn column_view_for(&self, items: &[FileItem], options: &ViewOptions) -> ColumnView {
+        if self.use_recycled_model(items.len()) {
+            return self.large_column_view(items, options);
+        }
         let store = gio::ListStore::new::<glib::BoxedAnyObject>();
         let mut last_group = None;
         for item in items {
@@ -1079,9 +1293,11 @@ impl FileView {
             column.set_sorter(Some(&column_sorter(column_id)));
             let options_state = self.options.clone();
             let changed = self.on_options_changed.clone();
-            let layout_view = view.clone();
+            let layout_view = view.downgrade();
             column.connect_fixed_width_notify(move |_| {
-                publish_column_layout(&layout_view, &options_state, &changed)
+                if let Some(view) = layout_view.upgrade() {
+                    publish_column_layout(&view, &options_state, &changed);
+                }
             });
             view.append_column(&column);
         }
@@ -1091,9 +1307,11 @@ impl FileView {
 
         let options_state = self.options.clone();
         let changed = self.on_options_changed.clone();
-        let layout_view = view.clone();
+        let layout_view = view.downgrade();
         view.columns().connect_items_changed(move |_, _, _, _| {
-            publish_column_layout(&layout_view, &options_state, &changed)
+            if let Some(view) = layout_view.upgrade() {
+                publish_column_layout(&view, &options_state, &changed);
+            }
         });
 
         let options_state = self.options.clone();
@@ -1143,7 +1361,322 @@ impl FileView {
     }
 
     pub fn column_view(&self) -> Option<ColumnView> {
-        self.widget.child()?.downcast::<ColumnView>().ok()
+        fn find(widget: &gtk::Widget) -> Option<ColumnView> {
+            if let Some(view) = widget.downcast_ref::<ColumnView>() {
+                return Some(view.clone());
+            }
+            let mut child = widget.first_child();
+            while let Some(next) = child {
+                if let Some(view) = find(&next) {
+                    return Some(view);
+                }
+                child = next.next_sibling();
+            }
+            None
+        }
+        find(self.widget.upcast_ref())
+    }
+
+    fn paged_selection(&self, items: &[FileItem], options: &ViewOptions) -> MultiSelection {
+        use crate::application::performance::PagedSnapshot;
+        let store = gio::ListStore::new::<glib::BoxedAnyObject>();
+        *self.model_store.borrow_mut() = Some(store.clone());
+        let mut pages = PagedSnapshot::new(items.to_vec(), options);
+        if let Some(page) = pages.next_page() {
+            append_model_page(&store, page, options.group_field);
+        }
+        let weak = store.downgrade();
+        let group_field = options.group_field;
+        let options = options.clone();
+        let sorter = CustomSorter::new(move |a, b| {
+            let a = a
+                .downcast_ref::<glib::BoxedAnyObject>()
+                .unwrap()
+                .borrow::<ListRow>();
+            let b = b
+                .downcast_ref::<glib::BoxedAnyObject>()
+                .unwrap()
+                .borrow::<ListRow>();
+            let group = if options.group_field == GroupField::None {
+                std::cmp::Ordering::Equal
+            } else {
+                let now = std::time::SystemTime::now();
+                let label = |row: &ListRow| match row {
+                    ListRow::Group(group) => Some(group.clone()),
+                    ListRow::File(item) => {
+                        crate::core::directory_model::group_label(item, options.group_field, now)
+                    }
+                };
+                label(&a).cmp(&label(&b))
+            };
+            if group != std::cmp::Ordering::Equal {
+                return group.into();
+            }
+            let (a, b) = match (&*a, &*b) {
+                (ListRow::Group(_), ListRow::Group(_)) => return gtk::Ordering::Equal,
+                (ListRow::Group(_), _) => return gtk::Ordering::Smaller,
+                (_, ListRow::Group(_)) => return gtk::Ordering::Larger,
+                (ListRow::File(a), ListRow::File(b)) => (a, b),
+            };
+            let folders = if options.folders_first {
+                b.is_dir().cmp(&a.is_dir())
+            } else {
+                std::cmp::Ordering::Equal
+            };
+            let order = match options.sort_field {
+                SortField::Name => a.name().to_lowercase().cmp(&b.name().to_lowercase()),
+                SortField::Size => a.size().cmp(&b.size()),
+                SortField::Type => a.content_type().cmp(b.content_type()),
+                SortField::DateModified => a.modified().cmp(&b.modified()),
+            }
+            .then_with(|| a.name().cmp(b.name()));
+            let order = if options.sort_direction == SortDirection::Descending {
+                order.reverse()
+            } else {
+                order
+            };
+            folders.then(order).into()
+        });
+        let sorted = SortListModel::new(Some(store), Some(sorter));
+        sorted.set_incremental(true);
+        let selection = MultiSelection::new(Some(sorted.clone()));
+        let populating = Rc::new(std::cell::Cell::new(false));
+        let population = populating.clone();
+        let weak_selection = selection.downgrade();
+        let keys = Rc::new(RefCell::new(
+            self.navigation
+                .state
+                .borrow()
+                .selection_keys
+                .iter()
+                .cloned()
+                .collect::<std::collections::HashSet<_>>(),
+        ));
+        let selection_keys = keys.clone();
+        glib::idle_add_local(move || {
+            let Some(store) = weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            if let Some(page) = pages.next_page() {
+                append_model_page(&store, page, group_field);
+                return glib::ControlFlow::Continue;
+            }
+            if sorted.pending() > 0 {
+                return glib::ControlFlow::Continue;
+            }
+            population.set(true);
+            if let Some(selection) = weak_selection.upgrade() {
+                for position in 0..selection.n_items() {
+                    if selection.item(position).and_downcast::<glib::BoxedAnyObject>().is_some_and(|object| matches!(&*object.borrow::<ListRow>(), ListRow::File(item) if keys.borrow().contains(item.identity_key()))) {
+                        selection.select_item(position, false);
+                    }
+                }
+            }
+            population.set(false);
+            glib::ControlFlow::Break
+        });
+        let view = self.clone();
+        selection.connect_selection_changed(move |model, _, _| {
+            if populating.get() {
+                return;
+            }
+            let selected = model.selection();
+            let items = gtk::BitsetIter::init_first(&selected)
+                .map(|(iter, first)| {
+                    std::iter::once(first)
+                        .chain(iter)
+                        .filter_map(|i| model.item(i).and_downcast::<glib::BoxedAnyObject>())
+                        .filter_map(|o| match &*o.borrow::<ListRow>() {
+                            ListRow::File(item) => Some(item.clone()),
+                            _ => None,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            view.select_items(items);
+            *selection_keys.borrow_mut() = view
+                .navigation
+                .state
+                .borrow()
+                .selection_keys
+                .iter()
+                .cloned()
+                .collect();
+        });
+        selection
+    }
+
+    fn use_recycled_model(&self, count: usize) -> bool {
+        count >= crate::application::performance::PAGE_SIZE
+            || self
+                .navigation
+                .state
+                .borrow()
+                .directory
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.next_page.is_some())
+    }
+
+    fn append_directory_page(&self) -> bool {
+        let state = self.navigation.state.borrow();
+        if self.rendered_generation.get() != Some(state.navigation_generation)
+            || !matches!(state.content, TabContent::Directory(_))
+            || !matches!(state.status, NavigationStatus::Ready)
+        {
+            return false;
+        }
+        let Some(snapshot) = &state.directory else {
+            return false;
+        };
+        let store = self.model_store.borrow().clone();
+        let Some(store) = store else {
+            return false;
+        };
+        let options = self.options();
+        let additions: Vec<_> = snapshot
+            .entries
+            .iter()
+            .skip(self.rendered_count.get())
+            .filter(|entry| options.show_hidden || !entry.display_name.starts_with('.'))
+            .map(FileItem::from_snapshot)
+            .collect();
+        self.rendered_count.set(snapshot.entries.len());
+        drop(state);
+        let folders = self.folder_store.borrow().clone();
+        let (folders_to_add, files_to_add): (Vec<_>, Vec<_>) = additions
+            .into_iter()
+            .partition(|item| folders.is_some() && item.is_dir());
+        append_model_page(&store, files_to_add, options.group_field);
+        if let Some(folders) = folders {
+            append_model_page(&folders, folders_to_add, options.group_field);
+        }
+        true
+    }
+
+    fn recycled_grid(&self, items: &[FileItem], options: &ViewOptions) -> gtk::GridView {
+        let selection = self.paged_selection(items, options);
+        let grid = gtk::GridView::new(
+            Some(selection.clone()),
+            Some(column_factory_layout(
+                ListColumn::Name,
+                options.thumbnails,
+                self.clone(),
+                true,
+            )),
+        );
+        grid.set_single_click_activate(false);
+        grid.set_min_columns(1);
+        grid.set_max_columns(12);
+        grid.update_property(&[
+            gtk::accessible::Property::Label("Files"),
+            gtk::accessible::Property::MultiSelectable(true),
+        ]);
+        let view = self.clone();
+        grid.connect_activate(move |_, position| {
+            if let Some(object) = selection
+                .item(position)
+                .and_downcast::<glib::BoxedAnyObject>()
+            {
+                if let ListRow::File(item) = &*object.borrow::<ListRow>() {
+                    activate_item(&view, item.clone());
+                }
+            }
+        });
+        grid
+    }
+
+    fn large_column_view(&self, items: &[FileItem], options: &ViewOptions) -> ColumnView {
+        let selection = self.paged_selection(items, options);
+        let column_view = ColumnView::new(Some(selection.clone()));
+        column_view.set_reorderable(true);
+        column_view.set_show_row_separators(true);
+        column_view.update_property(&[
+            gtk::accessible::Property::Label("Files"),
+            gtk::accessible::Property::MultiSelectable(true),
+        ]);
+        for column_id in options.list_columns.normalized().order {
+            let column = ColumnViewColumn::new(
+                Some(column_title(column_id)),
+                Some(column_factory(column_id, options.thumbnails, self.clone())),
+            );
+            column.set_resizable(true);
+            column.set_fixed_width(options.list_columns.width_for(column_id));
+            column.set_expand(column_id == ListColumn::Name);
+            column.set_sorter(Some(&column_sorter(column_id)));
+            let options_state = self.options.clone();
+            let changed = self.on_options_changed.clone();
+            let layout_view = column_view.downgrade();
+            column.connect_fixed_width_notify(move |_| {
+                if let Some(view) = layout_view.upgrade() {
+                    publish_column_layout(&view, &options_state, &changed);
+                }
+            });
+            column_view.append_column(&column);
+            if sort_field_for_title(column_title(column_id)) == Some(options.sort_field) {
+                column_view.sort_by_column(
+                    Some(&column),
+                    if options.sort_direction == SortDirection::Ascending {
+                        gtk::SortType::Ascending
+                    } else {
+                        gtk::SortType::Descending
+                    },
+                );
+            }
+        }
+        // Header changes persist the new options and rebuild an incremental
+        // model; the selected ordering always comes from the shared options.
+        self.connect_column_sorting(&column_view);
+        let view = self.clone();
+        column_view.connect_activate(move |_, position| {
+            if let Some(object) = selection
+                .item(position)
+                .and_downcast::<glib::BoxedAnyObject>()
+            {
+                if let ListRow::File(item) = &*object.borrow::<ListRow>() {
+                    activate_item(&view, item.clone());
+                }
+            }
+        });
+        column_view
+    }
+
+    fn connect_column_sorting(&self, column_view: &ColumnView) {
+        let view = self.clone();
+        let sorter = column_view
+            .sorter()
+            .and_downcast::<gtk::ColumnViewSorter>()
+            .unwrap();
+        sorter.connect_changed(move |sorter, _| {
+            let Some(column) = sorter.primary_sort_column() else {
+                return;
+            };
+            let Some(field) = column.title().as_deref().and_then(sort_field_for_title) else {
+                return;
+            };
+            let mut options = view.options();
+            options.sort_field = field;
+            options.sort_direction = if sorter.primary_sort_order() == gtk::SortType::Descending {
+                SortDirection::Descending
+            } else {
+                SortDirection::Ascending
+            };
+            *view.options.borrow_mut() = options.clone();
+            if let Some(changed) = view.on_options_changed.borrow().as_ref() {
+                changed(options);
+            }
+            let view = view.clone();
+            glib::idle_add_local_once(move || view.reload());
+        });
+        let options = self.options.clone();
+        let changed = self.on_options_changed.clone();
+        let weak = column_view.downgrade();
+        column_view
+            .columns()
+            .connect_items_changed(move |_, _, _, _| {
+                if let Some(view) = weak.upgrade() {
+                    publish_column_layout(&view, &options, &changed);
+                }
+            });
     }
 
     pub fn open_item(&self, item: &FileItem) {
@@ -1216,11 +1749,16 @@ impl FileView {
             attach_drag_source(&tile, item.clone(), self.clone());
             let target = file_target(item);
             let view = self.clone();
-            let grid_context = grid.clone();
-            let menu_tile = tile.clone();
+            let grid_context = grid.downgrade();
+            let menu_tile = tile.downgrade();
             let gesture = GestureClick::new();
             gesture.set_button(3);
             gesture.connect_pressed(move |gesture, _, x, y| {
+                let (Some(grid_context), Some(menu_tile)) =
+                    (grid_context.upgrade(), menu_tile.upgrade())
+                else {
+                    return;
+                };
                 gesture.set_state(gtk::EventSequenceState::Claimed);
                 if let Some(child) = menu_tile.parent().and_downcast::<gtk::FlowBoxChild>() {
                     if !child.is_selected() {
@@ -1298,6 +1836,30 @@ impl FileView {
             .filter(|item| !item.is_dir())
             .cloned()
             .collect();
+        if self.use_recycled_model(items.len()) {
+            let folders_view = self.recycled_grid(&folders, options);
+            *self.folder_store.borrow_mut() = self.model_store.borrow_mut().take();
+            let folders_scroll = ScrolledWindow::builder()
+                .min_content_height(120)
+                .max_content_height(240)
+                .propagate_natural_height(true)
+                .child(&folders_view)
+                .build();
+            root.append(&Label::new(Some("Folders")));
+            root.append(&folders_scroll);
+            let files_view = self.large_column_view(&files, options);
+            let files_scroll = ScrolledWindow::builder()
+                .vexpand(true)
+                .min_content_height(200)
+                .child(&files_view)
+                .build();
+            root.append(&Label::new(Some("Files")));
+            root.append(&files_scroll);
+            // The outer viewport must allocate these two bounded scrollers,
+            // rather than measuring an unbounded list's natural height.
+            root.set_vexpand(true);
+            return root;
+        }
         if !folders.is_empty() {
             let heading = Label::new(Some("Folders"));
             heading.add_css_class("heading");
@@ -1723,14 +2285,29 @@ fn publish_column_layout(
 }
 
 fn column_factory(column: ListColumn, thumbnails: bool, view: FileView) -> SignalListItemFactory {
+    column_factory_layout(column, thumbnails, view, false)
+}
+
+fn column_factory_layout(
+    column: ListColumn,
+    thumbnails: bool,
+    view: FileView,
+    grid_cell: bool,
+) -> SignalListItemFactory {
     let factory = SignalListItemFactory::new();
     let bind_view = view.clone();
+    let grid_options = view.options();
     factory.connect_setup(move |_, list_item| {
         let list_item = list_item
             .downcast_ref::<gtk::ListItem>()
             .expect("column factories receive list items");
         if column == ListColumn::Name {
             let line = GtkBox::new(Orientation::Horizontal, 8);
+            if grid_cell {
+                line.set_orientation(Orientation::Vertical);
+                line.set_size_request(grid_options.grid_size.grid_layout().tile_width, -1);
+                line.add_css_class("icon-grid-tile");
+            }
             line.set_margin_start(10);
             line.set_margin_end(10);
             line.set_margin_top(6);
@@ -1738,14 +2315,24 @@ fn column_factory(column: ListColumn, thumbnails: bool, view: FileView) -> Signa
             let icon = Image::new();
             icon.set_pixel_size(20);
             let label = Label::new(None);
+            if grid_cell {
+                label.set_wrap(true);
+                label.set_lines(2);
+                label.set_max_width_chars(grid_options.grid_size.grid_layout().label_width_chars);
+                label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+                icon.set_pixel_size(grid_options.grid_size.icon_size());
+            }
             label.set_xalign(0.0);
             line.append(&icon);
             line.append(&label);
-            let context_item = list_item.clone();
+            let context_item = list_item.downgrade();
             let context_view = view.clone();
             let gesture = GestureClick::new();
             gesture.set_button(3);
             gesture.connect_pressed(move |gesture, _, x, y| {
+                let Some(context_item) = context_item.upgrade() else {
+                    return;
+                };
                 let Some(object) = context_item.item().and_downcast::<glib::BoxedAnyObject>()
                 else {
                     return;
@@ -1772,10 +2359,13 @@ fn column_factory(column: ListColumn, thumbnails: bool, view: FileView) -> Signa
                 );
             });
             line.add_controller(gesture);
-            let touch_item = list_item.clone();
-            let drop_item = list_item.clone();
+            let touch_item = list_item.downgrade();
+            let drop_item = list_item.downgrade();
             attach_folder_drop(&line, view.clone(), move || {
-                let object = drop_item.item().and_downcast::<glib::BoxedAnyObject>()?;
+                let object = drop_item
+                    .upgrade()?
+                    .item()
+                    .and_downcast::<glib::BoxedAnyObject>()?;
                 let row = object.borrow::<ListRow>();
                 match &*row {
                     ListRow::File(item) => Some(item.clone()),
@@ -1783,19 +2373,25 @@ fn column_factory(column: ListColumn, thumbnails: bool, view: FileView) -> Signa
                 }
             });
             attach_touch_menu(&line, view.clone(), move || {
-                let object = touch_item.item().and_downcast::<glib::BoxedAnyObject>()?;
+                let object = touch_item
+                    .upgrade()?
+                    .item()
+                    .and_downcast::<glib::BoxedAnyObject>()?;
                 let row = object.borrow::<ListRow>();
                 match &*row {
                     ListRow::File(item) => Some(item.clone()),
                     _ => None,
                 }
             });
-            let drag_item = list_item.clone();
+            let drag_item = list_item.downgrade();
             let drag_view = view.clone();
             let drag_source = gtk::DragSource::new();
             drag_source.set_actions(gtk::gdk::DragAction::COPY | gtk::gdk::DragAction::MOVE);
             drag_source.connect_prepare(move |source, _, _| {
-                let object = drag_item.item().and_downcast::<glib::BoxedAnyObject>()?;
+                let object = drag_item
+                    .upgrade()?
+                    .item()
+                    .and_downcast::<glib::BoxedAnyObject>()?;
                 let row = object.borrow::<ListRow>();
                 let ListRow::File(item) = &*row else {
                     return None;
@@ -1861,7 +2457,13 @@ fn column_factory(column: ListColumn, thumbnails: bool, view: FileView) -> Signa
                     .first_child()
                     .and_downcast::<Image>()
                     .expect("name cells include an icon");
-                set_item_image(&icon, item, thumbnails);
+                // Rebinding destroys the old image, so an asynchronous decode
+                // cannot paint a former file's thumbnail onto a reused cell.
+                let size = icon.pixel_size();
+                line.remove(&icon);
+                let icon = item_image(item, thumbnails);
+                icon.set_pixel_size(size);
+                line.prepend(&icon);
                 let label = line
                     .last_child()
                     .and_downcast::<Label>()
@@ -2276,30 +2878,114 @@ fn item_image(item: &FileItem, thumbnails: bool) -> Image {
     image
 }
 
-fn set_item_image(image: &Image, item: &FileItem, thumbnails: bool) {
-    let fallback = file_icon(item);
-    if let Some(gicon) = fallback.gicon() {
-        image.set_from_gicon(&gicon);
-    } else {
-        image.set_from_icon_name(fallback.icon_name().as_deref());
-    }
-    apply_thumbnail(image, item, thumbnails);
-}
-
 fn apply_thumbnail(image: &Image, item: &FileItem, thumbnails: bool) {
     if !thumbnails {
         return;
     }
-    let path = thumbnail_cache_homes()
-        .into_iter()
-        .find_map(|cache_home| cached_thumbnail_file_for(item, &cache_home))
-        .or_else(|| local_image_thumbnail_file(item));
-    let Some(path) = path else {
+    if let Some(cached) = THUMBNAILS.with(|state| state.borrow_mut().cache.get(item.location())) {
+        if let Some(texture) = cached {
+            image.set_from_paintable(Some(&texture));
+        }
         return;
-    };
-    if let Ok(texture) = gtk::gdk::Texture::from_filename(path) {
-        image.set_from_paintable(Some(&texture));
     }
+    let start = THUMBNAILS.with(|state| {
+        let mut state = state.borrow_mut();
+        // Only bound GTK rows enter this queue; remove rows recycled since the
+        // request and cap both queued requests and retained decoded textures.
+        state
+            .queue
+            .retain(|(image, _, _)| image.upgrade().is_some());
+        if state.queue.len() >= 256 {
+            state.queue.pop_front();
+        }
+        let epoch = state.epoch;
+        state
+            .queue
+            .push_back((image.downgrade(), item.clone(), epoch));
+        if state.running {
+            false
+        } else {
+            state.running = true;
+            true
+        }
+    });
+    if start {
+        glib::MainContext::ref_thread_default().spawn_local(async move {
+            loop {
+                let request = THUMBNAILS.with(|state| state.borrow_mut().queue.pop_front());
+                let Some((image, item, epoch)) = request else {
+                    THUMBNAILS.with(|state| state.borrow_mut().running = false);
+                    break;
+                };
+                if image.upgrade().is_none() {
+                    continue;
+                }
+                let location = item.location().clone();
+                let pixels = gio::spawn_blocking(move || {
+                    let path = thumbnail_cache_homes()
+                        .into_iter()
+                        .find_map(|home| cached_thumbnail_file_for(&item, &home))
+                        .or_else(|| local_image_thumbnail_file(&item))?;
+                    let pixbuf =
+                        gtk::gdk_pixbuf::Pixbuf::from_file_at_scale(path, 256, 256, true).ok()?;
+                    Some((
+                        pixbuf.read_pixel_bytes(),
+                        pixbuf.width(),
+                        pixbuf.height(),
+                        pixbuf.rowstride(),
+                        pixbuf.has_alpha(),
+                    ))
+                })
+                .await
+                .ok()
+                .flatten();
+                let current = THUMBNAILS.with(|state| state.borrow().epoch == epoch);
+                if !current {
+                    continue;
+                }
+                let texture: Option<gtk::gdk::Texture> =
+                    pixels.map(|(bytes, width, height, stride, alpha)| {
+                        gtk::gdk::MemoryTexture::new(
+                            width,
+                            height,
+                            if alpha {
+                                gtk::gdk::MemoryFormat::R8g8b8a8
+                            } else {
+                                gtk::gdk::MemoryFormat::R8g8b8
+                            },
+                            &bytes,
+                            stride as usize,
+                        )
+                        .upcast()
+                    });
+                THUMBNAILS.with(|state| state.borrow_mut().cache.insert(location, texture.clone()));
+                if let (Some(image), Some(texture)) = (image.upgrade(), texture) {
+                    image.set_from_paintable(Some(&texture));
+                }
+            }
+        });
+    }
+}
+
+struct ThumbnailState {
+    cache: crate::application::performance::VisibleCache<Option<gtk::gdk::Texture>>,
+    queue: std::collections::VecDeque<(glib::WeakRef<Image>, FileItem, u64)>,
+    epoch: u64,
+    running: bool,
+}
+thread_local! {
+    static THUMBNAILS: RefCell<ThumbnailState> = RefCell::new(ThumbnailState {
+        cache: crate::application::performance::VisibleCache::new(Default::default()),
+        queue: Default::default(), epoch: 0, running: false,
+    });
+}
+fn invalidate_thumbnails() {
+    THUMBNAILS.with(|state| {
+        let mut state = state.borrow_mut();
+        state.epoch = state.epoch.wrapping_add(1);
+        state.cache.invalidate();
+        state.queue.clear();
+    });
 }
 
 fn cached_thumbnail_file_for(item: &FileItem, cache_home: &Path) -> Option<PathBuf> {
@@ -2405,7 +3091,7 @@ fn attach_async_drop(
     widget: &impl IsA<gtk::Widget>,
     view: FileView,
     destination: impl Fn() -> Option<Location> + 'static,
-) {
+) -> gtk::DropTargetAsync {
     use gtk::gdk::{ContentFormats, DragAction};
     let target = gtk::DropTargetAsync::new(
         Some(ContentFormats::new(&["text/uri-list"])),
@@ -2512,7 +3198,8 @@ fn attach_async_drop(
         // above acknowledges GTK after the whole coordinator batch terminates.
         true
     });
-    widget.add_controller(target);
+    widget.add_controller(target.clone());
+    target
 }
 
 fn attach_touch_menu(

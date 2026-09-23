@@ -3,6 +3,7 @@ pub mod application {
     pub mod commands;
     pub mod navigation;
     pub mod operations;
+    pub mod performance;
     pub mod search;
 }
 pub mod infrastructure {

@@ -127,7 +127,7 @@ impl OperationManager {
             ..Self::default()
         };
         if let Some(path) = path {
-            if let Ok(bytes) = fs::read(path) {
+            if let Ok(bytes) = crate::core::application_preferences::read_bounded_state(&path) {
                 let (records, mut notices) = decode_history(&bytes);
                 if let Ok(stored) = serde_json::from_slice::<StoredOperationHistoryV2>(&bytes) {
                     for record in stored.records {
@@ -157,6 +157,12 @@ impl OperationManager {
                 }
                 *manager.records.lock().unwrap() = records;
                 *manager.recoverable_notices.lock().unwrap() = notices;
+            } else if path.exists() {
+                manager
+                    .recoverable_notices
+                    .lock()
+                    .unwrap()
+                    .push(RecoverableStateNotice::MalformedRecord);
             }
         }
         // next_id otherwise always restarts at 0, so the first operation of
@@ -570,6 +576,37 @@ impl OperationManager {
     }
     fn persist_history(&self) {
         let _guard = self.persistence.lock().unwrap();
+        // Active jobs are never evicted. All terminal projections and their
+        // associated payloads share the same bounded lifetime as history rows.
+        let retained: std::collections::HashSet<_> = {
+            let mut records = self.records.lock().unwrap();
+            let mut remaining = crate::core::application_preferences::MAX_HISTORY_RECORDS;
+            records.reverse();
+            records.retain(|record| {
+                if record.finished_at.is_none() {
+                    return true;
+                }
+                if remaining == 0 {
+                    return false;
+                }
+                remaining -= 1;
+                true
+            });
+            records.reverse();
+            records.iter().map(|record| record.id).collect()
+        };
+        self.projections
+            .lock()
+            .unwrap()
+            .retain(|projection| retained.contains(&projection.id.0));
+        self.summaries
+            .lock()
+            .unwrap()
+            .retain(|id, _| retained.contains(id));
+        self.cancelled
+            .lock()
+            .unwrap()
+            .retain(|(id, _)| retained.contains(id));
         let Some(path) = &self.history_path else {
             return;
         };
@@ -601,10 +638,7 @@ impl OperationManager {
                 })
                 .collect(),
         }) {
-            let temporary = path.with_extension("json.tmp");
-            if fs::write(&temporary, bytes).is_ok() {
-                let _ = fs::rename(temporary, path.as_ref());
-            }
+            let _ = crate::core::application_preferences::write_bounded_state(path, &bytes);
         }
     }
 }
@@ -637,6 +671,9 @@ fn stored_record(record: &OperationRecord) -> StoredOperationRecordV2 {
 }
 
 fn decode_history(bytes: &[u8]) -> (Vec<OperationRecord>, Vec<RecoverableStateNotice>) {
+    if bytes.len() > crate::core::application_preferences::MAX_STATE_BYTES {
+        return (Vec::new(), vec![RecoverableStateNotice::MalformedRecord]);
+    }
     if let Ok(mut records) = serde_json::from_slice::<Vec<OperationRecord>>(bytes) {
         records.retain(|r| {
             !matches!(

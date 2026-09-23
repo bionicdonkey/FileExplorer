@@ -7,6 +7,36 @@ use serde::{Deserialize, Serialize};
 use crate::core::Location;
 
 const URI_STATE_VERSION: u32 = 2;
+pub const MAX_SESSION_TABS: usize = 50;
+pub const MAX_HISTORY_RECORDS: usize = 100;
+pub const MAX_STATE_BYTES: usize = 4 * 1024 * 1024;
+
+pub(crate) fn read_bounded_state(path: &std::path::Path) -> io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    fs::File::open(path)?
+        .take(MAX_STATE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_STATE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "saved state exceeds its size limit",
+        ));
+    }
+    Ok(bytes)
+}
+
+pub(crate) fn write_bounded_state(path: &std::path::Path, bytes: &[u8]) -> io::Result<()> {
+    if bytes.len() > MAX_STATE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "saved state exceeds its size limit",
+        ));
+    }
+    let temporary = path.with_extension("json.tmp");
+    fs::write(&temporary, bytes)?;
+    fs::rename(temporary, path)
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -98,8 +128,10 @@ impl ApplicationPreferences {
                 ..Self::default()
             });
         }
-        let mut value: Self = serde_json::from_slice(&fs::read(&path)?)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let mut value: Self = read_bounded_state(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default();
         value.path = Some(path);
         Ok(value)
     }
@@ -109,9 +141,9 @@ impl ApplicationPreferences {
             return Ok(());
         };
         fs::create_dir_all(path.parent().expect("preferences path has a parent"))?;
-        fs::write(
+        write_bounded_state(
             path,
-            serde_json::to_vec_pretty(self).expect("preferences serialize"),
+            &serde_json::to_vec_pretty(self).expect("preferences serialize"),
         )
     }
 
@@ -145,7 +177,7 @@ impl ApplicationPreferences {
         fs::create_dir_all(path.parent().expect("session path has a parent"))?;
         let bytes = encode_session(locations)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        fs::write(path, bytes)
+        write_bounded_state(&path, &bytes)
     }
 
     /// Loads saved tabs without discarding recovery notices. The application
@@ -163,7 +195,7 @@ impl ApplicationPreferences {
                 notices: Vec::new(),
             });
         }
-        decode_session_state(&fs::read(path)?)
+        decode_session_state(&read_bounded_state(&path)?)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
     }
 
@@ -190,14 +222,19 @@ pub(crate) fn default_new_tab_location() -> String {
 }
 
 pub fn encode_session(locations: &[Location]) -> Result<Vec<u8>, RecoverableStateError> {
-    serde_json::to_vec_pretty(&UriStateV2 {
+    let bytes = serde_json::to_vec_pretty(&UriStateV2 {
         schema_version: URI_STATE_VERSION,
         locations: locations
             .iter()
+            .take(MAX_SESSION_TABS)
             .map(|location| location.uri().to_owned())
             .collect(),
     })
-    .map_err(|_| RecoverableStateError::InvalidState)
+    .map_err(|_| RecoverableStateError::InvalidState)?;
+    if bytes.len() > MAX_STATE_BYTES {
+        return Err(RecoverableStateError::InvalidState);
+    }
+    Ok(bytes)
 }
 
 /// Decodes V2 URI state or performs the one-release, read-only V1 path import.
@@ -210,6 +247,9 @@ pub fn decode_session(bytes: &[u8]) -> Result<Vec<Location>, RecoverableStateErr
 /// record. Callers can show recovery feedback without ever exposing saved URI
 /// contents or credentials.
 pub fn decode_session_state(bytes: &[u8]) -> Result<DecodedUriState, RecoverableStateError> {
+    if bytes.len() > MAX_STATE_BYTES {
+        return Err(RecoverableStateError::InvalidState);
+    }
     let value: serde_json::Value =
         serde_json::from_slice(bytes).map_err(|_| RecoverableStateError::InvalidState)?;
     let object = value
@@ -227,7 +267,7 @@ pub fn decode_session_state(bytes: &[u8]) -> Result<DecodedUriState, Recoverable
         None | Some(1) => {
             let mut decoded = Vec::new();
             let mut notices = Vec::new();
-            for value in locations {
+            for value in locations.iter().take(MAX_SESSION_TABS) {
                 let Some(value) = value.as_str() else {
                     notices.push(RecoverableStateNotice::MalformedRecord);
                     continue;
@@ -252,7 +292,7 @@ fn decode_uri_records(
 ) -> Result<DecodedUriState, RecoverableStateError> {
     let mut decoded = Vec::new();
     let mut notices = Vec::new();
-    for value in locations {
+    for value in locations.iter().take(MAX_SESSION_TABS) {
         match value.as_str().and_then(|uri| Location::from_uri(uri).ok()) {
             Some(location) => decoded.push(location),
             None => notices.push(RecoverableStateNotice::MalformedRecord),

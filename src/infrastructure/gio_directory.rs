@@ -23,6 +23,69 @@ impl GioDirectoryRepository {
 }
 
 impl DirectoryRepository for GioDirectoryRepository {
+    fn watch(&self, location: &Location, changed: Box<dyn Fn()>) -> Option<gio::FileMonitor> {
+        let monitor = gio::File::for_uri(location.uri())
+            .monitor_directory(gio::FileMonitorFlags::WATCH_MOVES, gio::Cancellable::NONE)
+            .ok()?;
+        monitor.connect_changed(move |_, _, _, event| {
+            if matches!(
+                event,
+                gio::FileMonitorEvent::ChangesDoneHint
+                    | gio::FileMonitorEvent::Created
+                    | gio::FileMonitorEvent::Deleted
+                    | gio::FileMonitorEvent::MovedIn
+                    | gio::FileMonitorEvent::MovedOut
+                    | gio::FileMonitorEvent::Renamed
+                    | gio::FileMonitorEvent::AttributeChanged
+            ) {
+                changed();
+            }
+        });
+        Some(monitor)
+    }
+    fn list_pages(&self, request: DirectoryRequest, mut sink: DirectoryPageSink) {
+        let (send, receive) = std::sync::mpsc::sync_channel(2);
+        let worker = request.clone();
+        std::thread::spawn(move || {
+            let mut emit = |snapshot| send.send(RequestOutcome::Succeeded(snapshot)).is_ok();
+            let result = enumerate_with_pages(&worker, Some(&mut emit));
+            let outcome = if worker.cancellable.is_cancelled() {
+                RequestOutcome::Cancelled
+            } else {
+                match result {
+                    Ok(snapshot) => RequestOutcome::Succeeded(snapshot),
+                    Err(error) => RequestOutcome::Failed(error),
+                }
+            };
+            let _ = send.send(outcome);
+        });
+        let repository = self.clone();
+        self.context.spawn_local(async move {
+            loop {
+                match receive.try_recv() {
+                    Ok(RequestOutcome::Failed(error)) if error.kind == OperationErrorKind::MountUnavailable => {
+                        // Preserve the established native authentication/mount
+                        // interaction. The fallback owns cancellation and retry.
+                        repository.list(request, Box::new(move |result| sink(result)));
+                        return;
+                    }
+                    Ok(outcome) => {
+                        let terminal = !matches!(&outcome, RequestOutcome::Succeeded(snapshot) if snapshot.next_page.is_some());
+                        sink(RequestCompletion { id: request.id, outcome });
+                        if terminal { return; }
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        sink(RequestCompletion { id: request.id, outcome: RequestOutcome::Failed(OperationError::new(OperationErrorKind::Unknown, Some(&request.location), None)) });
+                        return;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                }
+                // Yield between bounded pages so input and the first frame can
+                // run while the same enumeration cursor continues in the worker.
+                glib::timeout_future(std::time::Duration::from_millis(1)).await;
+            }
+        });
+    }
     fn list(&self, request: DirectoryRequest, done: DirectoryCallback) {
         let worker_request = request.clone();
         let mount_operation = self.mount_operation.clone();
@@ -100,6 +163,13 @@ impl DirectoryRepository for GioDirectoryRepository {
 }
 
 fn enumerate(request: &DirectoryRequest) -> Result<DirectorySnapshot, OperationError> {
+    enumerate_with_pages(request, None)
+}
+
+fn enumerate_with_pages(
+    request: &DirectoryRequest,
+    mut emit: Option<&mut dyn FnMut(DirectorySnapshot) -> bool>,
+) -> Result<DirectorySnapshot, OperationError> {
     // GIO does not promise stable ordering between enumerations. Return one
     // complete snapshot and reject offset paging, rather than silently losing rows.
     if request.page.offset != 0 || request.page.limit != usize::MAX {
@@ -125,16 +195,33 @@ fn enumerate(request: &DirectoryRequest) -> Result<DirectorySnapshot, OperationE
     }
     let mut capabilities = FileItem::from_gio(&file, &info).capabilities().clone();
     capabilities.stable_order = false;
+    capabilities.supported.insert(Capability::List);
+    let location = ResolvedLocation {
+        requested: request.location.clone(),
+        resolved: Location::try_from_file(file.clone()).map_err(|_| {
+            OperationError::new(
+                OperationErrorKind::InvalidRequest,
+                Some(&request.location),
+                None,
+            )
+        })?,
+    };
+    // Fast content type comes from directory/name metadata. Do not sniff every
+    // file's contents just to populate a model; image decoding is visible-only.
     let enumerator = file.enumerate_children(
-        "standard::name,standard::display-name,standard::type,standard::content-type,standard::size,standard::target-uri,time::modified,access::can-read,access::can-write,access::can-rename,access::can-trash,access::can-delete",
+        "standard::name,standard::display-name,standard::type,standard::fast-content-type,standard::size,standard::target-uri,time::modified,access::can-read,access::can-write,access::can-rename,access::can-trash,access::can-delete",
         gio::FileQueryInfoFlags::NONE, Some(&request.cancellable),
     ).map_err(map_error)?;
     let result = (|| {
         let mut entries = Vec::new();
+        let mut offset = 0;
         while let Some(info) = enumerator
             .next_file(Some(&request.cancellable))
             .map_err(map_error)?
         {
+            if let Some(content_type) = info.attribute_string("standard::fast-content-type") {
+                info.set_content_type(&content_type);
+            }
             let item = FileItem::from_gio(&file, &info);
             entries.push(EntrySnapshot {
                 location: item.location().clone(),
@@ -152,6 +239,23 @@ fn enumerate(request: &DirectoryRequest) -> Result<DirectorySnapshot, OperationE
                 content_type: info.content_type().map(|s| s.to_string()),
                 capabilities: item.capabilities().clone(),
             });
+            if entries.len() == 128 {
+                if let Some(emit) = &mut emit {
+                    offset += entries.len();
+                    if !emit(DirectorySnapshot {
+                        location: location.clone(),
+                        entries: std::mem::take(&mut entries),
+                        capabilities: capabilities.clone(),
+                        next_page: Some(PageRequest { offset, limit: 128 }),
+                    }) {
+                        return Err(OperationError::new(
+                            OperationErrorKind::Unknown,
+                            Some(&request.location),
+                            None,
+                        ));
+                    }
+                }
+            }
         }
         capabilities.supported.insert(Capability::List);
         Ok(DirectorySnapshot {

@@ -614,6 +614,21 @@ impl OperationCoordinator {
             p.events.push(event);
         }
         if terminal {
+            let mut records = self.records.borrow_mut();
+            let mut excess = records
+                .iter()
+                .filter(|record| record.reducer.is_terminal())
+                .count()
+                .saturating_sub(crate::core::application_preferences::MAX_HISTORY_RECORDS);
+            records.retain(|record| {
+                if excess > 0 && record.reducer.is_terminal() {
+                    excess -= 1;
+                    false
+                } else {
+                    true
+                }
+            });
+            drop(records);
             self.schedule();
         }
     }
