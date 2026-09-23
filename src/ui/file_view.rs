@@ -1559,7 +1559,7 @@ impl FileView {
         });
         let filtered = FilterListModel::new(Some(store), Some(filter));
         let sorted = SortListModel::new(Some(filtered), Some(sorter));
-        sorted.set_incremental(true);
+        sorted.set_incremental(false);
         let selection = MultiSelection::new(Some(sorted.clone()));
         let populating = Rc::new(std::cell::Cell::new(false));
         let population = populating.clone();
