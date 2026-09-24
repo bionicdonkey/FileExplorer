@@ -5,6 +5,10 @@ use std::time::Duration;
 
 pub const PAGE_SIZE: usize = 128;
 
+/// Source rows are admitted in a handful of bounded batches so GTK's
+/// incremental sorter can settle between updates without turning a large
+/// directory into thousands of increasingly expensive re-sorts.
+pub const MODEL_BATCH_SIZE: usize = PAGE_SIZE * 8;
 /// A model population cursor. Filtering is performed only on the next chunk;
 /// GTK's incremental sorter merges those chunks without blocking input.
 pub struct PagedSnapshot {

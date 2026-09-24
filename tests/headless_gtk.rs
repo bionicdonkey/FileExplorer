@@ -91,7 +91,18 @@ fn slice5_cold_warm_local_remote_frames_and_fifty_tabs_meet_p95_budgets() {
                 acknowledgements.push(acknowledgement);
             }
             let context = glib::MainContext::default();
+            let completion_deadline = Instant::now() + Duration::from_secs(15);
             while view.has_pending_navigation() {
+                assert!(
+                    Instant::now() < completion_deadline,
+                    "{} 10,000-entry navigation did not complete within 15 seconds (run {run}; directory entries: {})",
+                    if remote_fixture { "remote" } else { "local" },
+                    view.tab_state()
+                        .borrow()
+                        .directory
+                        .as_ref()
+                        .map_or(0, |snapshot| snapshot.entries.len()),
+                );
                 let tick = Instant::now();
                 let dispatched = context.iteration(false);
                 if run > 0 && dispatched {
@@ -1734,4 +1745,84 @@ fn slice1_cancel_state_and_error_text_remain_explicit_and_redacted() {
     );
     assert_eq!(error.message_key, "operation.permission-denied");
     assert_eq!(error.source.as_deref(), Some("smb://host/…"));
+}
+#[gtk::test]
+fn slice5_local_ten_thousand_file_navigation_completes_through_incremental_sort_backpressure() {
+    use zorin_explorer::{
+        core::{ViewMode, ViewOptions},
+        ui::file_view::FileView,
+    };
+
+    let directory = tempfile::tempdir().unwrap();
+    for n in 0..10_000 {
+        std::fs::write(directory.path().join(format!("file-{n:05}")), b"fixture").unwrap();
+    }
+    let location = Location::from_local_path(directory.path());
+    let view = FileView::from_location(location.clone());
+    view.set_options(ViewOptions {
+        view_mode: ViewMode::Hybrid,
+        ..Default::default()
+    });
+    let window = gtk::Window::builder()
+        .default_width(800)
+        .default_height(500)
+        .child(&view.widget)
+        .build();
+    window.present();
+
+    let first_frame_deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let context = glib::MainContext::default();
+    loop {
+        let ready = view.column_view().is_some_and(|list| {
+            list.height() > 0 && list.model().is_some_and(|model| model.n_items() > 0)
+        });
+        if ready {
+            break;
+        }
+        if std::time::Instant::now() >= first_frame_deadline {
+            let entries = view.tab_state().borrow().directory.as_ref().map_or(0, |snapshot| snapshot.entries.len());
+            let model_items = view.column_view().and_then(|list| list.model()).map_or(0, |model| model.n_items());
+            panic!("Hybrid first frame stalled: entries={entries}, model_items={model_items}, pending={}", view.has_pending_navigation());
+        }
+        context.iteration(false);
+    }
+    scale_first_frame(&view);
+    let first_navigation_deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while view.has_pending_navigation() {
+        if std::time::Instant::now() >= first_navigation_deadline {
+            let entries = view.tab_state().borrow().directory.as_ref().map_or(0, |snapshot| snapshot.entries.len());
+            let model_items = view.column_view().and_then(|list| list.model()).map_or(0, |model| model.n_items());
+            panic!("Hybrid first navigation stalled: entries={entries}, model_items={model_items}");
+        }
+        context.iteration(false);
+    }
+    assert_eq!(
+        view.tab_state()
+            .borrow()
+            .directory
+            .as_ref()
+            .map_or(0, |snapshot| snapshot.entries.len()),
+        10_000,
+        "the local 10,000-file navigation must consume every producer page"
+    );
+    view.navigate(location);
+    scale_first_frame(&view);
+    let second_navigation_deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while view.has_pending_navigation() {
+        if std::time::Instant::now() >= second_navigation_deadline {
+            let entries = view.tab_state().borrow().directory.as_ref().map_or(0, |snapshot| snapshot.entries.len());
+            let model_items = view.column_view().and_then(|list| list.model()).map_or(0, |model| model.n_items());
+            panic!("Hybrid second navigation stalled: entries={entries}, model_items={model_items}");
+        }
+        context.iteration(false);
+    }
+    scale_pump_until(|| {
+        view
+            .column_view()
+            .and_then(|column| column.model())
+            .is_some_and(|model| model.n_items() == 10_000)
+    });
+
+    view.close();
+    window.close();
 }

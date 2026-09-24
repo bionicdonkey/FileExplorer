@@ -36,10 +36,17 @@ enum ListRow {
     File(FileItem),
 }
 
+struct StreamAppendWaiter {
+    generation: u64,
+    model: SortListModel,
+    handler: glib::SignalHandlerId,
+}
+
 fn append_model_page(
     store: &gio::ListStore,
     items: Vec<FileItem>,
     group_field: GroupField,
+    show_hidden: bool,
 ) -> Vec<(Location, u32)> {
     let mut groups = std::collections::HashSet::new();
     if group_field != GroupField::None {
@@ -60,7 +67,7 @@ fn append_model_page(
             group_field,
             std::time::SystemTime::now(),
         ) {
-            if groups.insert(group.clone()) {
+            if (show_hidden || !item.name().starts_with('.')) && groups.insert(group.clone()) {
                 rows.push(glib::BoxedAnyObject::new(ListRow::Group(group)));
             }
         }
@@ -122,8 +129,14 @@ pub struct FileView {
     folder_row_index: Rc<RefCell<std::collections::HashMap<Location, u32>>>,
     rendered_generation: Rc<std::cell::Cell<Option<u64>>>,
     rendered_count: Rc<std::cell::Cell<usize>>,
-    stream_append_retry_scheduled: Rc<std::cell::Cell<bool>>,
+    stream_append_waiter: Rc<RefCell<Option<StreamAppendWaiter>>>,
+    stream_append_model: Rc<RefCell<Option<SortListModel>>>,
     directory_monitor: Rc<RefCell<Option<(Location, gio::FileMonitor)>>>,
+    pending_visible_metadata: Rc<
+        RefCell<
+            std::collections::HashMap<Location, crate::core::contracts::VisibleMetadata>,
+        >,
+    >,
     monitor_refresh_pending: Rc<std::cell::Cell<bool>>,
     controllers: Rc<RefCell<Vec<gtk::EventController>>>,
     stream_selection: Rc<RefCell<Option<Vec<String>>>>,
@@ -205,8 +218,10 @@ impl FileView {
             folder_row_index: Default::default(),
             rendered_generation: Default::default(),
             rendered_count: Default::default(),
-            stream_append_retry_scheduled: Default::default(),
+            stream_append_waiter: Default::default(),
+            stream_append_model: Default::default(),
             directory_monitor: Default::default(),
+            pending_visible_metadata: Default::default(),
             monitor_refresh_pending: Default::default(),
             controllers: Default::default(),
             stream_selection: Default::default(),
@@ -285,6 +300,7 @@ impl FileView {
 
     pub fn navigate(&self, location: Location) {
         self.clear_search_results();
+        self.cancel_stream_append_waiter();
         let view = self.clone();
         self.navigation.navigate(location, move |accepted| {
             if accepted {
@@ -296,6 +312,7 @@ impl FileView {
 
     pub fn go_back(&self) {
         self.clear_search_results();
+        self.cancel_stream_append_waiter();
         let view = self.clone();
         if self.navigation.back(move |accepted| {
             if accepted {
@@ -308,6 +325,7 @@ impl FileView {
 
     pub fn go_forward(&self) {
         self.clear_search_results();
+        self.cancel_stream_append_waiter();
         let view = self.clone();
         if self.navigation.forward(move |accepted| {
             if accepted {
@@ -320,6 +338,7 @@ impl FileView {
 
     pub fn close(&self) {
         self.search.clear();
+        self.cancel_stream_append_waiter();
         self.navigation.close_tab();
         if let Some((_, monitor)) = self.directory_monitor.borrow_mut().take() {
             monitor.cancel();
@@ -329,6 +348,7 @@ impl FileView {
         self.model_row_index.borrow_mut().clear();
         self.folder_row_index.borrow_mut().clear();
         self.widget.set_child(gtk::Widget::NONE);
+        self.pending_visible_metadata.borrow_mut().clear();
         for controller in self.controllers.borrow_mut().drain(..) {
             self.widget.remove_controller(&controller);
         }
@@ -379,6 +399,7 @@ impl FileView {
                 if let Some(keys) = self.stream_selection.borrow_mut().take() {
                     self.restore_stream_selection(keys);
                 }
+                self.flush_visible_metadata();
             }
             return;
         }
@@ -457,10 +478,26 @@ impl FileView {
             cache.insert(entry.location.clone(), entry.clone());
         }
         drop(cache);
-        let metadata_by_location: std::collections::HashMap<_, _> = metadata
-            .into_iter()
-            .map(|entry| (entry.location.clone(), entry))
-            .collect();
+        self.pending_visible_metadata.borrow_mut().extend(
+            metadata
+                .into_iter()
+                .map(|entry| (entry.location.clone(), entry)),
+        );
+        if self.has_pending_navigation() && self.incremental_sort_model().is_some() {
+            return;
+        }
+        self.flush_visible_metadata();
+    }
+
+    /// Metadata arrives independently of directory identity pages. Updating a
+    /// ListStore invalidates its sort model, so keep visible-row updates out of
+    /// the producer/sorter critical path and apply them after the stream ends.
+    fn flush_visible_metadata(&self) {
+        let metadata_by_location =
+            std::mem::take(&mut *self.pending_visible_metadata.borrow_mut());
+        if metadata_by_location.is_empty() {
+            return;
+        }
         self.apply_visible_metadata_to_store(
             self.model_store.borrow().as_ref(),
             &self.model_row_index.borrow(),
@@ -1027,6 +1064,7 @@ impl FileView {
     pub fn refresh(&self) {
         invalidate_thumbnails();
         self.clear_search_results();
+        self.cancel_stream_append_waiter();
         if !self.has_pending_navigation() && self.section_title().is_some() {
             self.reload();
             return;
@@ -1090,7 +1128,10 @@ impl FileView {
 
     /// Repaints owned metadata; never enumerates or queries the filesystem.
     fn reload(&self) {
+        self.cancel_stream_append_waiter();
+        self.stream_append_model.borrow_mut().take();
         self.model_store.borrow_mut().take();
+        self.pending_visible_metadata.borrow_mut().clear();
         self.folder_store.borrow_mut().take();
         self.model_row_index.borrow_mut().clear();
         self.folder_row_index.borrow_mut().clear();
@@ -1311,7 +1352,7 @@ impl FileView {
                 .set_child(Some(&self.column_view_for(&items, options))),
             ViewMode::IconGrid if self.use_recycled_model(items.len()) => self
                 .widget
-                .set_child(Some(&self.recycled_grid(&items, options))),
+                .set_child(Some(&self.recycled_grid(&items, options, true, true))),
             ViewMode::IconGrid => self
                 .widget
                 .set_child(Some(&self.grid_view(&items, options))),
@@ -1323,7 +1364,7 @@ impl FileView {
 
     fn column_view_for(&self, items: &[FileItem], options: &ViewOptions) -> ColumnView {
         if self.use_recycled_model(items.len()) {
-            return self.large_column_view(items, options);
+            return self.large_column_view(items, options, true, true);
         }
         let store = gio::ListStore::new::<glib::BoxedAnyObject>();
         let mut last_group = None;
@@ -1487,19 +1528,29 @@ impl FileView {
         find(self.widget.upcast_ref())
     }
 
-    fn paged_selection(&self, items: &[FileItem], options: &ViewOptions) -> MultiSelection {
+    fn paged_selection(
+        &self,
+        items: &[FileItem],
+        options: &ViewOptions,
+        incremental_sort: bool,
+        primary_stream_sort: bool,
+    ) -> MultiSelection {
         use crate::application::performance::PagedSnapshot;
         let store = gio::ListStore::new::<glib::BoxedAnyObject>();
         *self.model_store.borrow_mut() = Some(store.clone());
         self.model_row_index.borrow_mut().clear();
         let mut pages = PagedSnapshot::new(items.to_vec());
         if let Some(page) = pages.next_page() {
-            self.model_row_index
-                .borrow_mut()
-                .extend(append_model_page(&store, page, options.group_field));
+            self.model_row_index.borrow_mut().extend(append_model_page(
+                &store,
+                page,
+                options.group_field,
+                options.show_hidden,
+            ));
         }
         let weak = store.downgrade();
         let group_field = options.group_field;
+        let show_hidden = options.show_hidden;
         let row_index = self.model_row_index.clone();
         let filter_options = options.clone();
         let options = options.clone();
@@ -1561,7 +1612,10 @@ impl FileView {
         });
         let filtered = FilterListModel::new(Some(store), Some(filter));
         let sorted = SortListModel::new(Some(filtered), Some(sorter));
-        sorted.set_incremental(true);
+        sorted.set_incremental(incremental_sort);
+        if primary_stream_sort {
+            *self.stream_append_model.borrow_mut() = Some(sorted.clone());
+        }
         let selection = MultiSelection::new(Some(sorted.clone()));
         let populating = Rc::new(std::cell::Cell::new(false));
         let population = populating.clone();
@@ -1576,21 +1630,38 @@ impl FileView {
                 .collect::<std::collections::HashSet<_>>(),
         ));
         let selection_keys = keys.clone();
+        let completion_population = population.clone();
+        let completion_selection = weak_selection.clone();
+        let completion_keys = keys.clone();
         glib::idle_add_local_full(glib::Priority::LOW, move || {
             let Some(store) = weak.upgrade() else {
                 return glib::ControlFlow::Break;
             };
-            if sorted.pending() > 0 {
-                return glib::ControlFlow::Continue;
-            }
             if let Some(page) = pages.next_page() {
                 row_index
                     .borrow_mut()
-                    .extend(append_model_page(&store, page, group_field));
+                    .extend(append_model_page(&store, page, group_field, show_hidden));
                 return glib::ControlFlow::Continue;
             }
             if sorted.pending() > 0 {
-                return glib::ControlFlow::Continue;
+                let population = completion_population.clone();
+                let weak_selection = completion_selection.clone();
+                let keys = completion_keys.clone();
+                sorted.connect_pending_notify(move |model| {
+                    if model.pending() > 0 {
+                        return;
+                    }
+                    population.set(true);
+                    if let Some(selection) = weak_selection.upgrade() {
+                        for position in 0..selection.n_items() {
+                            if selection.item(position).and_downcast::<glib::BoxedAnyObject>().is_some_and(|object| matches!(&*object.borrow::<ListRow>(), ListRow::File(item) if keys.borrow().contains(item.identity_key()))) {
+                                selection.select_item(position, false);
+                            }
+                        }
+                    }
+                    population.set(false);
+                });
+                return glib::ControlFlow::Break;
             }
             population.set(true);
             if let Some(selection) = weak_selection.upgrade() {
@@ -1645,34 +1716,18 @@ impl FileView {
                 .is_some_and(|snapshot| snapshot.next_page.is_some())
     }
 
-    fn has_pending_incremental_sort(&self) -> bool {
-        fn pending(widget: &gtk::Widget) -> bool {
-            let model = widget
-                .downcast_ref::<ColumnView>()
-                .and_then(|view| view.model())
-                .or_else(|| {
-                    widget
-                        .downcast_ref::<gtk::GridView>()
-                        .and_then(|view| view.model())
-                });
-            if model
-                .and_downcast::<MultiSelection>()
-                .and_then(|selection| selection.model())
-                .and_downcast::<SortListModel>()
-                .is_some_and(|model| model.is_incremental() && model.pending() > 0)
-            {
-                return true;
-            }
-            let mut child = widget.first_child();
-            while let Some(next) = child {
-                if pending(&next) {
-                    return true;
-                }
-                child = next.next_sibling();
-            }
-            false
-        }
-        pending(self.widget.upcast_ref())
+    fn incremental_sort_model(&self) -> Option<SortListModel> {
+        self.stream_append_model.borrow().clone()
+    }
+
+    fn pending_incremental_sort_model(&self) -> Option<SortListModel> {
+        self.incremental_sort_model()
+            .filter(|model| model.is_incremental() && model.pending() > 0)
+    }
+
+    fn contains_incremental_sort_model(&self, expected: &SortListModel) -> bool {
+        self.incremental_sort_model()
+            .is_some_and(|model| model == *expected)
     }
 
     fn has_unrendered_directory_entries(&self) -> bool {
@@ -1684,25 +1739,83 @@ impl FileView {
                 .is_some_and(|snapshot| snapshot.entries.len() > self.rendered_count.get())
     }
 
-    fn schedule_directory_page_append(&self) {
-        if self.stream_append_retry_scheduled.replace(true) {
+    fn stream_append_is_current(&self, generation: u64, model: &SortListModel) -> bool {
+        let state = self.navigation.state.borrow();
+        if self.rendered_generation.get() != Some(generation)
+            || state.navigation_generation != generation
+            || matches!(state.status, NavigationStatus::Closed)
+        {
+            return false;
+        }
+        drop(state);
+        self.contains_incremental_sort_model(model)
+    }
+
+    fn cancel_stream_append_waiter(&self) {
+        if let Some(waiter) = self.stream_append_waiter.borrow_mut().take() {
+            waiter.model.disconnect(waiter.handler);
+        }
+    }
+
+    fn wait_for_incremental_sort(&self, generation: u64, model: &SortListModel) {
+        if self
+            .stream_append_waiter
+            .borrow()
+            .as_ref()
+            .is_some_and(|waiter| waiter.generation == generation && waiter.model == *model)
+        {
             return;
         }
+        self.cancel_stream_append_waiter();
         let view = self.clone();
-        glib::idle_add_local_full(glib::Priority::LOW, move || {
-            if matches!(
-                view.navigation.state.borrow().status,
-                NavigationStatus::Closed
-            ) {
-                view.stream_append_retry_scheduled.set(false);
-                return glib::ControlFlow::Break;
+        let handler = model.connect_pending_notify(move |model| {
+            if model.pending() > 0 || !view.stream_append_is_current(generation, model) {
+                return;
             }
-            if view.has_pending_incremental_sort() {
-                return glib::ControlFlow::Continue;
+            view.cancel_stream_append_waiter();
+            view.resume_directory_page_append(generation, model);
+        });
+        *self.stream_append_waiter.borrow_mut() = Some(StreamAppendWaiter {
+            generation,
+            model: model.clone(),
+            handler,
+        });
+    }
+
+    fn resume_directory_page_append(&self, generation: u64, model: &SortListModel) {
+        let view = self.clone();
+        let model = model.clone();
+        glib::timeout_add_local_once(std::time::Duration::from_millis(1), move || {
+            if view.stream_append_is_current(generation, &model) {
+                view.navigation_finished_after_sort_completion();
             }
-            view.stream_append_retry_scheduled.set(false);
+        });
+    }
+
+    fn navigation_finished_after_sort_completion(&self) {
+        if self.append_directory_page()
+            && !self.has_pending_navigation()
+            && !self.has_unrendered_directory_entries()
+        {
+            if let Some(keys) = self.stream_selection.borrow_mut().take() {
+                self.restore_stream_selection(keys);
+            }
+            self.flush_visible_metadata();
+        }
+    }
+
+    fn schedule_directory_page_append(&self, generation: u64, model: &SortListModel) {
+        let view = self.clone();
+        let model = model.clone();
+        glib::idle_add_local_once(move || {
+            if !view.stream_append_is_current(generation, &model) {
+                return;
+            }
+            if let Some(pending) = view.pending_incremental_sort_model() {
+                view.wait_for_incremental_sort(generation, &pending);
+                return;
+            }
             view.navigation_finished();
-            glib::ControlFlow::Break
         });
     }
 
@@ -1721,14 +1834,16 @@ impl FileView {
         let Some(store) = store else {
             return false;
         };
-        if self.has_pending_incremental_sort() {
+        let generation = state.navigation_generation;
+        if let Some(model) = self.pending_incremental_sort_model() {
             drop(state);
-            self.schedule_directory_page_append();
+            self.wait_for_incremental_sort(generation, &model);
             return true;
         }
         let options = self.options();
         let start = self.rendered_count.get();
-        let end = (start + crate::application::performance::PAGE_SIZE).min(snapshot.entries.len());
+        let end = (start + crate::application::performance::MODEL_BATCH_SIZE)
+            .min(snapshot.entries.len());
         let additions: Vec<_> = snapshot.entries[start..end]
             .iter()
             .map(FileItem::from_snapshot)
@@ -1740,22 +1855,36 @@ impl FileView {
         let (folders_to_add, files_to_add): (Vec<_>, Vec<_>) = additions
             .into_iter()
             .partition(|item| folders.is_some() && item.is_dir());
-        self.model_row_index
-            .borrow_mut()
-            .extend(append_model_page(&store, files_to_add, options.group_field));
+        self.model_row_index.borrow_mut().extend(append_model_page(
+            &store,
+            files_to_add,
+            options.group_field,
+            options.show_hidden,
+        ));
         if let Some(folders) = folders {
-            self.folder_row_index
-                .borrow_mut()
-                .extend(append_model_page(&folders, folders_to_add, options.group_field));
+            self.folder_row_index.borrow_mut().extend(append_model_page(
+                &folders,
+                folders_to_add,
+                options.group_field,
+                options.show_hidden,
+            ));
         }
         if more_entries {
-            self.schedule_directory_page_append();
+            if let Some(model) = self.incremental_sort_model() {
+                self.schedule_directory_page_append(generation, &model);
+            }
         }
         true
     }
 
-    fn recycled_grid(&self, items: &[FileItem], options: &ViewOptions) -> gtk::GridView {
-        let selection = self.paged_selection(items, options);
+    fn recycled_grid(
+        &self,
+        items: &[FileItem],
+        options: &ViewOptions,
+        incremental_sort: bool,
+        primary_stream_sort: bool,
+    ) -> gtk::GridView {
+        let selection = self.paged_selection(items, options, incremental_sort, primary_stream_sort);
         let grid = gtk::GridView::new(
             Some(selection.clone()),
             Some(column_factory_layout(
@@ -1786,8 +1915,14 @@ impl FileView {
         grid
     }
 
-    fn large_column_view(&self, items: &[FileItem], options: &ViewOptions) -> ColumnView {
-        let selection = self.paged_selection(items, options);
+    fn large_column_view(
+        &self,
+        items: &[FileItem],
+        options: &ViewOptions,
+        incremental_sort: bool,
+        primary_stream_sort: bool,
+    ) -> ColumnView {
+        let selection = self.paged_selection(items, options, incremental_sort, primary_stream_sort);
         let column_view = ColumnView::new(Some(selection.clone()));
         column_view.set_reorderable(true);
         column_view.set_show_row_separators(true);
@@ -2038,9 +2173,10 @@ impl FileView {
             .cloned()
             .collect();
         if self.use_recycled_model(items.len()) {
-            let folders_view = self.recycled_grid(&folders, options);
+            let folders_view = self.recycled_grid(&folders, options, false, false);
             *self.folder_store.borrow_mut() = self.model_store.borrow_mut().take();
-            *self.folder_row_index.borrow_mut() = std::mem::take(&mut *self.model_row_index.borrow_mut());
+            *self.folder_row_index.borrow_mut() =
+                std::mem::take(&mut *self.model_row_index.borrow_mut());
             let folders_scroll = ScrolledWindow::builder()
                 .min_content_height(120)
                 .max_content_height(240)
@@ -2049,7 +2185,7 @@ impl FileView {
                 .build();
             root.append(&Label::new(Some("Folders")));
             root.append(&folders_scroll);
-            let files_view = self.large_column_view(&files, options);
+            let files_view = self.large_column_view(&files, options, true, true);
             let files_scroll = ScrolledWindow::builder()
                 .vexpand(true)
                 .min_content_height(200)
@@ -2961,13 +3097,21 @@ mod tests {
         ]);
 
         let size_at = |store: &gio::ListStore| {
-            let object = store.item(0).unwrap().downcast::<glib::BoxedAnyObject>().unwrap();
+            let object = store
+                .item(0)
+                .unwrap()
+                .downcast::<glib::BoxedAnyObject>()
+                .unwrap();
             let ListRow::File(item) = &*object.borrow::<ListRow>() else {
                 panic!("fixture row must be a file");
             };
             item.size()
         };
-        assert_eq!(size_at(&folders), 111, "folder cells receive visible metadata");
+        assert_eq!(
+            size_at(&folders),
+            111,
+            "folder cells receive visible metadata"
+        );
         assert_eq!(size_at(&files), 222, "file cells receive visible metadata");
         view.close();
     }
