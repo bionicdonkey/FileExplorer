@@ -36,6 +36,12 @@ enum ListRow {
     File(FileItem),
 }
 
+#[derive(Clone)]
+enum VisibleMetadataCacheEntry {
+    Pending,
+    Resolved(crate::core::contracts::VisibleMetadata),
+}
+
 struct StreamAppendWaiter {
     generation: u64,
     model: SortListModel,
@@ -165,21 +171,14 @@ pub struct FileView {
     stream_append_waiter: Rc<RefCell<Option<StreamAppendWaiter>>>,
     stream_append_model: Rc<RefCell<Option<SortListModel>>>,
     directory_monitor: Rc<RefCell<Option<(Location, gio::FileMonitor)>>>,
-    pending_visible_metadata: Rc<
-        RefCell<
-            std::collections::HashMap<Location, crate::core::contracts::VisibleMetadata>,
-        >,
-    >,
-    resolved_visible_metadata: Rc<RefCell<std::collections::HashSet<Location>>>,
+    pending_visible_metadata:
+        Rc<RefCell<std::collections::HashMap<Location, crate::core::contracts::VisibleMetadata>>>,
     visible_metadata_generation: Rc<std::cell::Cell<Option<u64>>>,
     monitor_refresh_pending: Rc<std::cell::Cell<bool>>,
     controllers: Rc<RefCell<Vec<gtk::EventController>>>,
     stream_selection: Rc<RefCell<Option<Vec<String>>>>,
-    visible_metadata: Rc<
-        RefCell<
-            crate::application::performance::VisibleCache<crate::core::contracts::VisibleMetadata>,
-        >,
-    >,
+    visible_metadata:
+        Rc<RefCell<crate::application::performance::VisibleCache<VisibleMetadataCacheEntry>>>,
 }
 
 impl FileView {
@@ -257,7 +256,6 @@ impl FileView {
             stream_append_model: Default::default(),
             directory_monitor: Default::default(),
             pending_visible_metadata: Default::default(),
-            resolved_visible_metadata: Default::default(),
             visible_metadata_generation: Default::default(),
             monitor_refresh_pending: Default::default(),
             controllers: Default::default(),
@@ -386,7 +384,6 @@ impl FileView {
         self.folder_row_index.borrow_mut().clear();
         self.widget.set_child(gtk::Widget::NONE);
         self.pending_visible_metadata.borrow_mut().clear();
-        self.resolved_visible_metadata.borrow_mut().clear();
         for controller in self.controllers.borrow_mut().drain(..) {
             self.widget.remove_controller(&controller);
         }
@@ -433,7 +430,7 @@ impl FileView {
         // A stream extends the existing model in bounded pages. Replacing the
         // widget here would repeatedly reset scrolling, focus and cell caches.
         if self.append_directory_page() {
-            if !self.has_pending_navigation() && !self.has_unrendered_directory_entries() {
+            if !self.has_pending_navigation() && !self.has_unrendered_backing_rows() {
                 if let Some(keys) = self.stream_selection.borrow_mut().take() {
                     self.restore_stream_selection(keys);
                 }
@@ -491,15 +488,7 @@ impl FileView {
         if cache.get(item.location()).is_some() {
             return;
         }
-        cache.insert(
-            item.location().clone(),
-            crate::core::contracts::VisibleMetadata {
-                location: item.location().clone(),
-                size: None,
-                modified: None,
-                content_type: None,
-            },
-        );
+        cache.insert(item.location().clone(), VisibleMetadataCacheEntry::Pending);
         drop(cache);
         let view = self.clone();
         let requested = item.location().clone();
@@ -516,12 +505,12 @@ impl FileView {
         if metadata.is_empty() {
             return;
         }
-        self.resolved_visible_metadata
-            .borrow_mut()
-            .extend(metadata.iter().map(|entry| entry.location.clone()));
         let mut cache = self.visible_metadata.borrow_mut();
         for entry in &metadata {
-            cache.insert(entry.location.clone(), entry.clone());
+            cache.insert(
+                entry.location.clone(),
+                VisibleMetadataCacheEntry::Resolved(entry.clone()),
+            );
         }
         drop(cache);
         self.queue_visible_metadata(metadata);
@@ -546,10 +535,19 @@ impl FileView {
         if self.visible_metadata_generation.get() != Some(generation) {
             self.visible_metadata.borrow_mut().invalidate();
             self.pending_visible_metadata.borrow_mut().clear();
-            self.resolved_visible_metadata.borrow_mut().clear();
             self.visible_metadata_generation.set(Some(generation));
         }
         generation
+    }
+
+    #[cfg(test)]
+    fn resolved_visible_metadata_count(&self) -> usize {
+        self.visible_metadata
+            .borrow()
+            .entries()
+            .iter()
+            .filter(|(_, entry)| matches!(entry, VisibleMetadataCacheEntry::Resolved(_)))
+            .count()
     }
 
     fn queue_visible_metadata(
@@ -566,11 +564,9 @@ impl FileView {
     fn reapply_cached_visible_metadata(&self) {
         self.prepare_visible_metadata_generation();
         let cached = self.visible_metadata.borrow().entries();
-        self.queue_visible_metadata(cached.into_iter().filter_map(|(location, entry)| {
-            self.resolved_visible_metadata
-                .borrow()
-                .contains(&location)
-                .then_some(entry)
+        self.queue_visible_metadata(cached.into_iter().filter_map(|(_, entry)| match entry {
+            VisibleMetadataCacheEntry::Resolved(metadata) => Some(metadata),
+            VisibleMetadataCacheEntry::Pending => None,
         }));
         self.flush_visible_metadata();
     }
@@ -580,24 +576,29 @@ impl FileView {
     /// the producer/sorter critical path and apply them after the stream ends.
     fn flush_visible_metadata(&self) {
         if (self.has_pending_navigation() && self.incremental_sort_model().is_some())
-            || self.has_unrendered_directory_entries()
+            || self.has_unrendered_backing_rows()
         {
             return;
         }
-        let metadata_by_location = std::mem::take(&mut *self.pending_visible_metadata.borrow_mut());
+        let mut metadata_by_location =
+            std::mem::take(&mut *self.pending_visible_metadata.borrow_mut());
         if metadata_by_location.is_empty() {
             return;
         }
-        self.apply_visible_metadata_to_store(
+        let mut applied = self.apply_visible_metadata_to_store(
             self.model_store.borrow().as_ref(),
             &self.model_row_index.borrow(),
             &metadata_by_location,
         );
-        self.apply_visible_metadata_to_store(
+        applied.extend(self.apply_visible_metadata_to_store(
             self.folder_store.borrow().as_ref(),
             &self.folder_row_index.borrow(),
             &metadata_by_location,
-        );
+        ));
+        metadata_by_location.retain(|location, _| !applied.contains(location));
+        self.pending_visible_metadata
+            .borrow_mut()
+            .extend(metadata_by_location);
     }
 
     /// Replaces only backing rows named by the response. The source-list
@@ -608,10 +609,11 @@ impl FileView {
         store: Option<&gio::ListStore>,
         row_index: &std::collections::HashMap<Location, u32>,
         metadata: &std::collections::HashMap<Location, crate::core::contracts::VisibleMetadata>,
-    ) {
+    ) -> std::collections::HashSet<Location> {
         let Some(store) = store else {
-            return;
+            return Default::default();
         };
+        let mut applied = std::collections::HashSet::new();
         for (location, entry) in metadata {
             let Some(&index) = row_index.get(location) else {
                 continue;
@@ -634,7 +636,9 @@ impl FileView {
                     item.with_visible_metadata(entry),
                 ))],
             );
+            applied.insert(location.clone());
         }
+        applied
     }
 
     fn watch_committed_directory(&self) {
@@ -1737,6 +1741,7 @@ impl FileView {
                     group_field,
                     show_hidden,
                 ));
+                completion_view.flush_visible_metadata();
                 return glib::ControlFlow::Continue;
             }
             if sorted.pending() > 0 {
@@ -1828,13 +1833,16 @@ impl FileView {
             .is_some_and(|model| model == *expected)
     }
 
-    fn has_unrendered_directory_entries(&self) -> bool {
+    /// `rendered_count` tracks directory snapshot consumption for stream append;
+    /// the URI indexes are the authoritative count of rows actually backed by
+    /// a ListStore and therefore eligible for metadata replacement.
+    fn has_unrendered_backing_rows(&self) -> bool {
         let state = self.navigation.state.borrow();
         self.rendered_generation.get() == Some(state.navigation_generation)
-            && state
-                .directory
-                .as_ref()
-                .is_some_and(|snapshot| snapshot.entries.len() > self.rendered_count.get())
+            && state.directory.as_ref().is_some_and(|snapshot| {
+                snapshot.entries.len()
+                    > self.model_row_index.borrow().len() + self.folder_row_index.borrow().len()
+            })
     }
 
     fn stream_append_is_current(&self, generation: u64, model: &SortListModel) -> bool {
@@ -1893,7 +1901,7 @@ impl FileView {
     fn navigation_finished_after_sort_completion(&self) {
         if self.append_directory_page()
             && !self.has_pending_navigation()
-            && !self.has_unrendered_directory_entries()
+            && !self.has_unrendered_backing_rows()
         {
             if let Some(keys) = self.stream_selection.borrow_mut().take() {
                 self.restore_stream_selection(keys);
@@ -1940,8 +1948,8 @@ impl FileView {
         }
         let options = self.options();
         let start = self.rendered_count.get();
-        let end = (start + crate::application::performance::MODEL_BATCH_SIZE)
-            .min(snapshot.entries.len());
+        let end =
+            (start + crate::application::performance::MODEL_BATCH_SIZE).min(snapshot.entries.len());
         let additions: Vec<_> = snapshot.entries[start..end]
             .iter()
             .map(FileItem::from_snapshot)
@@ -3226,19 +3234,22 @@ mod tests {
 
         let context = glib::MainContext::default();
         let root = Location::from_uri("smb://fixture/reload-metadata").unwrap();
-        let location = Location::from_uri(&format!("{}/00-report.txt", root.uri())).unwrap();
+        // This row is deliberately outside the first virtual page. Reload
+        // starts with only the first 128 backing rows, so cached metadata must
+        // remain pending until this later page is appended.
+        let location = Location::from_uri(&format!("{}/zz-report.txt", root.uri())).unwrap();
         let provider = std::rc::Rc::new(MockProvider::new(context.clone(), MockConfig::default()));
         provider.set_directory(
             root.clone(),
             (0..129)
                 .map(|index| EntrySnapshot {
-                    location: if index == 0 {
+                    location: if index == 128 {
                         location.clone()
                     } else {
                         Location::from_uri(&format!("{}/item-{index:03}", root.uri())).unwrap()
                     },
-                    display_name: if index == 0 {
-                        "00-report.txt".into()
+                    display_name: if index == 128 {
+                        "zz-report.txt".into()
                     } else {
                         format!("item-{index:03}")
                     },
@@ -3266,7 +3277,6 @@ mod tests {
             context.iteration(false);
         }
 
-        view.navigate(root);
         view.apply_visible_metadata(vec![VisibleMetadata {
             location: location.clone(),
             size: Some(1),
@@ -3279,8 +3289,7 @@ mod tests {
             sort_direction: SortDirection::Descending,
             ..Default::default()
         });
-        provider.advance(1);
-        while view.has_pending_navigation() || context.pending() {
+        while context.pending() {
             assert!(std::time::Instant::now() < deadline);
             context.iteration(false);
         }
@@ -3300,6 +3309,53 @@ mod tests {
             panic!("fixture row must remain a file");
         };
         assert_eq!(item.content_type(), "application/x-reloaded");
+        view.close();
+    }
+
+    #[gtk::test]
+    fn slice5_resolved_visible_metadata_is_bounded_and_evicted_rows_retry() {
+        use crate::application::performance::CachePolicy;
+        use crate::core::contracts::{EntryKind, EntrySnapshot, VisibleMetadata};
+        use crate::infrastructure::mock_provider::{MockConfig, MockProvider};
+
+        let context = glib::MainContext::default();
+        let root = Location::from_uri("smb://fixture/bounded-metadata").unwrap();
+        let provider = std::rc::Rc::new(MockProvider::new(context, MockConfig::default()));
+        let view = FileView::new_with_repository(root.clone(), provider.clone());
+        let locations: Vec<_> = (0..=CachePolicy::default().max_entries)
+            .map(|index| Location::from_uri(&format!("{}/item-{index:03}", root.uri())).unwrap())
+            .collect();
+        view.apply_visible_metadata(
+            locations
+                .iter()
+                .map(|location| VisibleMetadata {
+                    location: location.clone(),
+                    size: Some(1),
+                    modified: None,
+                    content_type: Some("application/x-bounded".into()),
+                })
+                .collect(),
+        );
+
+        assert!(
+            view.resolved_visible_metadata_count() <= CachePolicy::default().max_entries,
+            "resolution bookkeeping must be bounded with the visible metadata cache"
+        );
+
+        let first = FileItem::from_snapshot(&EntrySnapshot {
+            location: locations[0].clone(),
+            display_name: "item-000".into(),
+            kind: EntryKind::File,
+            size: None,
+            modified: None,
+            content_type: None,
+            capabilities: Default::default(),
+        });
+        view.request_visible_metadata(&first);
+        assert_eq!(
+            provider.visible_metadata_requests(),
+            vec![locations[0].clone()]
+        );
         view.close();
     }
 
