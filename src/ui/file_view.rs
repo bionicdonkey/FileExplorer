@@ -42,6 +42,39 @@ struct StreamAppendWaiter {
     handler: glib::SignalHandlerId,
 }
 
+/// Runs a completion action exactly once after an incremental sort settles.
+/// Disconnect and mutate selection from an idle turn so neither operation
+/// reenters GTK's pending-notify emission.
+fn connect_once_when_sort_settled(model: &SortListModel, action: impl Fn() + 'static) {
+    let handler = Rc::new(RefCell::new(None));
+    let handler_for_notify = handler.clone();
+    let action: Rc<dyn Fn()> = Rc::new(action);
+    let action_for_notify = action.clone();
+    let completed = Rc::new(std::cell::Cell::new(false));
+    let completed_for_notify = completed.clone();
+    let id = model.connect_pending_notify(move |model| {
+        if model.pending() > 0 || completed_for_notify.replace(true) {
+            return;
+        }
+        let Some(id) = handler_for_notify.borrow_mut().take() else {
+            return;
+        };
+        let model = model.clone();
+        let action = action_for_notify.clone();
+        glib::idle_add_local_once(move || {
+            model.disconnect(id);
+            action();
+        });
+    });
+    if completed.get() {
+        model.disconnect(id);
+        let action = action.clone();
+        glib::idle_add_local_once(move || action());
+    } else {
+        *handler.borrow_mut() = Some(id);
+    }
+}
+
 fn append_model_page(
     store: &gio::ListStore,
     items: Vec<FileItem>,
@@ -137,6 +170,8 @@ pub struct FileView {
             std::collections::HashMap<Location, crate::core::contracts::VisibleMetadata>,
         >,
     >,
+    resolved_visible_metadata: Rc<RefCell<std::collections::HashSet<Location>>>,
+    visible_metadata_generation: Rc<std::cell::Cell<Option<u64>>>,
     monitor_refresh_pending: Rc<std::cell::Cell<bool>>,
     controllers: Rc<RefCell<Vec<gtk::EventController>>>,
     stream_selection: Rc<RefCell<Option<Vec<String>>>>,
@@ -222,6 +257,8 @@ impl FileView {
             stream_append_model: Default::default(),
             directory_monitor: Default::default(),
             pending_visible_metadata: Default::default(),
+            resolved_visible_metadata: Default::default(),
+            visible_metadata_generation: Default::default(),
             monitor_refresh_pending: Default::default(),
             controllers: Default::default(),
             stream_selection: Default::default(),
@@ -349,6 +386,7 @@ impl FileView {
         self.folder_row_index.borrow_mut().clear();
         self.widget.set_child(gtk::Widget::NONE);
         self.pending_visible_metadata.borrow_mut().clear();
+        self.resolved_visible_metadata.borrow_mut().clear();
         for controller in self.controllers.borrow_mut().drain(..) {
             self.widget.remove_controller(&controller);
         }
@@ -448,6 +486,7 @@ impl FileView {
     }
 
     fn request_visible_metadata(&self, item: &FileItem) {
+        let generation = self.prepare_visible_metadata_generation();
         let mut cache = self.visible_metadata.borrow_mut();
         if cache.get(item.location()).is_some() {
             return;
@@ -463,29 +502,76 @@ impl FileView {
         );
         drop(cache);
         let view = self.clone();
+        let requested = item.location().clone();
         self.navigation.inspect_visible_metadata(
-            vec![item.location().clone()],
-            Box::new(move |metadata| view.apply_visible_metadata(metadata)),
+            vec![requested.clone()],
+            Box::new(move |metadata| {
+                view.complete_visible_metadata(generation, requested.clone(), metadata)
+            }),
         );
     }
 
     fn apply_visible_metadata(&self, metadata: Vec<crate::core::contracts::VisibleMetadata>) {
+        self.prepare_visible_metadata_generation();
         if metadata.is_empty() {
             return;
         }
+        self.resolved_visible_metadata
+            .borrow_mut()
+            .extend(metadata.iter().map(|entry| entry.location.clone()));
         let mut cache = self.visible_metadata.borrow_mut();
         for entry in &metadata {
             cache.insert(entry.location.clone(), entry.clone());
         }
         drop(cache);
+        self.queue_visible_metadata(metadata);
+        self.flush_visible_metadata();
+    }
+
+    fn complete_visible_metadata(
+        &self,
+        generation: u64,
+        _requested: Location,
+        metadata: Vec<crate::core::contracts::VisibleMetadata>,
+    ) {
+        if self.navigation.state.borrow().navigation_generation != generation {
+            return;
+        }
+        self.prepare_visible_metadata_generation();
+        self.apply_visible_metadata(metadata);
+    }
+
+    fn prepare_visible_metadata_generation(&self) -> u64 {
+        let generation = self.navigation.state.borrow().navigation_generation;
+        if self.visible_metadata_generation.get() != Some(generation) {
+            self.visible_metadata.borrow_mut().invalidate();
+            self.pending_visible_metadata.borrow_mut().clear();
+            self.resolved_visible_metadata.borrow_mut().clear();
+            self.visible_metadata_generation.set(Some(generation));
+        }
+        generation
+    }
+
+    fn queue_visible_metadata(
+        &self,
+        metadata: impl IntoIterator<Item = crate::core::contracts::VisibleMetadata>,
+    ) {
         self.pending_visible_metadata.borrow_mut().extend(
             metadata
                 .into_iter()
                 .map(|entry| (entry.location.clone(), entry)),
         );
-        if self.has_pending_navigation() && self.incremental_sort_model().is_some() {
-            return;
-        }
+    }
+
+    fn reapply_cached_visible_metadata(&self) {
+        self.prepare_visible_metadata_generation();
+        let cached = self.visible_metadata.borrow().entries();
+        self.queue_visible_metadata(cached.into_iter().filter_map(|(location, entry)| {
+            self.resolved_visible_metadata
+                .borrow()
+                .contains(&location)
+                .then_some(entry)
+        }));
         self.flush_visible_metadata();
     }
 
@@ -493,8 +579,12 @@ impl FileView {
     /// ListStore invalidates its sort model, so keep visible-row updates out of
     /// the producer/sorter critical path and apply them after the stream ends.
     fn flush_visible_metadata(&self) {
-        let metadata_by_location =
-            std::mem::take(&mut *self.pending_visible_metadata.borrow_mut());
+        if (self.has_pending_navigation() && self.incremental_sort_model().is_some())
+            || self.has_unrendered_directory_entries()
+        {
+            return;
+        }
+        let metadata_by_location = std::mem::take(&mut *self.pending_visible_metadata.borrow_mut());
         if metadata_by_location.is_empty() {
             return;
         }
@@ -572,6 +662,7 @@ impl FileView {
             }
             invalidate_thumbnails();
             view.visible_metadata.borrow_mut().invalidate();
+            view.visible_metadata_generation.set(None);
             let view = view.clone();
             glib::timeout_add_local_once(std::time::Duration::from_millis(100), move || {
                 view.monitor_refresh_pending.set(false);
@@ -1131,7 +1222,7 @@ impl FileView {
         self.cancel_stream_append_waiter();
         self.stream_append_model.borrow_mut().take();
         self.model_store.borrow_mut().take();
-        self.pending_visible_metadata.borrow_mut().clear();
+        self.prepare_visible_metadata_generation();
         self.folder_store.borrow_mut().take();
         self.model_row_index.borrow_mut().clear();
         self.folder_row_index.borrow_mut().clear();
@@ -1158,6 +1249,7 @@ impl FileView {
                     .map_or(0, |snapshot| snapshot.entries.len()),
             );
         }
+        self.reapply_cached_visible_metadata();
         if owned_focus {
             self.widget.child_focus(gtk::DirectionType::TabForward);
         }
@@ -1630,6 +1722,7 @@ impl FileView {
                 .collect::<std::collections::HashSet<_>>(),
         ));
         let selection_keys = keys.clone();
+        let completion_view = self.clone();
         let completion_population = population.clone();
         let completion_selection = weak_selection.clone();
         let completion_keys = keys.clone();
@@ -1638,19 +1731,23 @@ impl FileView {
                 return glib::ControlFlow::Break;
             };
             if let Some(page) = pages.next_page() {
-                row_index
-                    .borrow_mut()
-                    .extend(append_model_page(&store, page, group_field, show_hidden));
+                row_index.borrow_mut().extend(append_model_page(
+                    &store,
+                    page,
+                    group_field,
+                    show_hidden,
+                ));
                 return glib::ControlFlow::Continue;
             }
             if sorted.pending() > 0 {
                 let population = completion_population.clone();
                 let weak_selection = completion_selection.clone();
                 let keys = completion_keys.clone();
-                sorted.connect_pending_notify(move |model| {
-                    if model.pending() > 0 {
-                        return;
-                    }
+                let view = completion_view.clone();
+                connect_once_when_sort_settled(&sorted, move || {
+                    // The one-shot handler has disconnected before this can
+                    // change selection, so a metadata-triggered sort cannot
+                    // reenter this initial-restoration path.
                     population.set(true);
                     if let Some(selection) = weak_selection.upgrade() {
                         for position in 0..selection.n_items() {
@@ -1660,6 +1757,7 @@ impl FileView {
                         }
                     }
                     population.set(false);
+                    view.flush_visible_metadata();
                 });
                 return glib::ControlFlow::Break;
             }
@@ -3006,7 +3104,7 @@ mod tests {
         };
         let first = FileItem::from_snapshot(&snapshot("first.txt"));
         let second = FileItem::from_snapshot(&snapshot("second.txt"));
-        let view = FileView::new_with_repository(root, provider.clone());
+        let view = FileView::new_with_repository(root.clone(), provider.clone());
         let row = glib::BoxedAnyObject::new(ListRow::File(first.clone()));
         let store = gio::ListStore::new::<glib::BoxedAnyObject>();
         store.append(&row);
@@ -3113,6 +3211,174 @@ mod tests {
             "folder cells receive visible metadata"
         );
         assert_eq!(size_at(&files), 222, "file cells receive visible metadata");
+        view.close();
+    }
+
+    #[gtk::test]
+    fn slice5_cached_visible_metadata_survives_a_model_reload() {
+        use super::ListRow;
+        use crate::core::contracts::{
+            Capability, CapabilitySnapshot, EntryKind, EntrySnapshot, VisibleMetadata,
+        };
+        use crate::core::{SortDirection, SortField, ViewMode, ViewOptions};
+        use crate::infrastructure::mock_provider::{MockConfig, MockProvider};
+        use glib::prelude::Cast;
+
+        let context = glib::MainContext::default();
+        let root = Location::from_uri("smb://fixture/reload-metadata").unwrap();
+        let location = Location::from_uri(&format!("{}/00-report.txt", root.uri())).unwrap();
+        let provider = std::rc::Rc::new(MockProvider::new(context.clone(), MockConfig::default()));
+        provider.set_directory(
+            root.clone(),
+            (0..129)
+                .map(|index| EntrySnapshot {
+                    location: if index == 0 {
+                        location.clone()
+                    } else {
+                        Location::from_uri(&format!("{}/item-{index:03}", root.uri())).unwrap()
+                    },
+                    display_name: if index == 0 {
+                        "00-report.txt".into()
+                    } else {
+                        format!("item-{index:03}")
+                    },
+                    kind: EntryKind::File,
+                    size: Some(index),
+                    modified: None,
+                    content_type: Some("text/plain".into()),
+                    capabilities: CapabilitySnapshot {
+                        supported: [Capability::List].into_iter().collect(),
+                        ..Default::default()
+                    },
+                })
+                .collect(),
+            CapabilitySnapshot {
+                stable_order: true,
+                supported: [Capability::List].into_iter().collect(),
+                ..Default::default()
+            },
+        );
+        let view = FileView::new_with_repository(root.clone(), provider.clone());
+        provider.advance(1);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while view.column_view().is_none() || context.pending() {
+            assert!(std::time::Instant::now() < deadline);
+            context.iteration(false);
+        }
+
+        view.navigate(root);
+        view.apply_visible_metadata(vec![VisibleMetadata {
+            location: location.clone(),
+            size: Some(1),
+            modified: None,
+            content_type: Some("application/x-reloaded".into()),
+        }]);
+        view.set_options(ViewOptions {
+            view_mode: ViewMode::DetailedList,
+            sort_field: SortField::Name,
+            sort_direction: SortDirection::Descending,
+            ..Default::default()
+        });
+        provider.advance(1);
+        while view.has_pending_navigation() || context.pending() {
+            assert!(std::time::Instant::now() < deadline);
+            context.iteration(false);
+        }
+
+        let model = view.column_view().unwrap().model().unwrap();
+        let item = (0..model.n_items())
+            .find_map(|index| {
+                let item = model.item(index)?.downcast::<glib::BoxedAnyObject>().ok()?;
+                let matches = matches!(
+                    &*item.borrow::<ListRow>(),
+                    ListRow::File(item) if item.location() == &location
+                );
+                matches.then_some(item)
+            })
+            .expect("reloaded model must retain the metadata target");
+        let ListRow::File(item) = &*item.borrow::<ListRow>() else {
+            panic!("fixture row must remain a file");
+        };
+        assert_eq!(item.content_type(), "application/x-reloaded");
+        view.close();
+    }
+
+    #[gtk::test]
+    fn slice5_initial_sort_completion_disconnects_before_later_settles() {
+        use super::connect_once_when_sort_settled;
+        use gtk::prelude::*;
+
+        let context = glib::MainContext::default();
+        let store = gio::ListStore::new::<glib::BoxedAnyObject>();
+        let sorter = gtk::CustomSorter::new(|left, right| {
+            let left = left
+                .downcast_ref::<glib::BoxedAnyObject>()
+                .unwrap()
+                .borrow::<u32>();
+            let right = right
+                .downcast_ref::<glib::BoxedAnyObject>()
+                .unwrap()
+                .borrow::<u32>();
+            left.cmp(&right).into()
+        });
+        let sorted = gtk::SortListModel::new(Some(store.clone()), Some(sorter));
+        sorted.set_incremental(true);
+        store.extend_from_slice(
+            &(0..2_048)
+                .map(|value| glib::BoxedAnyObject::new(value as u32))
+                .collect::<Vec<_>>(),
+        );
+        let completions = std::rc::Rc::new(std::cell::Cell::new(0));
+        let recorded = completions.clone();
+        connect_once_when_sort_settled(&sorted, move || {
+            recorded.set(recorded.get() + 1);
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while completions.get() == 0 {
+            assert!(std::time::Instant::now() < deadline);
+            context.iteration(false);
+        }
+        assert_eq!(completions.get(), 1);
+
+        store.append(&glib::BoxedAnyObject::new(2_049u32));
+        while sorted.pending() > 0 || context.pending() {
+            assert!(std::time::Instant::now() < deadline);
+            context.iteration(false);
+        }
+        assert_eq!(
+            completions.get(),
+            1,
+            "a later metadata-style sort settle must not repeat the O(n) initial restoration"
+        );
+    }
+
+    #[gtk::test]
+    fn slice5_stale_visible_metadata_reply_is_rejected_after_navigation_changes() {
+        use crate::core::contracts::VisibleMetadata;
+        use crate::infrastructure::mock_provider::{MockConfig, MockProvider};
+
+        let context = glib::MainContext::default();
+        let first = Location::from_uri("smb://fixture/first").unwrap();
+        let second = Location::from_uri("smb://fixture/second").unwrap();
+        let item = Location::from_uri(&format!("{}/report.txt", first.uri())).unwrap();
+        let provider = std::rc::Rc::new(MockProvider::new(context, MockConfig::default()));
+        let view = FileView::new_with_repository(first, provider);
+        let stale_generation = view.navigation.state.borrow().navigation_generation;
+
+        view.navigate(second);
+        view.complete_visible_metadata(
+            stale_generation,
+            item.clone(),
+            vec![VisibleMetadata {
+                location: item.clone(),
+                size: Some(99),
+                modified: None,
+                content_type: Some("application/x-stale".into()),
+            }],
+        );
+
+        assert!(view.visible_metadata.borrow_mut().get(&item).is_none());
+        assert!(view.pending_visible_metadata.borrow().is_empty());
         view.close();
     }
 

@@ -74,6 +74,12 @@ impl<T: Clone> VisibleCache<T> {
             self.entries.pop_front();
         }
     }
+    pub fn entries(&self) -> Vec<(Location, T)> {
+        self.entries
+            .iter()
+            .map(|(location, value)| (location.clone(), value.clone()))
+            .collect()
+    }
     pub fn invalidate(&mut self) {
         self.entries.clear();
     }
