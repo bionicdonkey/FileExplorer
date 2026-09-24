@@ -80,6 +80,12 @@ impl<T: Clone> VisibleCache<T> {
             .map(|(location, value)| (location.clone(), value.clone()))
             .collect()
     }
+    pub fn contains(&self, location: &Location) -> bool {
+        self.entries.iter().any(|(key, _)| key == location)
+    }
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
     pub fn invalidate(&mut self) {
         self.entries.clear();
     }
