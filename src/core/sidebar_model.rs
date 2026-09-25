@@ -7,13 +7,13 @@ use std::path::{Path, PathBuf};
 use gio::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::core::{Location, RecoverableStateNotice};
+use crate::core::{
+    contracts::{DirectorySnapshot, EntryKind}, Location, RecoverableStateNotice,
+};
 
 fn default_expanded_section() -> String {
     "Quick access".into()
 }
-
-const REMOTE_CHILD_ATTRIBUTES: &str = "standard::name,standard::display-name,standard::type,standard::icon,standard::content-type,standard::target-uri";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SidebarLocation {
@@ -421,31 +421,22 @@ impl SidebarModel {
             .find(|mount| mount.root().uri() == uri)
     }
 
-    pub fn children_for_location(&self, location: &SidebarLocation) -> Vec<SidebarNode> {
-        match location.local_path() {
-            Some(path) => self.local_children(path),
-            None => self.remote_children(&location.uri()),
-        }
-    }
-
-    fn local_children(&self, path: &Path) -> Vec<SidebarNode> {
-        let mut children = match fs::read_dir(path) {
-            Ok(entries) => entries
-                .flatten()
-                .filter_map(|entry| {
-                    let child = entry.path();
-                    child.is_dir().then(|| {
-                        SidebarNode::local(
-                            child.clone(),
-                            entry.file_name().to_string_lossy(),
-                            "folder-symbolic",
-                            true,
-                        )
-                    })
-                })
-                .collect::<Vec<_>>(),
-            Err(_) => Vec::new(),
-        };
+    /// Converts a repository-owned directory snapshot into expandable tree
+    /// nodes. Enumeration and URI resolution stay behind `DirectoryRepository`;
+    /// the sidebar model only transforms immutable snapshot data on the UI
+    /// context.
+    pub fn children_from_snapshot(snapshot: &DirectorySnapshot) -> Vec<SidebarNode> {
+        let mut children = snapshot
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == EntryKind::Directory)
+            .map(|entry| SidebarNode::remote(
+                entry.location.clone(),
+                entry.display_name.clone(),
+                "folder-symbolic",
+                true,
+            ))
+            .collect::<Vec<_>>();
         children.sort_by(|left, right| left.location.label.cmp(&right.location.label));
         children
     }
@@ -584,41 +575,6 @@ impl SidebarModel {
             .collect()
     }
 
-    fn remote_children(&self, uri: &str) -> Vec<SidebarNode> {
-        let file = gio::File::for_uri(uri);
-        let Ok(enumerator) = file.enumerate_children(
-            REMOTE_CHILD_ATTRIBUTES,
-            gio::FileQueryInfoFlags::NONE,
-            gio::Cancellable::NONE,
-        ) else {
-            return Vec::new();
-        };
-        let mut children = Vec::new();
-        while let Ok(Some(info)) = enumerator.next_file(gio::Cancellable::NONE) {
-            if uri == "computer:///" && !info.name().to_string_lossy().ends_with(".volume") {
-                continue;
-            }
-            let icon = info
-                .icon()
-                .and_then(themed_icon_name)
-                .unwrap_or_else(|| "folder-remote-symbolic".into());
-            let child_uri = info
-                .attribute_string("standard::target-uri")
-                .map(|uri| uri.to_string())
-                .unwrap_or_else(|| canonical_child_uri(uri, &info.name()));
-            let Ok(location) = Location::from_uri(&child_uri) else {
-                continue;
-            };
-            children.push(SidebarNode::remote(
-                location,
-                info.display_name(),
-                icon,
-                true,
-            ));
-        }
-        children.sort_by(|left, right| left.location.label.cmp(&right.location.label));
-        children
-    }
 }
 
 fn normalized_path(path: PathBuf) -> PathBuf {
@@ -696,13 +652,6 @@ fn remote_label(uri: &str) -> String {
         .filter(|name| !name.is_empty())
         .unwrap_or(uri)
         .to_owned()
-}
-
-fn canonical_child_uri(parent_uri: &str, name: &Path) -> String {
-    gio::File::for_uri(parent_uri)
-        .resolve_relative_path(name)
-        .uri()
-        .to_string()
 }
 
 #[cfg(test)]
@@ -918,47 +867,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn remote_enumeration_requests_the_name_required_for_child_uris() {
-        assert!(super::REMOTE_CHILD_ATTRIBUTES.contains("standard::name"));
-    }
-
-    #[test]
-    fn remote_enumeration_requests_shortcut_target_uris() {
-        assert!(super::REMOTE_CHILD_ATTRIBUTES.contains("standard::target-uri"));
-    }
-
-    #[test]
-    fn remote_enumeration_requests_content_type_for_provider_backends() {
-        assert!(super::REMOTE_CHILD_ATTRIBUTES.contains("standard::content-type"));
-    }
-
-    #[test]
-    fn virtual_network_children_can_be_enumerated_without_a_gio_critical() {
-        let model = SidebarModel::new(SidebarPreferences::in_memory(), PathBuf::from("/tmp"));
-        let network = SidebarLocation::from_uri(
-            "network:///",
-            "Browse Network",
-            "network-workgroup-symbolic",
-        )
-        .unwrap();
-        let _children = model.children_for_location(&network);
-    }
-
-    #[test]
-    fn online_provider_root_can_be_enumerated_without_a_gio_critical() {
-        let model = SidebarModel::new(SidebarPreferences::in_memory(), PathBuf::from("/tmp"));
-        let providers =
-            SidebarLocation::from_uri("computer:///", "Online accounts", "folder-remote-symbolic")
-                .unwrap();
-        let _children = model.children_for_location(&providers);
-    }
-
-    #[test]
-    fn child_uri_keeps_the_gio_canonical_entry_name() {
-        assert_eq!(
-            super::canonical_child_uri("computer:///", Path::new("alex@example.com.volume")),
-            "computer:///alex@example.com.volume"
-        );
-    }
 }

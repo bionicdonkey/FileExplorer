@@ -43,17 +43,26 @@ impl DirectoryRepository for GioDirectoryRepository {
         });
         Some(monitor)
     }
-    fn inspect_visible_metadata(&self, locations: Vec<Location>, done: VisibleMetadataCallback) {
+    fn inspect_visible_metadata(
+        &self,
+        request: VisibleMetadataRequest,
+        done: VisibleMetadataCallback,
+    ) {
         self.context.spawn_local(async move {
+            let worker = request.clone();
             let metadata = gio::spawn_blocking(move || {
-                locations
+                worker
+                    .locations
                     .into_iter()
                     .filter_map(|location| {
+                        if worker.cancellable.is_cancelled() {
+                            return None;
+                        }
                         let info = gio::File::for_uri(location.uri())
                             .query_info(
                                 "standard::fast-content-type,standard::size,time::modified",
                                 gio::FileQueryInfoFlags::NONE,
-                                gio::Cancellable::NONE,
+                                Some(&worker.cancellable),
                             )
                             .ok()?;
                         Some(VisibleMetadata {
@@ -76,7 +85,15 @@ impl DirectoryRepository for GioDirectoryRepository {
             })
             .await
             .unwrap_or_default();
-            done(metadata);
+            let outcome = if request.cancellable.is_cancelled() {
+                RequestOutcome::Cancelled
+            } else {
+                RequestOutcome::Succeeded(metadata)
+            };
+            done(RequestCompletion {
+                id: request.id,
+                outcome,
+            });
         });
     }
     fn list_pages(&self, request: DirectoryRequest, mut sink: DirectoryPageSink) {

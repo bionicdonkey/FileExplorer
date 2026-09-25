@@ -10,9 +10,10 @@
 //! backend messages in callers. All such work belongs behind these ports.
 
 use super::contracts::*;
+use gio::prelude::CancellableExt;
 
 pub type DirectoryCallback = Box<dyn FnOnce(RequestCompletion<DirectorySnapshot>)>;
-pub type VisibleMetadataCallback = Box<dyn FnOnce(Vec<VisibleMetadata>)>;
+pub type VisibleMetadataCallback = Box<dyn FnOnce(RequestCompletion<Vec<VisibleMetadata>>) >;
 /// Ordered pages from one enumeration cursor, ending in exactly one page with
 /// no continuation or a terminal failure/cancellation. No tree pre-count.
 pub type DirectoryPageSink = Box<dyn FnMut(RequestCompletion<DirectorySnapshot>)>;
@@ -29,10 +30,18 @@ pub trait DirectoryRepository {
     /// It must not delay listing identity or capability checks.
     fn inspect_visible_metadata(
         &self,
-        _locations: Vec<crate::core::Location>,
+        request: VisibleMetadataRequest,
         done: VisibleMetadataCallback,
     ) {
-        done(Vec::new());
+        let outcome = if request.cancellable.is_cancelled() {
+            RequestOutcome::Cancelled
+        } else {
+            RequestOutcome::Succeeded(Vec::new())
+        };
+        done(RequestCompletion {
+            id: request.id,
+            outcome,
+        });
     }
     /// Watch only this directory; never recursively walk a remote tree.
     fn watch(

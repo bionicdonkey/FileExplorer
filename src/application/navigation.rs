@@ -44,10 +44,10 @@ impl NavigationCoordinator {
     }
     pub fn inspect_visible_metadata(
         &self,
-        locations: Vec<Location>,
+        request: VisibleMetadataRequest,
         done: crate::core::ports::VisibleMetadataCallback,
     ) {
-        self.repository.inspect_visible_metadata(locations, done);
+        self.repository.inspect_visible_metadata(request, done);
     }
     pub fn retry(&self, changed: impl FnMut(bool) + 'static) -> bool {
         let request = self.state.borrow_mut().begin_retry();

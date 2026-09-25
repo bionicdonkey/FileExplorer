@@ -79,6 +79,8 @@ struct MockState {
     operation_behavior: MockOperationBehavior,
     search_behavior: MockSearchBehavior,
     visible_metadata_requests: Vec<Location>,
+    list_results_after_cancellation: bool,
+    visible_metadata_cancellables: Vec<gio::Cancellable>,
 }
 
 #[derive(Clone)]
@@ -105,6 +107,8 @@ impl MockProvider {
                 operation_behavior: MockOperationBehavior::default(),
                 search_behavior: MockSearchBehavior::default(),
                 visible_metadata_requests: Vec::new(),
+                list_results_after_cancellation: false,
+                visible_metadata_cancellables: Vec::new(),
             })),
         }
     }
@@ -154,6 +158,16 @@ impl MockProvider {
 
     pub fn visible_metadata_requests(&self) -> Vec<Location> {
         self.state.borrow().visible_metadata_requests.clone()
+    }
+
+    /// Test providers may model a backend that reports an already-completed
+    /// list after the caller has cancelled its token.
+    pub fn set_list_results_after_cancellation(&self, enabled: bool) {
+        self.state.borrow_mut().list_results_after_cancellation = enabled;
+    }
+
+    pub fn visible_metadata_request_cancellables(&self) -> Vec<gio::Cancellable> {
+        self.state.borrow().visible_metadata_cancellables.clone()
     }
 
     /// Make due work ready in submission order for equal deadlines. This never
@@ -604,36 +618,55 @@ impl PendingOperation {
 }
 
 impl DirectoryRepository for MockProvider {
-    fn inspect_visible_metadata(&self, locations: Vec<Location>, done: VisibleMetadataCallback) {
+    fn inspect_visible_metadata(
+        &self,
+        request: VisibleMetadataRequest,
+        done: VisibleMetadataCallback,
+    ) {
         self.state
             .borrow_mut()
             .visible_metadata_requests
-            .extend(locations.clone());
+            .extend(request.locations.clone());
+        self.state
+            .borrow_mut()
+            .visible_metadata_cancellables
+            .push(request.cancellable.clone());
         self.schedule(Box::new(move |provider| {
-            let state = provider.state.borrow();
-            let metadata = locations
-                .into_iter()
-                .filter_map(|location| {
-                    state
-                        .directories
-                        .values()
-                        .flat_map(|fixture| fixture.entries.iter())
-                        .find(|entry| entry.location == location)
-                        .map(|entry| VisibleMetadata {
-                            location,
-                            size: entry.size,
-                            modified: entry.modified,
-                            content_type: entry.content_type.clone(),
-                        })
-                })
-                .collect();
-            done(metadata);
+            let outcome = if request.cancellable.is_cancelled() {
+                RequestOutcome::Cancelled
+            } else {
+                let state = provider.state.borrow();
+                let metadata = request
+                    .locations
+                    .iter()
+                    .filter_map(|location| {
+                        state
+                            .directories
+                            .values()
+                            .flat_map(|fixture| fixture.entries.iter())
+                            .find(|entry| entry.location == *location)
+                            .map(|entry| VisibleMetadata {
+                                location: location.clone(),
+                                size: entry.size,
+                                modified: entry.modified,
+                                content_type: entry.content_type.clone(),
+                            })
+                    })
+                    .collect();
+                RequestOutcome::Succeeded(metadata)
+            };
+            done(RequestCompletion {
+                id: request.id,
+                outcome,
+            });
         }));
     }
 
     fn list(&self, request: DirectoryRequest, done: DirectoryCallback) {
         self.schedule(Box::new(move |provider| {
-            let outcome = if request.cancellable.is_cancelled() {
+            let outcome = if request.cancellable.is_cancelled()
+                && !provider.state.borrow().list_results_after_cancellation
+            {
                 RequestOutcome::Cancelled
             } else {
                 match provider.list_snapshot(&request) {

@@ -48,6 +48,159 @@ struct StreamAppendWaiter {
     handler: glib::SignalHandlerId,
 }
 
+/// The only state retained by a visible-metadata completion. Callbacks keep a
+/// weak reference to this target, rather than retaining the whole FileView
+/// after its tab has closed.
+struct VisibleMetadataTarget {
+    navigation: NavigationCoordinator,
+    model_store: Rc<RefCell<Option<gio::ListStore>>>,
+    folder_store: Rc<RefCell<Option<gio::ListStore>>>,
+    model_row_index: Rc<RefCell<std::collections::HashMap<Location, u32>>>,
+    folder_row_index: Rc<RefCell<std::collections::HashMap<Location, u32>>>,
+    pending: Rc<RefCell<crate::application::performance::VisibleCache<crate::core::contracts::VisibleMetadata>>>,
+    generation: Rc<std::cell::Cell<Option<u64>>>,
+    cache: Rc<RefCell<crate::application::performance::VisibleCache<VisibleMetadataCacheEntry>>>,
+    requests: Rc<RefCell<std::collections::HashMap<crate::core::contracts::RequestId, gio::Cancellable>>>,
+}
+
+impl VisibleMetadataTarget {
+    fn cancel_requests(&self) {
+        for cancellable in self.requests.borrow_mut().drain().map(|(_, cancellable)| cancellable) {
+            cancellable.cancel();
+        }
+    }
+
+    fn clear_cache(&self) {
+        self.cache.borrow_mut().invalidate();
+        self.pending.borrow_mut().invalidate();
+        self.generation.set(None);
+    }
+
+    fn register(&self, request: &crate::core::contracts::VisibleMetadataRequest) {
+        self.requests
+            .borrow_mut()
+            .insert(request.id, request.cancellable.clone());
+    }
+
+    fn complete(
+        &self,
+        generation: u64,
+        request_id: crate::core::contracts::RequestId,
+        result: crate::core::contracts::RequestCompletion<Vec<crate::core::contracts::VisibleMetadata>>,
+    ) {
+        if self.requests.borrow_mut().remove(&request_id).is_none()
+            || result.id != request_id
+            || self.navigation.state.borrow().navigation_generation != generation
+            || matches!(self.navigation.state.borrow().status, NavigationStatus::Closed)
+        {
+            return;
+        }
+        if let crate::core::contracts::RequestOutcome::Succeeded(metadata) = result.outcome {
+            self.apply(metadata);
+        }
+    }
+
+    fn prepare_generation(&self) -> u64 {
+        let generation = self.navigation.state.borrow().navigation_generation;
+        if self.generation.get() != Some(generation) {
+            self.cache.borrow_mut().invalidate();
+            self.pending.borrow_mut().invalidate();
+            self.generation.set(Some(generation));
+        }
+        generation
+    }
+
+    fn apply(&self, metadata: Vec<crate::core::contracts::VisibleMetadata>) {
+        self.prepare_generation();
+        if metadata.is_empty() {
+            return;
+        }
+        let metadata_by_location: std::collections::HashMap<_, _> = metadata
+            .iter()
+            .cloned()
+            .map(|entry| (entry.location.clone(), entry))
+            .collect();
+        {
+            let mut cache = self.cache.borrow_mut();
+            for entry in metadata {
+                cache.insert(entry.location.clone(), VisibleMetadataCacheEntry::Resolved(entry));
+            }
+        }
+        let mut applied = self.apply_to_store(
+            self.model_store.borrow().as_ref(),
+            &self.model_row_index.borrow(),
+            &metadata_by_location,
+        );
+        applied.extend(self.apply_to_store(
+            self.folder_store.borrow().as_ref(),
+            &self.folder_row_index.borrow(),
+            &metadata_by_location,
+        ));
+        self.queue(metadata_by_location.into_iter().filter_map(|(location, entry)| {
+            (!applied.contains(&location)).then_some(entry)
+        }));
+        self.flush();
+    }
+
+    fn queue(&self, metadata: impl IntoIterator<Item = crate::core::contracts::VisibleMetadata>) {
+        let mut cache = self.cache.borrow_mut();
+        let mut pending = self.pending.borrow_mut();
+        for entry in metadata {
+            if matches!(cache.get(&entry.location), Some(VisibleMetadataCacheEntry::Resolved(_))) {
+                pending.insert(entry.location.clone(), entry);
+            }
+        }
+    }
+
+    fn flush(&self) {
+        let mut metadata_by_location: std::collections::HashMap<_, _> = {
+            let mut cache = self.cache.borrow_mut();
+            self.pending.borrow().entries().into_iter().filter(|(location, _)| {
+                matches!(cache.get(location), Some(VisibleMetadataCacheEntry::Resolved(_)))
+            }).collect()
+        };
+        if metadata_by_location.is_empty() {
+            self.pending.borrow_mut().invalidate();
+            return;
+        }
+        let mut applied = self.apply_to_store(
+            self.model_store.borrow().as_ref(),
+            &self.model_row_index.borrow(),
+            &metadata_by_location,
+        );
+        applied.extend(self.apply_to_store(
+            self.folder_store.borrow().as_ref(),
+            &self.folder_row_index.borrow(),
+            &metadata_by_location,
+        ));
+        metadata_by_location.retain(|location, _| !applied.contains(location));
+        let mut pending = self.pending.borrow_mut();
+        pending.invalidate();
+        for entry in metadata_by_location.into_values() {
+            pending.insert(entry.location.clone(), entry);
+        }
+    }
+
+    fn apply_to_store(
+        &self,
+        store: Option<&gio::ListStore>,
+        row_index: &std::collections::HashMap<Location, u32>,
+        metadata: &std::collections::HashMap<Location, crate::core::contracts::VisibleMetadata>,
+    ) -> std::collections::HashSet<Location> {
+        let Some(store) = store else { return Default::default(); };
+        let mut applied = std::collections::HashSet::new();
+        for (location, entry) in metadata {
+            let Some(&index) = row_index.get(location) else { continue; };
+            let Some(object) = store.item(index).and_downcast::<glib::BoxedAnyObject>() else { continue; };
+            let ListRow::File(item) = &*object.borrow::<ListRow>() else { continue; };
+            if item.location() != location { continue; }
+            store.splice(index, 1, &[glib::BoxedAnyObject::new(ListRow::File(item.with_visible_metadata(entry)))]);
+            applied.insert(location.clone());
+        }
+        applied
+    }
+}
+
 /// Runs a completion action exactly once after an incremental sort settles.
 /// Disconnect and mutate selection from an idle turn so neither operation
 /// reenters GTK's pending-notify emission.
@@ -182,6 +335,7 @@ pub struct FileView {
     stream_selection: Rc<RefCell<Option<Vec<String>>>>,
     visible_metadata:
         Rc<RefCell<crate::application::performance::VisibleCache<VisibleMetadataCacheEntry>>>,
+    metadata_target: Rc<VisibleMetadataTarget>,
 }
 
 impl FileView {
@@ -230,13 +384,38 @@ impl FileView {
         scroll.update_property(&[gtk::accessible::Property::Label("Files")]);
         let on_navigate = Rc::new(RefCell::new(None));
         let state = Rc::new(RefCell::new(TabState::new(current_location)));
+        let navigation = NavigationCoordinator::new(state.clone(), repository);
+        let model_store: Rc<RefCell<Option<gio::ListStore>>> = Default::default();
+        let folder_store: Rc<RefCell<Option<gio::ListStore>>> = Default::default();
+        let model_row_index: Rc<RefCell<std::collections::HashMap<Location, u32>>> =
+            Default::default();
+        let folder_row_index: Rc<RefCell<std::collections::HashMap<Location, u32>>> =
+            Default::default();
+        let pending_visible_metadata = Rc::new(RefCell::new(
+            crate::application::performance::VisibleCache::new(Default::default()),
+        ));
+        let visible_metadata_generation: Rc<std::cell::Cell<Option<u64>>> = Default::default();
+        let visible_metadata = Rc::new(RefCell::new(
+            crate::application::performance::VisibleCache::new(Default::default()),
+        ));
+        let metadata_target = Rc::new(VisibleMetadataTarget {
+            navigation: navigation.clone(),
+            model_store: model_store.clone(),
+            folder_store: folder_store.clone(),
+            model_row_index: model_row_index.clone(),
+            folder_row_index: folder_row_index.clone(),
+            pending: pending_visible_metadata.clone(),
+            generation: visible_metadata_generation.clone(),
+            cache: visible_metadata.clone(),
+            requests: Default::default(),
+        });
         let view = Self {
             widget: scroll,
             search: crate::application::search::SearchCoordinator::new(
                 state.clone(),
                 search_repository,
             ),
-            navigation: NavigationCoordinator::new(state, repository),
+            navigation,
             on_location_committed: Rc::new(RefCell::new(None)),
             on_navigate,
             on_close: Rc::new(RefCell::new(None)),
@@ -249,25 +428,22 @@ impl FileView {
             on_command_availability_changed: Rc::new(RefCell::new(None)),
             pending_cut: Rc::new(RefCell::new(Vec::new())),
             is_quick_access_location: Rc::new(RefCell::new(None)),
-            model_store: Default::default(),
-            folder_store: Default::default(),
-            model_row_index: Default::default(),
-            folder_row_index: Default::default(),
+            model_store,
+            folder_store,
+            model_row_index,
+            folder_row_index,
             rendered_generation: Default::default(),
             rendered_count: Default::default(),
             stream_append_waiter: Default::default(),
             stream_append_model: Default::default(),
             directory_monitor: Default::default(),
-            pending_visible_metadata: Rc::new(RefCell::new(
-                crate::application::performance::VisibleCache::new(Default::default()),
-            )),
-            visible_metadata_generation: Default::default(),
+            pending_visible_metadata,
+            visible_metadata_generation,
             monitor_refresh_pending: Default::default(),
             controllers: Default::default(),
             stream_selection: Default::default(),
-            visible_metadata: Rc::new(RefCell::new(
-                crate::application::performance::VisibleCache::new(Default::default()),
-            )),
+            visible_metadata,
+            metadata_target,
         };
         let background_view = view.clone();
         let background = GestureClick::new();
@@ -341,6 +517,7 @@ impl FileView {
     pub fn navigate(&self, location: Location) {
         self.clear_search_results();
         self.cancel_stream_append_waiter();
+        self.metadata_target.cancel_requests();
         let view = self.clone();
         self.navigation.navigate(location, move |accepted| {
             if accepted {
@@ -353,6 +530,7 @@ impl FileView {
     pub fn go_back(&self) {
         self.clear_search_results();
         self.cancel_stream_append_waiter();
+        self.metadata_target.cancel_requests();
         let view = self.clone();
         if self.navigation.back(move |accepted| {
             if accepted {
@@ -366,6 +544,7 @@ impl FileView {
     pub fn go_forward(&self) {
         self.clear_search_results();
         self.cancel_stream_append_waiter();
+        self.metadata_target.cancel_requests();
         let view = self.clone();
         if self.navigation.forward(move |accepted| {
             if accepted {
@@ -379,6 +558,8 @@ impl FileView {
     pub fn close(&self) {
         self.search.clear();
         self.cancel_stream_append_waiter();
+        self.metadata_target.cancel_requests();
+        self.metadata_target.clear_cache();
         self.navigation.close_tab();
         if let Some((_, monitor)) = self.directory_monitor.borrow_mut().take() {
             monitor.cancel();
@@ -388,7 +569,6 @@ impl FileView {
         self.model_row_index.borrow_mut().clear();
         self.folder_row_index.borrow_mut().clear();
         self.widget.set_child(gtk::Widget::NONE);
-        self.pending_visible_metadata.borrow_mut().invalidate();
         for controller in self.controllers.borrow_mut().drain(..) {
             self.widget.remove_controller(&controller);
         }
@@ -488,23 +668,32 @@ impl FileView {
     }
 
     fn request_visible_metadata(&self, item: &FileItem) {
-        let generation = self.prepare_visible_metadata_generation();
+        let generation = self.metadata_target.prepare_generation();
         let mut cache = self.visible_metadata.borrow_mut();
         if cache.get(item.location()).is_some() {
             return;
         }
         cache.insert(item.location().clone(), VisibleMetadataCacheEntry::Pending);
         drop(cache);
-        let view = self.clone();
-        let requested = item.location().clone();
+        let request = crate::core::contracts::VisibleMetadataRequest {
+            id: crate::core::contracts::RequestId::allocate(),
+            locations: vec![item.location().clone()],
+            cancellable: gio::Cancellable::new(),
+        };
+        self.metadata_target.register(&request);
+        let request_id = request.id;
+        let target = Rc::downgrade(&self.metadata_target);
         self.navigation.inspect_visible_metadata(
-            vec![requested.clone()],
-            Box::new(move |metadata| {
-                view.complete_visible_metadata(generation, requested.clone(), metadata)
+            request,
+            Box::new(move |result| {
+                if let Some(target) = target.upgrade() {
+                    target.complete(generation, request_id, result);
+                }
             }),
         );
     }
 
+    #[cfg(test)]
     fn apply_visible_metadata(&self, metadata: Vec<crate::core::contracts::VisibleMetadata>) {
         self.prepare_visible_metadata_generation();
         if metadata.is_empty() {
@@ -542,6 +731,7 @@ impl FileView {
         self.flush_visible_metadata();
     }
 
+    #[cfg(test)]
     fn complete_visible_metadata(
         &self,
         generation: u64,
@@ -1200,6 +1390,7 @@ impl FileView {
         invalidate_thumbnails();
         self.clear_search_results();
         self.cancel_stream_append_waiter();
+        self.metadata_target.cancel_requests();
         if !self.has_pending_navigation() && self.section_title().is_some() {
             self.reload();
             return;
@@ -1264,6 +1455,7 @@ impl FileView {
     /// Repaints owned metadata; never enumerates or queries the filesystem.
     fn reload(&self) {
         self.cancel_stream_append_waiter();
+        self.metadata_target.cancel_requests();
         self.stream_append_model.borrow_mut().take();
         self.model_store.borrow_mut().take();
         self.prepare_visible_metadata_generation();
@@ -3659,6 +3851,79 @@ mod tests {
         assert!(view.visible_metadata.borrow_mut().get(&item).is_none());
         assert!(view.pending_visible_metadata.borrow().len() == 0);
         view.close();
+    }
+
+    #[gtk::test]
+    fn slice5_navigation_cancels_visible_metadata_and_rejects_its_delayed_reply() {
+        use crate::core::contracts::{EntryKind, EntrySnapshot};
+        use crate::infrastructure::mock_provider::{MockConfig, MockProvider};
+        use gio::prelude::CancellableExt;
+
+        let context = glib::MainContext::default();
+        let first = Location::from_uri("smb://fixture/navigation-metadata-first").unwrap();
+        let second = Location::from_uri("smb://fixture/navigation-metadata-second").unwrap();
+        let target = Location::from_uri(&format!("{}/report.txt", first.uri())).unwrap();
+        let provider = std::rc::Rc::new(MockProvider::new(context.clone(), MockConfig::default()));
+        let view = FileView::new_with_repository(first, provider.clone());
+        let item = FileItem::from_snapshot(&EntrySnapshot {
+            location: target.clone(),
+            display_name: "report.txt".into(),
+            kind: EntryKind::File,
+            size: None,
+            modified: None,
+            content_type: None,
+            capabilities: Default::default(),
+        });
+
+        view.request_visible_metadata(&item);
+        let cancellations = provider.visible_metadata_request_cancellables();
+        view.navigate(second);
+        assert!(cancellations[0].is_cancelled());
+        provider.advance(1);
+        while context.pending() {
+            context.iteration(false);
+        }
+
+        assert!(view.visible_metadata.borrow_mut().get(&target).is_none());
+        assert_eq!(view.pending_visible_metadata.borrow().len(), 0);
+        view.close();
+    }
+
+    #[gtk::test]
+    fn slice5_closing_a_view_cancels_visible_metadata_and_ignores_its_delayed_reply() {
+        use crate::core::contracts::{EntryKind, EntrySnapshot};
+        use crate::infrastructure::mock_provider::{MockConfig, MockProvider};
+        use gio::prelude::CancellableExt;
+
+        let context = glib::MainContext::default();
+        let root = Location::from_uri("smb://fixture/close-metadata").unwrap();
+        let target = Location::from_uri(&format!("{}/report.txt", root.uri())).unwrap();
+        let provider = std::rc::Rc::new(MockProvider::new(context.clone(), MockConfig::default()));
+        let view = FileView::new_with_repository(root, provider.clone());
+        let item = FileItem::from_snapshot(&EntrySnapshot {
+            location: target.clone(),
+            display_name: "report.txt".into(),
+            kind: EntryKind::File,
+            size: None,
+            modified: None,
+            content_type: None,
+            capabilities: Default::default(),
+        });
+
+        view.request_visible_metadata(&item);
+        let cancellations = provider.visible_metadata_request_cancellables();
+        assert_eq!(cancellations.len(), 1);
+        assert!(!cancellations[0].is_cancelled());
+
+        view.close();
+        assert!(cancellations[0].is_cancelled());
+        provider.advance(1);
+        while context.pending() {
+            context.iteration(false);
+        }
+
+        assert!(view.visible_metadata.borrow_mut().get(&target).is_none());
+        assert_eq!(view.pending_visible_metadata.borrow().len(), 0);
     }
 
     #[test]

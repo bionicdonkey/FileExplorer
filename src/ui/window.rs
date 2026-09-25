@@ -16,6 +16,10 @@ use crate::application::commands::{
 use crate::core::contracts::{ConflictDecision, MutationKind};
 use crate::core::location::Location;
 use crate::core::SearchHistory;
+fn unmount_failure_message(error: &glib::Error) -> &'static str {
+    crate::core::contracts::OperationError::from_gio(error, None, None).message_key
+}
+
 use crate::core::{ApplicationPreferences, ConflictDefault, OperationManager};
 use crate::core::{
     GridSize, GroupField, SidebarModel, SidebarPreferences, SortDirection, SortField, ViewMode,
@@ -359,7 +363,7 @@ impl ExplorerWindow {
                                 ),
                                 Err(error) => AccessibleStatus::announce_for(
                                     &operation_window,
-                                    &format!("Unmount failed: {error}"),
+                                    unmount_failure_message(&error),
                                     StatusPriority::Urgent,
                                 ),
                             }
@@ -2584,6 +2588,19 @@ mod dnd_tests;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unmount_failure_uses_a_safe_operation_error_message_key() {
+        let raw = glib::Error::new(
+            gio::IOErrorEnum::NotConnected,
+            "SMB provider failed at smb://server/private/payroll.csv",
+        );
+
+        assert_eq!(
+            super::unmount_failure_message(&raw),
+            "operation.mount-unavailable"
+        );
+    }
+
     #[gtk::test]
     fn slice3_windows_share_cut_lease_and_paste_the_new_owner() {
         use super::*;

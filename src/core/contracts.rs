@@ -389,6 +389,16 @@ pub struct VisibleMetadata {
     pub content_type: Option<String>,
 }
 
+/// Advisory row metadata is still an asynchronous provider request: it owns
+/// cancellation and carries an identity so a recycled row cannot accept an old
+/// response.
+#[derive(Clone, Debug)]
+pub struct VisibleMetadataRequest {
+    pub id: RequestId,
+    pub locations: Vec<Location>,
+    pub cancellable: gio::Cancellable,
+}
+
 /// Offset paging requires stable provider order. Each page has a fresh request
 /// ID and exactly one completion; the application merges pages by canonical URI.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -10,8 +10,11 @@ use gtk::{
 };
 
 use crate::core::sidebar_model::SidebarSection;
+use crate::core::contracts::{DirectoryRequest, PageRequest, RequestId, RequestOutcome};
+use crate::core::ports::DirectoryRepository;
 use crate::core::{Location, OperationManager};
 use crate::core::{SidebarLocation, SidebarModel, SidebarNode};
+use crate::infrastructure::gio_directory::GioDirectoryRepository;
 use crate::ui::operations_page::active_summary;
 
 #[derive(Clone, Debug)]
@@ -33,6 +36,7 @@ pub struct Sidebar {
     pub widget: ScrolledWindow,
     content: GtkBox,
     model: Rc<RefCell<SidebarModel>>,
+    repository: Rc<dyn DirectoryRepository>,
     on_action: Rc<dyn Fn(SidebarAction)>,
     active_path: Rc<RefCell<Option<Location>>>,
     active_section: Rc<RefCell<Option<String>>>,
@@ -44,6 +48,20 @@ pub struct Sidebar {
 impl Sidebar {
     pub fn new<F: Fn(SidebarAction) + 'static>(
         model: Rc<RefCell<SidebarModel>>,
+        mount_parent: &impl IsA<gtk::Window>,
+        on_action: F,
+    ) -> Self {
+        let repository = Rc::new(GioDirectoryRepository::new(
+            glib::MainContext::ref_thread_default(),
+        ));
+        let window: gtk::Window = mount_parent.clone().upcast();
+        repository.set_mount_operation(move || gtk::MountOperation::new(Some(&window)).upcast());
+        Self::new_with_repository(model, repository, mount_parent, on_action)
+    }
+
+    pub fn new_with_repository<F: Fn(SidebarAction) + 'static>(
+        model: Rc<RefCell<SidebarModel>>,
+        repository: Rc<dyn DirectoryRepository>,
         mount_parent: &impl IsA<gtk::Window>,
         on_action: F,
     ) -> Self {
@@ -60,6 +78,7 @@ impl Sidebar {
             widget: scroll,
             content,
             model,
+            repository,
             on_action: Rc::new(on_action),
             active_path: Rc::new(RefCell::new(None)),
             active_section: Rc::new(RefCell::new(None)),
@@ -353,6 +372,7 @@ impl Sidebar {
             depth,
             vec![section.to_owned()],
             self.model.clone(),
+            self.repository.clone(),
             self.on_action.clone(),
             self.active_path.clone(),
             self.mount_parent.clone(),
@@ -365,6 +385,7 @@ impl Sidebar {
         depth: i32,
         mut occurrence: Vec<String>,
         model: Rc<RefCell<SidebarModel>>,
+        repository: Rc<dyn DirectoryRepository>,
         on_action: Rc<dyn Fn(SidebarAction)>,
         active_path: Rc<RefCell<Option<Location>>>,
         mount_parent: gtk::Window,
@@ -403,22 +424,23 @@ impl Sidebar {
             chevron.set_pixel_size(14);
             expander.set_child(Some(&chevron));
             let children_model = model.clone();
+            let children_repository = repository.clone();
             let child_location = node.location.clone();
             let children_for_toggle = children.clone();
             let children_action = on_action.clone();
             let children_active_path = active_path.clone();
             let children_mount_parent = mount_parent.clone();
-            let pending_mount = Rc::new(RefCell::new(None::<gio::Cancellable>));
-            let unrealized_mount = pending_mount.clone();
+            let pending_request = Rc::new(RefCell::new(None::<(RequestId, gio::Cancellable)>));
+            let unrealized_request = pending_request.clone();
             expander.connect_unrealize(move |_| {
-                if let Some(cancellable) = unrealized_mount.borrow_mut().take() {
+                if let Some((_, cancellable)) = unrealized_request.borrow_mut().take() {
                     cancellable.cancel();
                 }
             });
             expander.connect_toggled(move |button| {
                 let expanded = button.is_active();
                 if !expanded {
-                    if let Some(cancellable) = pending_mount.borrow_mut().take() {
+                    if let Some((_, cancellable)) = pending_request.borrow_mut().take() {
                         cancellable.cancel();
                     }
                 }
@@ -437,104 +459,47 @@ impl Sidebar {
                     let _ = sidebar_model.preferences().save();
                 }
                 if expanded && children_for_toggle.first_child().is_none() {
-                    let initial_children = children_model
-                        .borrow()
-                        .children_for_location(&child_location);
-                    if !initial_children.is_empty() || child_location.local_path().is_some() {
-                        Self::append_children(
-                            &children_for_toggle,
-                            initial_children,
-                            depth,
-                            occurrence.clone(),
-                            children_model.clone(),
-                            children_action.clone(),
-                            children_active_path.clone(),
-                            children_mount_parent.clone(),
-                        );
-                    } else {
-                        let location_file = gio::File::for_uri(&child_location.uri());
-                        let is_mountable = location_file
-                            .query_info(
-                                "standard::type",
-                                gio::FileQueryInfoFlags::NONE,
-                                gio::Cancellable::NONE,
-                            )
-                            .map(|info| info.file_type() == gio::FileType::Mountable)
-                            .unwrap_or(false);
-                        let operation = gtk::MountOperation::new(Some(&children_mount_parent));
-                        let cancellable = gio::Cancellable::new();
-                        *pending_mount.borrow_mut() = Some(cancellable.clone());
-                        let completion_cancel = cancellable.clone();
-                        let keep_operation = operation.clone();
-                        let children_after_mount = children_for_toggle.clone();
-                        let model_after_mount = children_model.clone();
-                        let action_after_mount = children_action.clone();
-                        let active_after_mount = children_active_path.clone();
-                        let parent_after_mount = children_mount_parent.clone();
-                        let location_after_mount = child_location.clone();
-                        let occurrence_after_mount = occurrence.clone();
-                        if is_mountable {
-                            location_file.mount_mountable(
-                                gio::MountMountFlags::NONE,
-                                Some(&operation),
-                                Some(&cancellable),
-                                move |result| {
-                                    let _keep_operation_alive = &keep_operation;
-                                    if completion_cancel.is_cancelled() {
-                                        return;
-                                    }
-                                    let location = result
-                                        .ok()
-                                        .and_then(|root| Location::try_from_file(root).ok())
-                                        .map(|root| {
-                                            SidebarLocation::from_location(
-                                                root,
-                                                location_after_mount.label(),
-                                                location_after_mount.icon_name(),
-                                            )
-                                        })
-                                        .unwrap_or(location_after_mount);
-                                    let loaded =
-                                        model_after_mount.borrow().children_for_location(&location);
-                                    Self::append_children(
-                                        &children_after_mount,
-                                        loaded,
-                                        depth,
-                                        occurrence_after_mount.clone(),
-                                        model_after_mount.clone(),
-                                        action_after_mount.clone(),
-                                        active_after_mount.clone(),
-                                        parent_after_mount.clone(),
-                                    );
-                                },
-                            );
-                        } else {
-                            location_file.mount_enclosing_volume(
-                                gio::MountMountFlags::NONE,
-                                Some(&operation),
-                                Some(&cancellable),
-                                move |result| {
-                                    let _keep_operation_alive = &keep_operation;
-                                    if completion_cancel.is_cancelled() || result.is_err() {
-                                        return;
-                                    }
-                                    let loaded = model_after_mount
-                                        .borrow()
-                                        .children_for_location(&location_after_mount);
-                                    Self::append_children(
-                                        &children_after_mount,
-                                        loaded,
-                                        depth,
-                                        occurrence_after_mount.clone(),
-                                        model_after_mount.clone(),
-                                        action_after_mount.clone(),
-                                        active_after_mount.clone(),
-                                        parent_after_mount.clone(),
-                                    );
-                                },
-                            );
+                    let cancellable = gio::Cancellable::new();
+                    let request = DirectoryRequest {
+                        id: RequestId::allocate(),
+                        location: child_location.location().clone(),
+                        page: PageRequest { offset: 0, limit: usize::MAX },
+                        cancellable: cancellable.clone(),
+                    };
+                    *pending_request.borrow_mut() = Some((request.id, cancellable.clone()));
+                    let pending_result = pending_request.clone();
+                    let result_button = button.clone();
+                    let children_after_result = children_for_toggle.clone();
+                    let model_after_result = children_model.clone();
+                    let repository_after_result = children_repository.clone();
+                    let action_after_result = children_action.clone();
+                    let active_after_result = children_active_path.clone();
+                    let parent_after_result = children_mount_parent.clone();
+                    let occurrence_after_result = occurrence.clone();
+                    children_repository.list(request, Box::new(move |completion| {
+                        let current = pending_result.borrow().as_ref().map(|(id, _)| *id);
+                        if current != Some(completion.id)
+                            || cancellable.is_cancelled()
+                            || !result_button.is_active()
+                        {
+                            return;
                         }
-                    }
+                        pending_result.borrow_mut().take();
+                        let RequestOutcome::Succeeded(snapshot) = completion.outcome else {
+                            return;
+                        };
+                        Self::append_children(
+                            &children_after_result,
+                            SidebarModel::children_from_snapshot(&snapshot),
+                            depth,
+                            occurrence_after_result.clone(),
+                            model_after_result.clone(),
+                            repository_after_result.clone(),
+                            action_after_result.clone(),
+                            active_after_result.clone(),
+                            parent_after_result.clone(),
+                        );
+                    }));
                 }
             });
             if initially_expanded {
@@ -587,6 +552,7 @@ impl Sidebar {
         depth: i32,
         occurrence: Vec<String>,
         model: Rc<RefCell<SidebarModel>>,
+        repository: Rc<dyn DirectoryRepository>,
         on_action: Rc<dyn Fn(SidebarAction)>,
         active_path: Rc<RefCell<Option<Location>>>,
         mount_parent: gtk::Window,
@@ -598,6 +564,7 @@ impl Sidebar {
                 depth + 1,
                 occurrence.clone(),
                 model.clone(),
+                repository.clone(),
                 on_action.clone(),
                 active_path.clone(),
                 mount_parent.clone(),
@@ -796,7 +763,14 @@ mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
 
-    use crate::core::{SidebarModel, SidebarPreferences};
+    use gio::prelude::*;
+    use gtk::prelude::*;
+
+    use crate::core::{
+        contracts::{Capability, CapabilitySnapshot, EntryKind, EntrySnapshot}, Location,
+        SidebarModel, SidebarPreferences,
+    };
+    use crate::infrastructure::mock_provider::{MockConfig, MockProvider};
 
     use super::should_show_devices_heading;
 
@@ -846,5 +820,150 @@ mod tests {
         let _sections = super::sidebar_sections(&model);
 
         assert!(model.try_borrow_mut().is_ok());
+    }
+
+    #[gtk::test]
+    fn remote_expansion_loads_directory_children_from_the_repository() {
+        let context = glib::MainContext::default();
+        let remote = Location::from_uri("smb://fixture/share").unwrap();
+        let child = Location::from_uri("smb://fixture/share/projects").unwrap();
+        let provider = Rc::new(MockProvider::new(context.clone(), MockConfig::default()));
+        provider.set_directory(
+            remote.clone(),
+            vec![directory_entry(child, "Projects")],
+            list_capabilities(),
+        );
+        let sidebar = remote_sidebar(remote, provider.clone());
+
+        expander_named(&sidebar.widget, "share").set_active(true);
+        assert!(!contains_sidebar_label(&sidebar.widget, "Projects"));
+
+        advance_provider(&context, &provider);
+
+        assert!(contains_sidebar_label(&sidebar.widget, "Projects"));
+    }
+
+    #[gtk::test]
+    fn collapsing_an_expansion_cancels_its_pending_repository_request() {
+        let context = glib::MainContext::default();
+        let remote = Location::from_uri("smb://fixture/share").unwrap();
+        let provider = Rc::new(MockProvider::new(context.clone(), MockConfig::default()));
+        provider.set_directory(
+            remote.clone(),
+            vec![directory_entry(
+                Location::from_uri("smb://fixture/share/projects").unwrap(),
+                "Projects",
+            )],
+            list_capabilities(),
+        );
+        let sidebar = remote_sidebar(remote, provider.clone());
+
+        let expander = expander_named(&sidebar.widget, "share");
+        expander.set_active(true);
+        expander.set_active(false);
+        advance_provider(&context, &provider);
+
+        assert!(!contains_sidebar_label(&sidebar.widget, "Projects"));
+    }
+
+    #[gtk::test]
+    fn stale_success_after_collapse_does_not_repopulate_the_sidebar_tree() {
+        let context = glib::MainContext::default();
+        let remote = Location::from_uri("smb://fixture/share").unwrap();
+        let provider = Rc::new(MockProvider::new(context.clone(), MockConfig::default()));
+        provider.set_list_results_after_cancellation(true);
+        provider.set_directory(
+            remote.clone(),
+            vec![directory_entry(
+                Location::from_uri("smb://fixture/share/projects").unwrap(),
+                "Projects",
+            )],
+            list_capabilities(),
+        );
+        let sidebar = remote_sidebar(remote, provider.clone());
+
+        let expander = expander_named(&sidebar.widget, "share");
+        expander.set_active(true);
+        expander.set_active(false);
+        advance_provider(&context, &provider);
+
+        assert!(
+            !contains_sidebar_label(&sidebar.widget, "Projects"),
+            "a provider may complete after cancellation, but that old result must be ignored"
+        );
+    }
+
+    fn remote_sidebar(remote: Location, provider: Rc<MockProvider>) -> super::Sidebar {
+        let mut preferences = SidebarPreferences::in_memory();
+        preferences.pin_location(remote);
+        preferences.set_section_expanded("Quick access", true);
+        let model = Rc::new(RefCell::new(SidebarModel::new(
+            preferences,
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+        )));
+        let window = gtk::Window::new();
+        let sidebar = super::Sidebar::new_with_repository(model, provider, &window, |_| {});
+        window.set_child(Some(&sidebar.widget));
+        window.present();
+        sidebar
+    }
+
+    fn list_capabilities() -> CapabilitySnapshot {
+        CapabilitySnapshot {
+            version: 1,
+            supported: [Capability::List].into_iter().collect(),
+            stable_order: true,
+            ..Default::default()
+        }
+    }
+
+    fn directory_entry(location: Location, display_name: &str) -> EntrySnapshot {
+        EntrySnapshot {
+            location,
+            display_name: display_name.into(),
+            kind: EntryKind::Directory,
+            size: None,
+            modified: None,
+            content_type: None,
+            capabilities: list_capabilities(),
+        }
+    }
+
+    fn advance_provider(context: &glib::MainContext, provider: &MockProvider) {
+        provider.advance(1);
+        while context.pending() {
+            context.iteration(false);
+        }
+    }
+
+    fn expander_named(sidebar: &gtk::ScrolledWindow, name: &str) -> gtk::ToggleButton {
+        sidebar_descendants(sidebar.upcast_ref())
+            .into_iter()
+            .find_map(|widget| {
+                widget.downcast::<gtk::ToggleButton>().ok().filter(|button| {
+                    button.tooltip_text().as_deref()
+                        == Some(&format!("Expand or collapse {name}"))
+                })
+            })
+            .unwrap_or_else(|| panic!("missing expander for {name}"))
+    }
+
+    fn contains_sidebar_label(sidebar: &gtk::ScrolledWindow, label: &str) -> bool {
+        sidebar_descendants(sidebar.upcast_ref()).into_iter().any(|widget| {
+            widget
+                .downcast::<gtk::Label>()
+                .ok()
+                .is_some_and(|candidate| candidate.label() == label)
+        })
+    }
+
+    fn sidebar_descendants(widget: &gtk::Widget) -> Vec<gtk::Widget> {
+        let mut descendants = vec![widget.clone()];
+        let mut child = widget.first_child();
+        while let Some(current) = child {
+            descendants.extend(sidebar_descendants(&current));
+            child = current.next_sibling();
+        }
+        descendants
     }
 }

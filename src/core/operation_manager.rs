@@ -128,6 +128,14 @@ impl OperationManager {
         };
         if let Some(path) = path {
             if let Ok(bytes) = crate::core::application_preferences::read_bounded_state(&path) {
+                let redacted_history = serde_json::from_slice::<serde_json::Value>(&bytes)
+                    .ok()
+                    .and_then(|value| {
+                        value
+                            .get("schema_version")
+                            .and_then(serde_json::Value::as_u64)
+                    })
+                    == Some(4);
                 let (records, mut notices) = decode_history(&bytes);
                 if let Ok(stored) = serde_json::from_slice::<StoredOperationHistoryV2>(&bytes) {
                     for record in stored.records {
@@ -135,6 +143,10 @@ impl OperationManager {
                             continue;
                         }
                         if let Some(mut outcome) = record.outcome {
+                            if redacted_history {
+                                manager.summaries.lock().unwrap().insert(record.id, outcome);
+                                continue;
+                            }
                             let mut valid = true;
                             for uri in outcome
                                 .completed
@@ -628,12 +640,12 @@ impl OperationManager {
             let _ = fs::create_dir_all(parent);
         }
         if let Ok(bytes) = serde_json::to_vec_pretty(&StoredOperationHistoryV2 {
-            schema_version: 3,
+            schema_version: 4,
             records: records
                 .iter()
                 .map(|record| {
                     let mut stored = stored_record(record);
-                    stored.outcome = self.summary(record.id);
+                    stored.outcome = self.summary(record.id).map(redacted_summary);
                     stored
                 })
                 .collect(),
@@ -652,21 +664,54 @@ fn stored_record(record: &OperationRecord) -> StoredOperationRecordV2 {
             record
                 .sources
                 .iter()
-                .map(|path| Location::from_local_path(path).uri().to_owned())
+                .map(|path| Location::from_local_path(path).redacted())
                 .collect()
         } else {
-            record.source_uris.clone()
-        },
-        destination: record.destination_uri.clone().or_else(|| {
             record
-                .destination
-                .as_ref()
-                .map(|path| Location::from_local_path(path).uri().to_owned())
-        }),
+                .source_uris
+                .iter()
+                .map(|uri| redacted_location(uri))
+                .collect()
+        },
+        destination: record
+            .destination_uri
+            .clone()
+            .or_else(|| {
+                record
+                    .destination
+                    .as_ref()
+                    .map(|path| Location::from_local_path(path).redacted())
+            })
+            .map(|uri| redacted_location(&uri)),
         completed: record.completed,
         total: record.total,
         state: record.state.clone(),
         finished_at: record.finished_at,
+    }
+}
+
+fn redacted_location(uri: &str) -> String {
+    Location::from_uri(uri)
+        .map(|location| location.redacted())
+        .unwrap_or_else(|_| "location".to_owned())
+}
+
+fn redacted_summary(summary: OperationSummary) -> OperationSummary {
+    OperationSummary {
+        completed: summary
+            .completed
+            .iter()
+            .map(|uri| redacted_location(uri))
+            .collect(),
+        remaining: summary
+            .remaining
+            .iter()
+            .map(|uri| redacted_location(uri))
+            .collect(),
+        effect: summary.effect,
+        error_kind: summary.error_kind,
+        retry_of: summary.retry_of,
+        explicit_target: summary.explicit_target.as_deref().map(redacted_location),
     }
 }
 
@@ -704,12 +749,10 @@ fn decode_history(bytes: &[u8]) -> (Vec<OperationRecord>, Vec<RecoverableStateNo
     let Some(object) = value.as_object() else {
         return (Vec::new(), vec![RecoverableStateNotice::MalformedRecord]);
     };
-    if !matches!(
-        object
-            .get("schema_version")
-            .and_then(serde_json::Value::as_u64),
-        Some(2 | 3)
-    ) {
+    let schema_version = object
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64);
+    if !matches!(schema_version, Some(2 | 3 | 4)) {
         return (Vec::new(), vec![RecoverableStateNotice::UnsupportedSchema]);
     }
     let Some(stored_records) = object.get("records").and_then(serde_json::Value::as_array) else {
@@ -717,6 +760,7 @@ fn decode_history(bytes: &[u8]) -> (Vec<OperationRecord>, Vec<RecoverableStateNo
     };
     let mut records = Vec::new();
     let mut notices = Vec::new();
+    let redacted_history = schema_version == Some(4);
     for value in stored_records {
         let Ok(record) = serde_json::from_value::<StoredOperationRecordV2>(value.clone()) else {
             notices.push(RecoverableStateNotice::MalformedRecord);
@@ -726,6 +770,25 @@ fn decode_history(bytes: &[u8]) -> (Vec<OperationRecord>, Vec<RecoverableStateNo
             record.state,
             OperationState::Queued | OperationState::Running | OperationState::CancelRequested
         ) {
+            continue;
+        }
+        if redacted_history {
+            if record.sources.is_empty() {
+                notices.push(RecoverableStateNotice::MalformedRecord);
+                continue;
+            }
+            records.push(OperationRecord {
+                id: record.id,
+                kind: record.kind,
+                source_uris: record.sources,
+                sources: Vec::new(),
+                destination_uri: record.destination,
+                destination: None,
+                completed: record.completed,
+                total: record.total,
+                state: record.state,
+                finished_at: record.finished_at,
+            });
             continue;
         }
         let source_locations = record
@@ -943,10 +1006,10 @@ mod tests {
     }
 
     #[test]
-    fn unconfirmed_delete_is_rejected_and_terminal_outcomes_survive_reload() {
+    fn persisted_history_redacts_record_and_outcome_locations_without_changing_live_summary() {
         let directory = tempfile::tempdir().unwrap();
-        let source = directory.path().join("source");
-        let target = directory.path().join("target");
+        let source = directory.path().join("private-source-name");
+        let target = directory.path().join("private-target-name");
         fs::write(&source, "keep").unwrap();
         fs::create_dir(&target).unwrap();
         let path = directory.path().join("history.json");
@@ -955,23 +1018,35 @@ mod tests {
         let record = wait_for_finished(&manager, id);
         assert!(matches!(record.state, OperationState::Failed(_)));
         assert!(source.exists());
-        let copied = manager.submit(OperationKind::Copy, vec![source.clone()], Some(target));
+        let copied = manager.submit(
+            OperationKind::Copy,
+            vec![source.clone()],
+            Some(target.clone()),
+        );
         wait_for_finished(&manager, copied);
         manager.persist_history();
-        let stored: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        assert_eq!(stored["schema_version"], 3);
+        let raw_history = String::from_utf8(fs::read(&path).unwrap()).unwrap();
+        let stored: serde_json::Value = serde_json::from_str(&raw_history).unwrap();
+        assert_eq!(stored["schema_version"], 4);
         assert_eq!(
             stored["records"][1]["outcome"]["completed"],
-            serde_json::json!([Location::from_local_path(&source).uri()])
+            serde_json::json!(["file:///…"])
         );
         assert_eq!(stored["records"][1]["outcome"]["effect"], "Complete");
-        let loaded = OperationManager::load_history(Some(path.clone()), 7);
-        loaded.persist_history();
-        let saved: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        let source_path = source.display().to_string();
+        let target_path = target.display().to_string();
+        for sensitive in [&source_path, &target_path, "private-source-name", "private-target-name"] {
+            assert!(
+                !raw_history.contains(sensitive),
+                "persisted history leaked {sensitive}"
+            );
+        }
         assert_eq!(
-            saved["records"][1]["outcome"],
-            stored["records"][1]["outcome"]
+            manager.summary(copied).unwrap().completed,
+            vec![Location::from_local_path(&source).uri().to_owned()]
         );
+        let loaded = OperationManager::load_history(Some(path.clone()), 7);
+        assert_eq!(loaded.summary(copied).unwrap().completed, vec!["file:///…"]);
     }
 
     #[test]
@@ -1009,7 +1084,7 @@ mod tests {
     }
 
     #[test]
-    fn history_writes_v2_canonical_uris_and_migrates_legacy_paths() {
+    fn history_writes_v4_redacted_locations_and_migrates_legacy_paths() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("history.json");
         let legacy = vec![OperationRecord {
@@ -1033,10 +1108,10 @@ mod tests {
         manager.persist_history();
         let saved: serde_json::Value =
             serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-        assert_eq!(saved["schema_version"], 3);
+        assert_eq!(saved["schema_version"], 4);
         assert_eq!(
             saved["records"][0]["sources"],
-            serde_json::json!(["file:///tmp/source"])
+            serde_json::json!(["file:///…"])
         );
     }
 
@@ -1064,7 +1139,7 @@ mod tests {
     }
 
     #[test]
-    fn re_persisting_v2_history_does_not_rewrite_remote_uris_as_local_paths() {
+    fn re_persisting_v2_history_redacts_remote_location_details() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("history.json");
         std::fs::write(
@@ -1080,12 +1155,9 @@ mod tests {
 
         assert_eq!(
             saved["records"][0]["sources"],
-            serde_json::json!(["smb://host/source"])
+            serde_json::json!(["smb://host/…"])
         );
-        assert_eq!(
-            saved["records"][0]["destination"],
-            "sftp://host/destination"
-        );
+        assert_eq!(saved["records"][0]["destination"], "sftp://host/…");
     }
 
     #[test]
