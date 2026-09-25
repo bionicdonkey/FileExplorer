@@ -147,19 +147,7 @@ impl VisibleMetadataTarget {
                 cache.insert(entry.location.clone(), VisibleMetadataCacheEntry::Resolved(entry));
             }
         }
-        let mut applied = self.apply_to_store(
-            self.model_store.borrow().as_ref(),
-            &self.model_row_index.borrow(),
-            &metadata_by_location,
-        );
-        applied.extend(self.apply_to_store(
-            self.folder_store.borrow().as_ref(),
-            &self.folder_row_index.borrow(),
-            &metadata_by_location,
-        ));
-        self.queue(metadata_by_location.into_iter().filter_map(|(location, entry)| {
-            (!applied.contains(&location)).then_some(entry)
-        }));
+        self.queue(metadata_by_location.into_values());
         self.flush();
     }
 
@@ -174,6 +162,14 @@ impl VisibleMetadataTarget {
     }
 
     fn flush(&self) {
+        // An in-flight page stream needs GTK's incremental sorter to reach a
+        // settled pending state before the next backing batch is appended.
+        // Splicing a resolved metadata row here restarts that sorter, so retain
+        // the value in the bounded generation cache. FileView flushes it when
+        // the event-driven stream-completion path finishes.
+        if self.navigation.state.borrow().has_pending_navigation() {
+            return;
+        }
         let mut metadata_by_location: std::collections::HashMap<_, _> = {
             let mut cache = self.cache.borrow_mut();
             self.pending.borrow().entries().into_iter().filter(|(location, _)| {
