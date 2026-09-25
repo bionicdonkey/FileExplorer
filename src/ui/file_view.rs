@@ -48,6 +48,13 @@ struct StreamAppendWaiter {
     handler: glib::SignalHandlerId,
 }
 
+struct MetadataSortWaiter {
+    generation: u64,
+    model: SortListModel,
+    handler: Rc<RefCell<Option<glib::SignalHandlerId>>>,
+    active: Rc<std::cell::Cell<bool>>,
+}
+
 /// The only state retained by a visible-metadata completion. Callbacks keep a
 /// weak reference to this target, rather than retaining the whole FileView
 /// after its tab has closed.
@@ -58,10 +65,22 @@ struct VisibleMetadataTarget {
     model_row_index: Rc<RefCell<std::collections::HashMap<Location, u32>>>,
     folder_row_index: Rc<RefCell<std::collections::HashMap<Location, u32>>>,
     stream_append_model: Rc<RefCell<Option<SortListModel>>>,
-    pending: Rc<RefCell<crate::application::performance::VisibleCache<crate::core::contracts::VisibleMetadata>>>,
+    metadata_sort_waiter: Rc<RefCell<Option<MetadataSortWaiter>>>,
+    pending: Rc<
+        RefCell<
+            crate::application::performance::VisibleCache<crate::core::contracts::VisibleMetadata>,
+        >,
+    >,
     generation: Rc<std::cell::Cell<Option<u64>>>,
     cache: Rc<RefCell<crate::application::performance::VisibleCache<VisibleMetadataCacheEntry>>>,
-    requests: Rc<RefCell<std::collections::HashMap<crate::core::contracts::RequestId, (gio::Cancellable, Vec<Location>)>>>,
+    requests: Rc<
+        RefCell<
+            std::collections::HashMap<
+                crate::core::contracts::RequestId,
+                (gio::Cancellable, Vec<Location>),
+            >,
+        >,
+    >,
 }
 
 impl VisibleMetadataTarget {
@@ -92,7 +111,99 @@ impl VisibleMetadataTarget {
         }
     }
 
+    fn cancel_metadata_sort_waiter(&self) {
+        if let Some(waiter) = self.metadata_sort_waiter.borrow_mut().take() {
+            waiter.active.set(false);
+            if let Some(handler) = waiter.handler.borrow_mut().take() {
+                waiter.model.disconnect(handler);
+            }
+        }
+    }
+
+    fn clear_metadata_sort_waiter(&self, active: &Rc<std::cell::Cell<bool>>) {
+        let mut waiter = self.metadata_sort_waiter.borrow_mut();
+        if waiter
+            .as_ref()
+            .is_some_and(|waiter| Rc::ptr_eq(&waiter.active, active))
+        {
+            waiter.take();
+        }
+    }
+
+    fn metadata_sort_is_current(&self, generation: u64, model: &SortListModel) -> bool {
+        let state = self.navigation.state.borrow();
+        if state.navigation_generation != generation
+            || matches!(state.status, NavigationStatus::Closed)
+        {
+            return false;
+        }
+        drop(state);
+        self.stream_append_model
+            .borrow()
+            .as_ref()
+            .is_some_and(|current| current == model)
+    }
+
+    fn wait_for_metadata_sort_settlement(self: &Rc<Self>) {
+        let generation = self.navigation.state.borrow().navigation_generation;
+        let Some(model) = self
+            .stream_append_model
+            .borrow()
+            .as_ref()
+            .filter(|model| model.is_incremental() && model.pending() > 0)
+            .cloned()
+        else {
+            return;
+        };
+        if self
+            .metadata_sort_waiter
+            .borrow()
+            .as_ref()
+            .is_some_and(|waiter| waiter.generation == generation && waiter.model == model)
+        {
+            return;
+        }
+        self.cancel_metadata_sort_waiter();
+        let active = Rc::new(std::cell::Cell::new(true));
+        let active_for_notify = active.clone();
+        let handler = Rc::new(RefCell::new(None));
+        let handler_for_notify = handler.clone();
+        let target = Rc::downgrade(self);
+        let target_for_notify = target.clone();
+        let id = model.connect_pending_notify(move |settled_model| {
+            if settled_model.pending() > 0 || !active_for_notify.replace(false) {
+                return;
+            }
+            let Some(id) = handler_for_notify.borrow_mut().take() else {
+                return;
+            };
+            let Some(target) = target_for_notify.upgrade() else {
+                return;
+            };
+            target.clear_metadata_sort_waiter(&active_for_notify);
+            let model = settled_model.clone();
+            let target = Rc::downgrade(&target);
+            glib::idle_add_local_once(move || {
+                model.disconnect(id);
+                let Some(target) = target.upgrade() else {
+                    return;
+                };
+                if target.metadata_sort_is_current(generation, &model) {
+                    target.flush();
+                }
+            });
+        });
+        *handler.borrow_mut() = Some(id);
+        *self.metadata_sort_waiter.borrow_mut() = Some(MetadataSortWaiter {
+            generation,
+            model,
+            handler,
+            active,
+        });
+    }
+
     fn clear_cache(&self) {
+        self.cancel_metadata_sort_waiter();
         self.cache.borrow_mut().invalidate();
         self.pending.borrow_mut().invalidate();
         self.generation.set(None);
@@ -106,7 +217,7 @@ impl VisibleMetadataTarget {
     }
 
     fn complete(
-        &self,
+        self: &Rc<Self>,
         generation: u64,
         request_id: crate::core::contracts::RequestId,
         result: crate::core::contracts::RequestCompletion<
@@ -138,7 +249,7 @@ impl VisibleMetadataTarget {
         generation
     }
 
-    fn apply(&self, metadata: Vec<crate::core::contracts::VisibleMetadata>) {
+    fn apply(self: &Rc<Self>, metadata: Vec<crate::core::contracts::VisibleMetadata>) {
         self.prepare_generation();
         if metadata.is_empty() {
             return;
@@ -174,12 +285,12 @@ impl VisibleMetadataTarget {
         }
     }
 
-    fn flush(&self) {
+    fn flush(self: &Rc<Self>) {
         // An in-flight page stream needs GTK's incremental sorter to reach a
         // settled pending state before the next backing batch is appended.
         // Splicing a resolved metadata row here restarts that sorter, so retain
-        // the value in the bounded generation cache. FileView flushes it when
-        // the event-driven stream-completion path finishes.
+        // the value in the bounded generation cache. A generation-scoped
+        // sorter-settlement continuation drains it once GTK has settled.
         if self.navigation.state.borrow().has_pending_navigation()
             || self
                 .stream_append_model
@@ -187,6 +298,7 @@ impl VisibleMetadataTarget {
                 .as_ref()
                 .is_some_and(|model| model.is_incremental() && model.pending() > 0)
         {
+            self.wait_for_metadata_sort_settlement();
             return;
         }
         let mut metadata_by_location: std::collections::HashMap<_, _> = {
@@ -223,6 +335,8 @@ impl VisibleMetadataTarget {
         for entry in metadata_by_location.into_values() {
             pending.insert(entry.location.clone(), entry);
         }
+        drop(pending);
+        self.wait_for_metadata_sort_settlement();
     }
 
     fn apply_to_store(
@@ -466,6 +580,7 @@ impl FileView {
             model_row_index: model_row_index.clone(),
             folder_row_index: folder_row_index.clone(),
             stream_append_model: stream_append_model.clone(),
+            metadata_sort_waiter: Default::default(),
             pending: pending_visible_metadata.clone(),
             generation: visible_metadata_generation.clone(),
             cache: visible_metadata.clone(),
@@ -579,6 +694,7 @@ impl FileView {
     pub fn navigate(&self, location: Location) {
         self.clear_search_results();
         self.cancel_stream_append_waiter();
+        self.metadata_target.cancel_metadata_sort_waiter();
         self.metadata_target.cancel_requests();
         let view = self.clone();
         self.navigation.navigate(location, move |accepted| {
@@ -592,6 +708,7 @@ impl FileView {
     pub fn go_back(&self) {
         self.clear_search_results();
         self.cancel_stream_append_waiter();
+        self.metadata_target.cancel_metadata_sort_waiter();
         self.metadata_target.cancel_requests();
         let view = self.clone();
         if self.navigation.back(move |accepted| {
@@ -606,6 +723,7 @@ impl FileView {
     pub fn go_forward(&self) {
         self.clear_search_results();
         self.cancel_stream_append_waiter();
+        self.metadata_target.cancel_metadata_sort_waiter();
         self.metadata_target.cancel_requests();
         let view = self.clone();
         if self.navigation.forward(move |accepted| {
@@ -620,6 +738,7 @@ impl FileView {
     pub fn close(&self) {
         self.search.clear();
         self.cancel_stream_append_waiter();
+        self.metadata_target.cancel_metadata_sort_waiter();
         self.metadata_target.cancel_requests();
         self.metadata_target.clear_cache();
         self.navigation.close_tab();
@@ -886,6 +1005,8 @@ impl FileView {
         for entry in metadata_by_location.into_values() {
             pending.insert(entry.location.clone(), entry);
         }
+        drop(pending);
+        self.metadata_target.wait_for_metadata_sort_settlement();
     }
 
     /// Replaces only backing rows named by the response. The source-list
@@ -1447,6 +1568,7 @@ impl FileView {
         invalidate_thumbnails();
         self.clear_search_results();
         self.cancel_stream_append_waiter();
+        self.metadata_target.cancel_metadata_sort_waiter();
         self.metadata_target.cancel_requests();
         if !self.has_pending_navigation() && self.section_title().is_some() {
             self.reload();
@@ -1512,6 +1634,7 @@ impl FileView {
     /// Repaints owned metadata; never enumerates or queries the filesystem.
     fn reload(&self) {
         self.cancel_stream_append_waiter();
+        self.metadata_target.cancel_metadata_sort_waiter();
         self.metadata_target.cancel_requests();
         self.stream_append_model.borrow_mut().take();
         self.model_store.borrow_mut().take();
@@ -3614,7 +3737,7 @@ mod tests {
     }
 
     #[gtk::test]
-    fn slice5_final_stream_append_defers_metadata_until_incremental_sort_settles() {
+    fn slice5_final_stream_append_drains_second_metadata_completion_after_next_sort_settle() {
         use super::{append_model_page, ListRow};
         use crate::core::contracts::{
             Capability, CapabilitySnapshot, DirectorySnapshot, EntryKind, EntrySnapshot,
@@ -3650,6 +3773,7 @@ mod tests {
             })
             .collect();
         let target = entries.last().unwrap().location.clone();
+        let second_target = entries[entries.len() - 2].location.clone();
         let store = gio::ListStore::new::<glib::BoxedAnyObject>();
         let sorter = gtk::CustomSorter::new(|left, right| {
             let left = left
@@ -3747,6 +3871,33 @@ mod tests {
         assert_eq!(pending_item.content_type(), "application/octet-stream");
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            let first_object = store
+                .item(2_047)
+                .unwrap()
+                .downcast::<glib::BoxedAnyObject>()
+                .unwrap();
+            let ListRow::File(first_item) = &*first_object.borrow::<ListRow>() else {
+                panic!("first metadata backing row must remain a file");
+            };
+            if sorted.pending() > 0 && first_item.content_type() == "application/x-final-sort" {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            context.iteration(false);
+        }
+        view.metadata_target.apply(vec![VisibleMetadata {
+            location: second_target.clone(),
+            size: Some(2_047),
+            modified: None,
+            content_type: Some("application/x-second-final-sort".into()),
+        }]);
+        assert_eq!(
+            view.pending_visible_metadata.borrow().len(),
+            1,
+            "a completion during the post-final-flush sort must remain deferred"
+        );
+
         while sorted.pending() > 0 || view.pending_visible_metadata.borrow().len() > 0 {
             assert!(std::time::Instant::now() < deadline);
             context.iteration(false);
@@ -3760,6 +3911,19 @@ mod tests {
             panic!("final backing row must remain a file");
         };
         assert_eq!(settled_item.content_type(), "application/x-final-sort");
+        let second_settled_object = store
+            .item(2_046)
+            .unwrap()
+            .downcast::<glib::BoxedAnyObject>()
+            .unwrap();
+        let ListRow::File(second_settled_item) = &*second_settled_object.borrow::<ListRow>() else {
+            panic!("second metadata backing row must remain a file");
+        };
+        assert_eq!(
+            second_settled_item.content_type(),
+            "application/x-second-final-sort",
+            "the next sorter settlement must drain metadata received during the post-final flush"
+        );
         view.close();
     }
 
