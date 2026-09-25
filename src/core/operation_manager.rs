@@ -685,8 +685,15 @@ fn stored_record(record: &OperationRecord) -> StoredOperationRecordV2 {
             .map(|uri| redacted_location(&uri)),
         completed: record.completed,
         total: record.total,
-        state: record.state.clone(),
+        state: redacted_state(&record.state),
         finished_at: record.finished_at,
+    }
+}
+
+fn redacted_state(state: &OperationState) -> OperationState {
+    match state {
+        OperationState::Failed(_) => OperationState::Failed("Operation failed".to_owned()),
+        state => state.clone(),
     }
 }
 
@@ -1158,6 +1165,38 @@ mod tests {
             serde_json::json!(["smb://host/…"])
         );
         assert_eq!(saved["records"][0]["destination"], "sftp://host/…");
+    }
+
+    #[test]
+    fn rewriting_history_redacts_raw_failed_state_details_from_every_supported_schema() {
+        let directory = tempfile::tempdir().unwrap();
+        for schema_version in [2, 3, 4] {
+            let path = directory
+                .path()
+                .join(format!("history-{schema_version}.json"));
+            std::fs::write(
+                &path,
+                format!(
+                    r#"{{"schema_version":{schema_version},"records":[{{"id":7,"kind":"Copy","sources":["file:///private-source"],"destination":null,"completed":1,"total":1,"state":{{"Failed":"Unable to copy file:///private-source"}},"finished_at":2000000000}}]}}"#,
+                ),
+            )
+            .unwrap();
+
+            let manager = OperationManager::load_history(Some(path.clone()), 7);
+            manager.persist_history();
+            let raw_history = String::from_utf8(fs::read(&path).unwrap()).unwrap();
+            let saved: serde_json::Value = serde_json::from_str(&raw_history).unwrap();
+
+            assert_eq!(saved["schema_version"], 4);
+            assert_eq!(
+                saved["records"][0]["state"],
+                serde_json::json!({"Failed": "Operation failed"})
+            );
+            assert!(
+                !raw_history.contains("private-source"),
+                "rewriting v{schema_version} history leaked failed-state detail"
+            );
+        }
     }
 
     #[test]
