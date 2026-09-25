@@ -579,10 +579,13 @@ impl FileView {
         &self,
         metadata: impl IntoIterator<Item = crate::core::contracts::VisibleMetadata>,
     ) {
-        let cache = self.visible_metadata.borrow();
+        let mut cache = self.visible_metadata.borrow_mut();
         let mut pending = self.pending_visible_metadata.borrow_mut();
         for entry in metadata {
-            if cache.contains(&entry.location) {
+            if matches!(
+                cache.get(&entry.location),
+                Some(VisibleMetadataCacheEntry::Resolved(_))
+            ) {
                 pending.insert(entry.location.clone(), entry);
             }
         }
@@ -603,12 +606,17 @@ impl FileView {
     /// their URI index exists.
     fn flush_visible_metadata(&self) {
         let mut metadata_by_location: std::collections::HashMap<_, _> = {
-            let cache = self.visible_metadata.borrow();
+            let mut cache = self.visible_metadata.borrow_mut();
             self.pending_visible_metadata
                 .borrow()
                 .entries()
                 .into_iter()
-                .filter(|(location, _)| cache.contains(location))
+                .filter(|(location, _)| {
+                    matches!(
+                        cache.get(location),
+                        Some(VisibleMetadataCacheEntry::Resolved(_))
+                    )
+                })
                 .collect()
         };
         if metadata_by_location.is_empty() {
@@ -3481,6 +3489,96 @@ mod tests {
             provider.visible_metadata_requests(),
             vec![locations[0].clone()]
         );
+        view.close();
+    }
+
+    #[gtk::test]
+    fn slice5_pending_rebind_does_not_apply_deferred_metadata_from_an_evicted_resolution() {
+        use super::{ListRow, VisibleMetadataCacheEntry};
+        use crate::application::performance::CachePolicy;
+        use crate::core::contracts::{EntryKind, EntrySnapshot, VisibleMetadata};
+        use crate::infrastructure::mock_provider::{MockConfig, MockProvider};
+        use glib::prelude::Cast;
+
+        let context = glib::MainContext::default();
+        let root = Location::from_uri("smb://fixture/deferred-metadata-rebind").unwrap();
+        let target = Location::from_uri(&format!("{}/later-page-item", root.uri())).unwrap();
+        let provider = std::rc::Rc::new(MockProvider::new(context, MockConfig::default()));
+        let view = FileView::new_with_repository(root.clone(), provider);
+        let target_item = FileItem::from_snapshot(&EntrySnapshot {
+            location: target.clone(),
+            display_name: "later-page-item".into(),
+            kind: EntryKind::File,
+            size: None,
+            modified: None,
+            content_type: None,
+            capabilities: Default::default(),
+        });
+
+        view.apply_visible_metadata(vec![VisibleMetadata {
+            location: target.clone(),
+            size: Some(1),
+            modified: None,
+            content_type: Some("application/x-stale-deferred".into()),
+        }]);
+        assert_eq!(view.pending_visible_metadata.borrow().len(), 1);
+
+        {
+            let mut cache = view.visible_metadata.borrow_mut();
+            for index in 0..CachePolicy::default().max_entries {
+                let location = Location::from_uri(&format!("{}/filler-{index:03}", root.uri()))
+                    .unwrap();
+                cache.insert(location, VisibleMetadataCacheEntry::Pending);
+            }
+            assert!(cache.get(&target).is_none(), "the old resolution is evicted");
+        }
+
+        view.request_visible_metadata(&target_item);
+        assert!(matches!(
+            view.visible_metadata.borrow_mut().get(&target),
+            Some(VisibleMetadataCacheEntry::Pending)
+        ));
+
+        let store = gio::ListStore::new::<glib::BoxedAnyObject>();
+        store.append(&glib::BoxedAnyObject::new(ListRow::File(target_item)));
+        *view.model_store.borrow_mut() = Some(store.clone());
+        view.model_row_index.borrow_mut().insert(target.clone(), 0);
+        view.flush_visible_metadata();
+
+        let object = store
+            .item(0)
+            .unwrap()
+            .downcast::<glib::BoxedAnyObject>()
+            .unwrap();
+        let ListRow::File(item) = &*object.borrow::<ListRow>() else {
+            panic!("fixture row must be a file");
+        };
+        assert_eq!(
+            item.content_type(),
+            "application/octet-stream",
+            "a pending rebind must not apply stale deferred metadata"
+        );
+
+        let generation = view.navigation.state.borrow().navigation_generation;
+        view.complete_visible_metadata(
+            generation,
+            target.clone(),
+            vec![VisibleMetadata {
+                location: target,
+                size: Some(2),
+                modified: None,
+                content_type: Some("application/x-fresh".into()),
+            }],
+        );
+        let object = store
+            .item(0)
+            .unwrap()
+            .downcast::<glib::BoxedAnyObject>()
+            .unwrap();
+        let ListRow::File(item) = &*object.borrow::<ListRow>() else {
+            panic!("fixture row must be a file");
+        };
+        assert_eq!(item.content_type(), "application/x-fresh");
         view.close();
     }
 
