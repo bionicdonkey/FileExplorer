@@ -60,13 +60,34 @@ struct VisibleMetadataTarget {
     pending: Rc<RefCell<crate::application::performance::VisibleCache<crate::core::contracts::VisibleMetadata>>>,
     generation: Rc<std::cell::Cell<Option<u64>>>,
     cache: Rc<RefCell<crate::application::performance::VisibleCache<VisibleMetadataCacheEntry>>>,
-    requests: Rc<RefCell<std::collections::HashMap<crate::core::contracts::RequestId, gio::Cancellable>>>,
+    requests: Rc<RefCell<std::collections::HashMap<crate::core::contracts::RequestId, (gio::Cancellable, Vec<Location>)>>>,
 }
 
 impl VisibleMetadataTarget {
     fn cancel_requests(&self) {
-        for cancellable in self.requests.borrow_mut().drain().map(|(_, cancellable)| cancellable) {
+        let mut cancelled_locations = std::collections::HashSet::new();
+        for (_, (cancellable, locations)) in self.requests.borrow_mut().drain() {
             cancellable.cancel();
+            cancelled_locations.extend(locations);
+        }
+        if cancelled_locations.is_empty() {
+            return;
+        }
+
+        let retained = self
+            .cache
+            .borrow()
+            .entries()
+            .into_iter()
+            .filter(|(location, entry)| {
+                !cancelled_locations.contains(location)
+                    || !matches!(entry, VisibleMetadataCacheEntry::Pending)
+            })
+            .collect::<Vec<_>>();
+        let mut cache = self.cache.borrow_mut();
+        cache.invalidate();
+        for (location, entry) in retained {
+            cache.insert(location, entry);
         }
     }
 
@@ -79,7 +100,7 @@ impl VisibleMetadataTarget {
     fn register(&self, request: &crate::core::contracts::VisibleMetadataRequest) {
         self.requests
             .borrow_mut()
-            .insert(request.id, request.cancellable.clone());
+            .insert(request.id, (request.cancellable.clone(), request.locations.clone()));
     }
 
     fn complete(
@@ -3850,6 +3871,59 @@ mod tests {
 
         assert!(view.visible_metadata.borrow_mut().get(&item).is_none());
         assert!(view.pending_visible_metadata.borrow().len() == 0);
+        view.close();
+    }
+
+    #[gtk::test]
+    fn slice5_reload_reissues_cancelled_visible_metadata_and_applies_the_fresh_result() {
+        use super::VisibleMetadataCacheEntry;
+        use crate::core::contracts::{EntryKind, EntrySnapshot};
+        use crate::infrastructure::mock_provider::{MockConfig, MockProvider};
+        use gio::prelude::CancellableExt;
+
+        let context = glib::MainContext::default();
+        let root = Location::from_uri("smb://fixture/reload-inflight-metadata").unwrap();
+        let target = Location::from_uri(&format!("{}/report.txt", root.uri())).unwrap();
+        let entry = EntrySnapshot {
+            location: target.clone(),
+            display_name: "report.txt".into(),
+            kind: EntryKind::File,
+            size: Some(99),
+            modified: None,
+            content_type: Some("text/plain".into()),
+            capabilities: Default::default(),
+        };
+        let provider = std::rc::Rc::new(MockProvider::new(context.clone(), MockConfig::default()));
+        provider.set_directory(root.clone(), vec![entry.clone()], Default::default());
+        let view = FileView::new_with_repository(root, provider.clone());
+        provider.advance(1);
+        while context.pending() {
+            context.iteration(false);
+        }
+        let item = FileItem::from_snapshot(&entry);
+
+        view.request_visible_metadata(&item);
+        let cancellations = provider.visible_metadata_request_cancellables();
+        view.reload();
+        assert!(cancellations[0].is_cancelled());
+
+        view.request_visible_metadata(&item);
+        assert_eq!(
+            provider.visible_metadata_requests(),
+            vec![target.clone(), target.clone()],
+            "a same-generation reload must reissue cancelled visible metadata"
+        );
+        provider.advance(1);
+        while context.pending() {
+            context.iteration(false);
+        }
+
+        assert!(matches!(
+            view.visible_metadata.borrow_mut().get(&target),
+            Some(VisibleMetadataCacheEntry::Resolved(metadata))
+                if metadata.size == Some(99)
+                    && metadata.content_type.as_deref() == Some("text/plain")
+        ));
         view.close();
     }
 
