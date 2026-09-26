@@ -706,10 +706,10 @@ impl FileView {
     }
 
     pub fn go_back(&self) {
+        self.clear_search_results();
         if !self.navigation.state.borrow().history.can_go_back() {
             return;
         }
-        self.clear_search_results();
         self.cancel_stream_append_waiter();
         self.metadata_target.cancel_metadata_sort_waiter();
         self.metadata_target.cancel_requests();
@@ -724,10 +724,10 @@ impl FileView {
     }
 
     pub fn go_forward(&self) {
+        self.clear_search_results();
         if !self.navigation.state.borrow().history.can_go_forward() {
             return;
         }
-        self.clear_search_results();
         self.cancel_stream_append_waiter();
         self.metadata_target.cancel_metadata_sort_waiter();
         self.metadata_target.cancel_requests();
@@ -3747,17 +3747,31 @@ mod tests {
         use super::{append_model_page, ListRow};
         use crate::core::contracts::{
             Capability, CapabilitySnapshot, DirectorySnapshot, EntryKind, EntrySnapshot,
-            VisibleMetadata,
+            SearchCompletion, SearchMode, SearchOutcome, SearchRequest, VisibleMetadata,
         };
         use crate::core::navigation::{NavigationStatus, TabContent};
+        use crate::core::ports::{SearchCallback, SearchRepository};
         use crate::core::ResolvedLocation;
         use crate::infrastructure::mock_provider::{MockConfig, MockProvider};
+        use gio::prelude::CancellableExt;
         use glib::prelude::Cast;
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        #[derive(Default)]
+        struct SearchDouble(RefCell<Vec<(SearchRequest, SearchCallback)>>);
+
+        impl SearchRepository for SearchDouble {
+            fn search(&self, request: SearchRequest, done: SearchCallback) {
+                self.0.borrow_mut().push((request, done));
+            }
+        }
 
         let context = glib::MainContext::default();
         let root = Location::from_uri("smb://fixture/final-sort-metadata").unwrap();
         let provider = std::rc::Rc::new(MockProvider::new(context.clone(), MockConfig::default()));
-        let view = FileView::new_with_repository(root.clone(), provider.clone());
+        let search = Rc::new(SearchDouble::default());
+        let view = FileView::new_with_repositories(root.clone(), provider.clone(), search.clone());
         provider.advance(1);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
         while view.has_pending_navigation() {
@@ -3908,7 +3922,34 @@ mod tests {
                 && !view.tab_state().borrow().history.can_go_forward(),
             "the initial location has neither history direction available"
         );
+        assert!(
+            view.metadata_target.metadata_sort_waiter.borrow().is_some(),
+            "the deferred metadata completion must retain its sort waiter"
+        );
+        assert!(view.search("report", SearchMode::Filename, false));
+        let (request, done) = search.0.borrow_mut().remove(0);
         view.go_back();
+        assert!(
+            request.cancellable.is_cancelled(),
+            "back at the history boundary must still clear an active search"
+        );
+        assert!(
+            view.metadata_target.metadata_sort_waiter.borrow().is_some(),
+            "clearing search at the history boundary must not cancel the metadata waiter"
+        );
+        done(SearchCompletion {
+            id: request.id,
+            outcome: SearchOutcome::Completed {
+                matches: vec![],
+                declared_scope: request.scope,
+                scope_limited: false,
+                limits: vec![],
+            },
+        });
+        assert!(
+            !view.is_showing_search_results(),
+            "a cleared search callback must not restore its results"
+        );
         view.go_forward();
 
         while sorted.pending() > 0 || view.pending_visible_metadata.borrow().len() > 0 {
