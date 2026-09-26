@@ -1,7 +1,7 @@
 //! Real cross-process X11 DND coverage. XTest is dynamically loaded so these
 //! tests do not add a build-time dependency to the application or other targets.
 use super::*;
-use std::ffi::{c_char, c_int, c_uint, c_ulong, c_void, CString};
+use std::ffi::{c_char, c_int, c_long, c_uint, c_ulong, c_void, CString};
 use std::time::{Duration, Instant};
 
 fn pump_for(duration: Duration) {
@@ -17,6 +17,41 @@ fn pump_for(duration: Duration) {
 struct X11 {
     libraries: [*mut c_void; 2],
     display: *mut c_void,
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct XWindowAttributes {
+    x: c_int,
+    y: c_int,
+    width: c_int,
+    height: c_int,
+    border_width: c_int,
+    depth: c_int,
+    visual: *mut c_void,
+    root: c_ulong,
+    class: c_int,
+    bit_gravity: c_int,
+    win_gravity: c_int,
+    backing_store: c_int,
+    backing_planes: c_ulong,
+    backing_pixel: c_ulong,
+    save_under: c_int,
+    colormap: c_ulong,
+    map_installed: c_int,
+    map_state: c_int,
+    all_event_masks: c_long,
+    your_event_mask: c_long,
+    do_not_propagate_mask: c_long,
+    override_redirect: c_int,
+    screen: *mut c_void,
+}
+
+#[derive(Debug)]
+struct X11Window {
+    id: c_ulong,
+    map_state: Option<c_int>,
+    pid: Option<u32>,
 }
 
 struct TestChild(std::process::Child);
@@ -67,7 +102,61 @@ impl X11 {
             x
         }
     }
-    fn windows_named(&self, title: &str) -> Vec<c_ulong> {
+    fn map_state(&self, window: c_ulong) -> Option<c_int> {
+        unsafe {
+            let get: unsafe extern "C" fn(*mut c_void, c_ulong, *mut XWindowAttributes) -> c_int =
+                self.symbol("XGetWindowAttributes");
+            let mut attributes = XWindowAttributes::default();
+            (get(self.display, window, &mut attributes) != 0).then_some(attributes.map_state)
+        }
+    }
+    fn pid(&self, window: c_ulong) -> Option<u32> {
+        unsafe {
+            let intern: unsafe extern "C" fn(*mut c_void, *const c_char, c_int) -> c_ulong =
+                self.symbol("XInternAtom");
+            let get: unsafe extern "C" fn(
+                *mut c_void,
+                c_ulong,
+                c_ulong,
+                c_long,
+                c_long,
+                c_int,
+                c_ulong,
+                *mut c_ulong,
+                *mut c_int,
+                *mut c_ulong,
+                *mut c_ulong,
+                *mut *mut u8,
+            ) -> c_int = self.symbol("XGetWindowProperty");
+            let free: unsafe extern "C" fn(*mut c_void) -> c_int = self.symbol("XFree");
+            let atom_name = CString::new("_NET_WM_PID").unwrap();
+            let atom = intern(self.display, atom_name.as_ptr(), 0);
+            let (mut actual_type, mut format, mut items, mut bytes_after) = (0, 0, 0, 0);
+            let mut data = std::ptr::null_mut();
+            let status = get(
+                self.display,
+                window,
+                atom,
+                0,
+                1,
+                0,
+                6, // XA_CARDINAL
+                &mut actual_type,
+                &mut format,
+                &mut items,
+                &mut bytes_after,
+                &mut data,
+            );
+            let pid =
+                (status == 0 && actual_type == 6 && format == 32 && items == 1 && !data.is_null())
+                    .then(|| *(data as *const c_ulong) as u32);
+            if !data.is_null() {
+                free(data.cast());
+            }
+            pid
+        }
+    }
+    fn windows_named(&self, title: &str) -> Vec<X11Window> {
         unsafe {
             let root: unsafe extern "C" fn(*mut c_void) -> c_ulong =
                 self.symbol("XDefaultRootWindow");
@@ -98,7 +187,11 @@ impl X11 {
                 let mut name = std::ptr::null_mut();
                 if fetch(self.display, window, &mut name) != 0 && !name.is_null() {
                     if std::ffi::CStr::from_ptr(name).to_string_lossy() == title {
-                        found.push(window);
+                        found.push(X11Window {
+                            id: window,
+                            map_state: self.map_state(window),
+                            pid: self.pid(window),
+                        });
                     }
                     free(name.cast());
                 }
@@ -109,13 +202,25 @@ impl X11 {
             found
         }
     }
-    fn window(&self, title: &str) -> Option<c_ulong> {
+    fn window(&self, title: &str, expected_pid: Option<u32>) -> Option<c_ulong> {
         let windows = self.windows_named(title);
         assert!(
             windows.len() <= 1,
             "X11 root scan found multiple toplevels titled {title:?}: {windows:?}; window selection is ambiguous"
         );
-        windows.into_iter().next()
+        let window = windows.into_iter().next()?;
+        if let Some(map_state) = window.map_state {
+            if map_state != 2 {
+                return None;
+            }
+        }
+        if let (Some(expected), Some(actual)) = (expected_pid, window.pid) {
+            assert_eq!(
+                actual, expected,
+                "X11 title match {title:?} had _NET_WM_PID {actual}, expected {expected}"
+            );
+        }
+        Some(window.id)
     }
     fn place(&self, window: c_ulong, x: i32) {
         unsafe {
@@ -168,8 +273,10 @@ impl Drop for X11 {
 }
 
 fn external_source(root: &Path) {
-    let title = std::env::var("TASK8_EXTERNAL_DND_SOURCE_TITLE")
-        .expect("parent must provide the external X11 source title");
+    let nonce = std::env::var("TASK8_EXTERNAL_DND_NONCE")
+        .expect("parent must provide the external X11 run nonce");
+    let (title, _) = external_dnd_titles(&nonce);
+    std::fs::write(root.join("source-pid"), std::process::id().to_string()).unwrap();
     let window = gtk::Window::builder()
         .title(&title)
         .default_width(300)
@@ -223,6 +330,13 @@ fn external_source(root: &Path) {
     window.close();
 }
 
+fn external_dnd_titles(nonce: &str) -> (String, String) {
+    (
+        format!("Task8 external source {nonce}"),
+        format!("Task8 drop destination {nonce}"),
+    )
+}
+
 #[gtk::test]
 fn slice3_external_move_waits_for_terminal_ack_over_real_x11() {
     adw::init().unwrap();
@@ -236,6 +350,13 @@ fn slice3_external_move_waits_for_terminal_ack_over_real_x11() {
         return;
     }
     let x = X11::new();
+    let nonce_file = tempfile::NamedTempFile::new().unwrap();
+    let run_nonce = nonce_file
+        .path()
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("tempfile nonce must be UTF-8")
+        .to_owned();
     for (case_index, mode) in [
         "success",
         "cancel",
@@ -253,9 +374,8 @@ fn slice3_external_move_waits_for_terminal_ack_over_real_x11() {
         let destination = fixture.path().join("destination");
         std::fs::create_dir(&destination).unwrap();
         let view = FileView::new(Location::from_local_path(&destination));
-        let case_token = format!("{}-{case_index}", std::process::id());
-        let source_title = format!("Task8 external source {case_token}");
-        let destination_title = format!("Task8 drop destination {case_token}");
+        let case_nonce = format!("{run_nonce}-{case_index}");
+        let (source_title, destination_title) = external_dnd_titles(&case_nonce);
         let window = gtk::Window::builder()
             .title(&destination_title)
             .default_width(300)
@@ -274,16 +394,28 @@ fn slice3_external_move_waits_for_terminal_ack_over_real_x11() {
             ])
             .env("TASK8_EXTERNAL_DND_SOURCE", fixture.path())
             .env("TASK8_EXTERNAL_DND_MODE", mode)
-            .env("TASK8_EXTERNAL_DND_SOURCE_TITLE", &source_title)
+            .env("TASK8_EXTERNAL_DND_NONCE", &case_nonce)
             .spawn()
             .unwrap());
         let end = Instant::now() + Duration::from_secs(10);
-        while x.window(&source_title).is_none() || !view.command_availability().can_paste {
+        let (source_window, destination_window) = loop {
+            let source_pid = std::fs::read_to_string(fixture.path().join("source-pid"))
+                .ok()
+                .and_then(|pid| pid.trim().parse().ok());
+            let source_window = x.window(&source_title, source_pid);
+            let destination_window = x.window(&destination_title, Some(std::process::id()));
+            if let (Some(source_window), Some(destination_window), Some(_)) =
+                (source_window, destination_window, source_pid)
+            {
+                if view.command_availability().can_paste {
+                    break (source_window, destination_window);
+                }
+            }
             pump_for(Duration::from_millis(10));
             assert!(Instant::now() < end);
-        }
-        x.place(x.window(&source_title).unwrap(), 0);
-        x.place(x.window(&destination_title).unwrap(), 400);
+        };
+        x.place(source_window, 0);
+        x.place(destination_window, 400);
         x.motion(80, 200);
         x.button(true);
         for (a, b) in [(110, 200), (160, 210), (350, 220), (500, 250), (550, 300)] {
