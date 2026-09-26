@@ -1,4 +1,5 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -9,9 +10,9 @@ use gtk::{
     ToggleButton,
 };
 
-use crate::core::sidebar_model::SidebarSection;
 use crate::core::contracts::{DirectoryRequest, PageRequest, RequestId, RequestOutcome};
 use crate::core::ports::DirectoryRepository;
+use crate::core::sidebar_model::SidebarSection;
 use crate::core::{Location, OperationManager};
 use crate::core::{SidebarLocation, SidebarModel, SidebarNode};
 use crate::infrastructure::gio_directory::GioDirectoryRepository;
@@ -31,6 +32,14 @@ pub enum SidebarAction {
     OpenOperations,
 }
 
+struct PendingFocus {
+    key: String,
+    occurrence: Option<Vec<String>>,
+    token: u64,
+    pending_requests: BTreeSet<RequestId>,
+    fallback: GtkBox,
+}
+
 #[derive(Clone)]
 pub struct Sidebar {
     pub widget: ScrolledWindow,
@@ -43,6 +52,8 @@ pub struct Sidebar {
     mount_parent: gtk::Window,
     operation_manager: Rc<RefCell<Option<OperationManager>>>,
     operation_summary: Rc<RefCell<Option<String>>>,
+    pending_focus: Rc<RefCell<Option<PendingFocus>>>,
+    next_focus_token: Rc<Cell<u64>>,
 }
 
 impl Sidebar {
@@ -85,6 +96,8 @@ impl Sidebar {
             mount_parent: mount_parent.clone().upcast(),
             operation_manager: Rc::new(RefCell::new(None)),
             operation_summary: Rc::new(RefCell::new(None)),
+            pending_focus: Rc::new(RefCell::new(None)),
+            next_focus_token: Rc::new(Cell::new(1)),
         };
         sidebar.refresh();
 
@@ -117,6 +130,16 @@ impl Sidebar {
         let focused_name = gtk::prelude::GtkWindowExt::focus(&self.mount_parent)
             .filter(|widget| widget.is_ancestor(&self.widget))
             .map(|widget| widget.widget_name());
+        let focus_token = self.next_focus_token.get();
+        self.next_focus_token
+            .set(focus_token.wrapping_add(1).max(1));
+        *self.pending_focus.borrow_mut() = focused_name.clone().map(|key| PendingFocus {
+            occurrence: Self::focus_occurrence(&key),
+            key: key.to_string(),
+            token: focus_token,
+            pending_requests: BTreeSet::new(),
+            fallback: self.content.clone(),
+        });
         while let Some(child) = self.content.first_child() {
             self.content.remove(&child);
         }
@@ -179,9 +202,9 @@ impl Sidebar {
                     rows.append(&device_rows);
                 }
                 if has_devices && index > 0 {
-                    self.append_node(&device_rows, node, 1, &section.title);
+                    self.append_node(&device_rows, node, 1, &section.title, focus_token);
                 } else {
-                    self.append_node(&rows, node, 0, &section.title);
+                    self.append_node(&rows, node, 0, &section.title, focus_token);
                 }
             }
 
@@ -280,24 +303,93 @@ impl Sidebar {
                 self.content.append(&button);
             }
         }
-        if let Some(name) = focused_name {
-            fn restore(widget: &gtk::Widget, name: &str) -> bool {
-                if widget.widget_name() == name && widget.is_visible() && widget.is_sensitive() {
-                    return widget.grab_focus();
-                }
-                let mut child = widget.first_child();
-                while let Some(next) = child {
-                    if restore(&next, name) {
-                        return true;
-                    }
-                    child = next.next_sibling();
-                }
-                false
-            }
-            if !restore(self.content.upcast_ref(), &name) {
-                self.content.child_focus(gtk::DirectionType::TabForward);
-            }
+        Self::restore_pending_focus(&self.pending_focus, focus_token);
+    }
+
+    fn focus_occurrence(key: &str) -> Option<Vec<String>> {
+        ["sidebar-expand-", "sidebar-location-"]
+            .iter()
+            .find_map(|prefix| key.strip_prefix(prefix))
+            .and_then(|occurrence| serde_json::from_str(occurrence).ok())
+    }
+
+    fn restore_focus(widget: &gtk::Widget, key: &str) -> bool {
+        if widget.widget_name() == key && widget.is_visible() && widget.is_sensitive() {
+            return widget.grab_focus();
         }
+        let mut child = widget.first_child();
+        while let Some(next) = child {
+            if Self::restore_focus(&next, key) {
+                return true;
+            }
+            child = next.next_sibling();
+        }
+        false
+    }
+
+    fn restore_pending_focus(pending_focus: &Rc<RefCell<Option<PendingFocus>>>, token: u64) {
+        let Some((key, fallback, has_pending_requests)) = pending_focus
+            .borrow()
+            .as_ref()
+            .filter(|pending| pending.token == token)
+            .map(|pending| {
+                (
+                    pending.key.clone(),
+                    pending.fallback.clone(),
+                    !pending.pending_requests.is_empty(),
+                )
+            })
+        else {
+            return;
+        };
+        if Self::restore_focus(fallback.upcast_ref(), &key) {
+            *pending_focus.borrow_mut() = None;
+        } else if !has_pending_requests {
+            fallback.child_focus(gtk::DirectionType::TabForward);
+            *pending_focus.borrow_mut() = None;
+        }
+    }
+
+    fn register_pending_focus_request(
+        pending_focus: &Rc<RefCell<Option<PendingFocus>>>,
+        token: u64,
+        occurrence: &[String],
+        request: RequestId,
+    ) {
+        let mut pending_focus = pending_focus.borrow_mut();
+        let Some(pending) = pending_focus.as_mut() else {
+            return;
+        };
+        if pending.token == token
+            && pending.occurrence.as_ref().is_some_and(|target| {
+                target.len() > occurrence.len() && target.starts_with(occurrence)
+            })
+        {
+            pending.pending_requests.insert(request);
+        }
+    }
+
+    fn complete_pending_focus_request(
+        pending_focus: &Rc<RefCell<Option<PendingFocus>>>,
+        token: u64,
+        request: RequestId,
+    ) {
+        if let Some(pending) = pending_focus
+            .borrow_mut()
+            .as_mut()
+            .filter(|pending| pending.token == token)
+        {
+            pending.pending_requests.remove(&request);
+        }
+    }
+
+    fn cancel_pending_focus_request(
+        pending_focus: &Rc<RefCell<Option<PendingFocus>>>,
+        token: u64,
+        request: RequestId,
+    ) {
+        Self::complete_pending_focus_request(pending_focus, token, request);
+        Self::restore_pending_focus(pending_focus, token);
     }
 
     pub fn set_operation_manager(&self, manager: OperationManager) {
@@ -365,7 +457,14 @@ impl Sidebar {
         self.refresh();
     }
 
-    fn append_node(&self, parent: &GtkBox, node: SidebarNode, depth: i32, section: &str) {
+    fn append_node(
+        &self,
+        parent: &GtkBox,
+        node: SidebarNode,
+        depth: i32,
+        section: &str,
+        focus_token: u64,
+    ) {
         Self::append_node_inner(
             parent,
             node,
@@ -376,6 +475,8 @@ impl Sidebar {
             self.on_action.clone(),
             self.active_path.clone(),
             self.mount_parent.clone(),
+            self.pending_focus.clone(),
+            focus_token,
         );
     }
 
@@ -389,6 +490,8 @@ impl Sidebar {
         on_action: Rc<dyn Fn(SidebarAction)>,
         active_path: Rc<RefCell<Option<Location>>>,
         mount_parent: gtk::Window,
+        pending_focus: Rc<RefCell<Option<PendingFocus>>>,
+        focus_token: u64,
     ) {
         // A URI may occur in several sections or under several ancestors in
         // one section. Keep the whole ancestry, without position indices that
@@ -432,16 +535,20 @@ impl Sidebar {
             let children_mount_parent = mount_parent.clone();
             let pending_request = Rc::new(RefCell::new(None::<(RequestId, gio::Cancellable)>));
             let unrealized_request = pending_request.clone();
+            let focus_for_unrealize = pending_focus.clone();
             expander.connect_unrealize(move |_| {
-                if let Some((_, cancellable)) = unrealized_request.borrow_mut().take() {
+                if let Some((request, cancellable)) = unrealized_request.borrow_mut().take() {
                     cancellable.cancel();
+                    Self::cancel_pending_focus_request(&focus_for_unrealize, focus_token, request);
                 }
             });
+            let focus_for_toggle = pending_focus.clone();
             expander.connect_toggled(move |button| {
                 let expanded = button.is_active();
                 if !expanded {
-                    if let Some((_, cancellable)) = pending_request.borrow_mut().take() {
+                    if let Some((request, cancellable)) = pending_request.borrow_mut().take() {
                         cancellable.cancel();
+                        Self::cancel_pending_focus_request(&focus_for_toggle, focus_token, request);
                     }
                 }
                 children_for_toggle.set_visible(expanded);
@@ -463,10 +570,19 @@ impl Sidebar {
                     let request = DirectoryRequest {
                         id: RequestId::allocate(),
                         location: child_location.location().clone(),
-                        page: PageRequest { offset: 0, limit: usize::MAX },
+                        page: PageRequest {
+                            offset: 0,
+                            limit: usize::MAX,
+                        },
                         cancellable: cancellable.clone(),
                     };
                     *pending_request.borrow_mut() = Some((request.id, cancellable.clone()));
+                    Self::register_pending_focus_request(
+                        &focus_for_toggle,
+                        focus_token,
+                        &occurrence,
+                        request.id,
+                    );
                     let pending_result = pending_request.clone();
                     let result_button = button.clone();
                     let children_after_result = children_for_toggle.clone();
@@ -476,30 +592,48 @@ impl Sidebar {
                     let active_after_result = children_active_path.clone();
                     let parent_after_result = children_mount_parent.clone();
                     let occurrence_after_result = occurrence.clone();
-                    children_repository.list(request, Box::new(move |completion| {
-                        let current = pending_result.borrow().as_ref().map(|(id, _)| *id);
-                        if current != Some(completion.id)
-                            || cancellable.is_cancelled()
-                            || !result_button.is_active()
-                        {
-                            return;
-                        }
-                        pending_result.borrow_mut().take();
-                        let RequestOutcome::Succeeded(snapshot) = completion.outcome else {
-                            return;
-                        };
-                        Self::append_children(
-                            &children_after_result,
-                            SidebarModel::children_from_snapshot(&snapshot),
-                            depth,
-                            occurrence_after_result.clone(),
-                            model_after_result.clone(),
-                            repository_after_result.clone(),
-                            action_after_result.clone(),
-                            active_after_result.clone(),
-                            parent_after_result.clone(),
-                        );
-                    }));
+                    let focus_after_result = focus_for_toggle.clone();
+                    children_repository.list(
+                        request,
+                        Box::new(move |completion| {
+                            let current = pending_result.borrow().as_ref().map(|(id, _)| *id);
+                            if current != Some(completion.id)
+                                || cancellable.is_cancelled()
+                                || !result_button.is_active()
+                            {
+                                Self::cancel_pending_focus_request(
+                                    &focus_after_result,
+                                    focus_token,
+                                    completion.id,
+                                );
+                                return;
+                            }
+                            pending_result.borrow_mut().take();
+                            Self::complete_pending_focus_request(
+                                &focus_after_result,
+                                focus_token,
+                                completion.id,
+                            );
+                            let RequestOutcome::Succeeded(snapshot) = completion.outcome else {
+                                Self::restore_pending_focus(&focus_after_result, focus_token);
+                                return;
+                            };
+                            Self::append_children(
+                                &children_after_result,
+                                SidebarModel::children_from_snapshot(&snapshot),
+                                depth,
+                                occurrence_after_result.clone(),
+                                model_after_result.clone(),
+                                repository_after_result.clone(),
+                                action_after_result.clone(),
+                                active_after_result.clone(),
+                                parent_after_result.clone(),
+                                focus_after_result.clone(),
+                                focus_token,
+                            );
+                            Self::restore_pending_focus(&focus_after_result, focus_token);
+                        }),
+                    );
                 }
             });
             if initially_expanded {
@@ -556,6 +690,8 @@ impl Sidebar {
         on_action: Rc<dyn Fn(SidebarAction)>,
         active_path: Rc<RefCell<Option<Location>>>,
         mount_parent: gtk::Window,
+        pending_focus: Rc<RefCell<Option<PendingFocus>>>,
+        focus_token: u64,
     ) {
         for child in children {
             Self::append_node_inner(
@@ -568,6 +704,8 @@ impl Sidebar {
                 on_action.clone(),
                 active_path.clone(),
                 mount_parent.clone(),
+                pending_focus.clone(),
+                focus_token,
             );
         }
     }

@@ -78,12 +78,41 @@ fn slice4_sidebar_duplicate_home_restores_the_user_section_occurrence() {
 #[gtk::test]
 fn slice4_sidebar_duplicate_tree_expander_restores_its_ancestor_occurrence() {
     use zorin_explorer::{
-        core::sidebar_model::{SidebarModel, SidebarPreferences},
+        core::{
+            contracts::{Capability, CapabilitySnapshot, EntryKind, EntrySnapshot},
+            sidebar_model::{SidebarModel, SidebarPreferences},
+        },
+        infrastructure::mock_provider::{MockConfig, MockProvider},
         ui::sidebar::Sidebar,
     };
     let directory = tempfile::tempdir().unwrap();
     let child = directory.path().join("Child");
-    std::fs::create_dir_all(child.join("Grandchild")).unwrap();
+    let context = glib::MainContext::default();
+    let provider = Rc::new(MockProvider::new(context.clone(), MockConfig::default()));
+    let list_capabilities = CapabilitySnapshot {
+        version: 1,
+        supported: [Capability::List].into_iter().collect(),
+        stable_order: true,
+        ..Default::default()
+    };
+    provider.set_directory(
+        Location::from_local_path(directory.path()),
+        vec![EntrySnapshot {
+            location: Location::from_local_path(&child),
+            display_name: "Child".into(),
+            kind: EntryKind::Directory,
+            size: None,
+            modified: None,
+            content_type: None,
+            capabilities: list_capabilities,
+        }],
+        CapabilitySnapshot {
+            version: 1,
+            supported: [Capability::List].into_iter().collect(),
+            stable_order: true,
+            ..Default::default()
+        },
+    );
     let mut preferences = SidebarPreferences::in_memory();
     // Put the direct pin before the same URI nested beneath the Home pin.
     preferences.pin_location(Location::from_local_path(&child));
@@ -94,7 +123,7 @@ fn slice4_sidebar_duplicate_tree_expander_restores_its_ancestor_occurrence() {
         directory.path().into(),
     )));
     let window = gtk::Window::new();
-    let sidebar = Sidebar::new(model, &window, |_| {});
+    let sidebar = Sidebar::new_with_repository(model, provider.clone(), &window, |_| {});
     window.set_child(Some(&sidebar.widget));
     window.present();
     let rows = sidebar_section_rows(&sidebar.widget, "Quick access");
@@ -107,6 +136,10 @@ fn slice4_sidebar_duplicate_tree_expander_restores_its_ancestor_occurrence() {
         .downcast::<gtk::ToggleButton>()
         .unwrap();
     home_expander.set_active(true);
+    provider.advance(1);
+    while context.pending() {
+        context.iteration(false);
+    }
     let nested = descendants(&home_row)
         .into_iter()
         .find_map(|w| {
@@ -118,6 +151,10 @@ fn slice4_sidebar_duplicate_tree_expander_restores_its_ancestor_occurrence() {
     nested.set_active(true);
     nested.grab_focus();
     sidebar.refresh();
+    provider.advance(1);
+    while context.pending() {
+        context.iteration(false);
+    }
     let refreshed_rows = sidebar_section_rows(&sidebar.widget, "Quick access");
     let refreshed_home = refreshed_rows.last_child().unwrap();
     let focused = gtk::prelude::GtkWindowExt::focus(&window).unwrap();
