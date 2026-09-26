@@ -545,55 +545,60 @@ fn run(
     received.take()
 }
 #[test]
-fn local_copy_move_conflict_and_delete_preserve_actual_effects() {
-    let dir = tempfile::tempdir().unwrap();
-    let source = dir.path().join("source");
-    let target = dir.path().join("target");
-    let moved = dir.path().join("moved");
-    std::fs::write(&source, "data").unwrap();
-    let events = run(
-        MutationKind::Copy,
-        vec![Location::from_local_path(&source)],
-        Some(Location::from_local_path(&target)),
-    );
-    assert!(matches!(
-        events.last(),
-        Some(OperationEvent::Succeeded { .. })
-    ));
-    assert_eq!(std::fs::read_to_string(&target).unwrap(), "data");
-    std::fs::write(&target, "keep").unwrap();
-    let events = run(
-        MutationKind::Move,
-        vec![Location::from_local_path(&source)],
-        Some(Location::from_local_path(&target)),
-    );
-    assert!(
-        matches!(events.last(), Some(OperationEvent::Failed { error, completion, .. }) if error.kind == OperationErrorKind::Conflict && completion.effect == MutationEffect::Unchanged)
-    );
-    assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
-    let events = run(
-        MutationKind::Move,
-        vec![Location::from_local_path(&source)],
-        Some(Location::from_local_path(&moved)),
-    );
-    assert!(matches!(
-        events.last(),
-        Some(OperationEvent::Succeeded { .. })
-    ));
-    assert!(!source.exists());
-    assert!(moved.exists());
-    let events = run(
-        MutationKind::Delete,
-        vec![
-            Location::from_local_path(&moved),
-            Location::from_local_path(&source),
-        ],
-        None,
-    );
-    assert!(
-        matches!(events.last(), Some(OperationEvent::Failed { completion, .. }) if completion.effect == MutationEffect::PartiallyChanged && completion.completed == [Location::from_local_path(&moved)])
-    );
-    assert!(!moved.exists());
+fn local_copy_move_conflict_and_delete_preserve_actual_effects_after_owner_teardown() {
+    // `run` drops its adapter and owner context immediately after accepting the
+    // terminal event. Repeating the full lifecycle catches a worker that
+    // publishes terminal state before it has dropped its GIO objects.
+    for _ in 0..64 {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        let target = dir.path().join("target");
+        let moved = dir.path().join("moved");
+        std::fs::write(&source, "data").unwrap();
+        let events = run(
+            MutationKind::Copy,
+            vec![Location::from_local_path(&source)],
+            Some(Location::from_local_path(&target)),
+        );
+        assert!(matches!(
+            events.last(),
+            Some(OperationEvent::Succeeded { .. })
+        ));
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "data");
+        std::fs::write(&target, "keep").unwrap();
+        let events = run(
+            MutationKind::Move,
+            vec![Location::from_local_path(&source)],
+            Some(Location::from_local_path(&target)),
+        );
+        assert!(
+            matches!(events.last(), Some(OperationEvent::Failed { error, completion, .. }) if error.kind == OperationErrorKind::Conflict && completion.effect == MutationEffect::Unchanged)
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
+        let events = run(
+            MutationKind::Move,
+            vec![Location::from_local_path(&source)],
+            Some(Location::from_local_path(&moved)),
+        );
+        assert!(matches!(
+            events.last(),
+            Some(OperationEvent::Succeeded { .. })
+        ));
+        assert!(!source.exists());
+        assert!(moved.exists());
+        let events = run(
+            MutationKind::Delete,
+            vec![
+                Location::from_local_path(&moved),
+                Location::from_local_path(&source),
+            ],
+            None,
+        );
+        assert!(
+            matches!(events.last(), Some(OperationEvent::Failed { completion, .. }) if completion.effect == MutationEffect::PartiallyChanged && completion.completed == [Location::from_local_path(&moved)])
+        );
+        assert!(!moved.exists());
+    }
 }
 #[test]
 fn local_adapter_rejects_remote_requests_without_mutation() {

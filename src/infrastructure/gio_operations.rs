@@ -144,9 +144,10 @@ impl GioOperations {
         mut sink: OperationSink,
     ) {
         let (send, mut receive) = futures_channel::mpsc::unbounded();
+        let join_guard = send.clone();
         let elevated = self.elevated.lock().unwrap().remove(&request.id);
         let uri_operations = self.uri_operations;
-        std::thread::spawn(move || {
+        let worker = std::thread::spawn(move || {
             let mut sink = |event| {
                 let _ = send.unbounded_send(event);
             };
@@ -156,8 +157,26 @@ impl GioOperations {
                 execute_inner_mode(request, decision, uri_operations, &mut sink);
             }
         });
+        std::thread::spawn(move || {
+            // This is deliberately a plain Rust thread. `gio::spawn_blocking`
+            // creates a GTask whose completion can outlive this owner context.
+            let _ = worker.join();
+            drop(join_guard);
+        });
         self.context.spawn_local(async move {
+            let mut terminal = None;
             while let Some(event) = receive.next().await {
+                if event.is_terminal() {
+                    terminal = Some(event);
+                } else if terminal.is_none() {
+                    sink(event);
+                }
+            }
+            // A terminal event means the operation is decided, not that the
+            // worker has released its GIO objects. The plain Rust join bridge
+            // keeps the stream open until that worker exits, without creating
+            // a GTask on this owner context.
+            if let Some(event) = terminal {
                 sink(event);
             }
         });
