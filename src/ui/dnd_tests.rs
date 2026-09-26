@@ -67,7 +67,7 @@ impl X11 {
             x
         }
     }
-    fn window(&self, title: &str) -> Option<c_ulong> {
+    fn windows_named(&self, title: &str) -> Vec<c_ulong> {
         unsafe {
             let root: unsafe extern "C" fn(*mut c_void) -> c_ulong =
                 self.symbol("XDefaultRootWindow");
@@ -92,13 +92,13 @@ impl X11 {
                 &mut children,
                 &mut count,
             );
-            let mut found = None;
+            let mut found = Vec::new();
             for i in 0..count as usize {
                 let window = *children.add(i);
                 let mut name = std::ptr::null_mut();
                 if fetch(self.display, window, &mut name) != 0 && !name.is_null() {
                     if std::ffi::CStr::from_ptr(name).to_string_lossy() == title {
-                        found = Some(window);
+                        found.push(window);
                     }
                     free(name.cast());
                 }
@@ -108,6 +108,14 @@ impl X11 {
             }
             found
         }
+    }
+    fn window(&self, title: &str) -> Option<c_ulong> {
+        let windows = self.windows_named(title);
+        assert!(
+            windows.len() <= 1,
+            "X11 root scan found multiple toplevels titled {title:?}: {windows:?}; window selection is ambiguous"
+        );
+        windows.into_iter().next()
     }
     fn place(&self, window: c_ulong, x: i32) {
         unsafe {
@@ -160,8 +168,10 @@ impl Drop for X11 {
 }
 
 fn external_source(root: &Path) {
+    let title = std::env::var("TASK8_EXTERNAL_DND_SOURCE_TITLE")
+        .expect("parent must provide the external X11 source title");
     let window = gtk::Window::builder()
-        .title("Task8 external source")
+        .title(&title)
         .default_width(300)
         .default_height(300)
         .build();
@@ -226,22 +236,28 @@ fn slice3_external_move_waits_for_terminal_ack_over_real_x11() {
         return;
     }
     let x = X11::new();
-    for mode in [
+    for (case_index, mode) in [
         "success",
         "cancel",
         "failure",
         "conflict_skip",
         "partial",
         "partial_then_success",
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let success = mode == "success";
         let fixture = tempfile::tempdir().unwrap();
         std::fs::write(fixture.path().join("source.txt"), "external data").unwrap();
         let destination = fixture.path().join("destination");
         std::fs::create_dir(&destination).unwrap();
         let view = FileView::new(Location::from_local_path(&destination));
+        let case_token = format!("{}-{case_index}", std::process::id());
+        let source_title = format!("Task8 external source {case_token}");
+        let destination_title = format!("Task8 drop destination {case_token}");
         let window = gtk::Window::builder()
-            .title("Task8 drop destination")
+            .title(&destination_title)
             .default_width(300)
             .default_height(300)
             .build();
@@ -258,16 +274,16 @@ fn slice3_external_move_waits_for_terminal_ack_over_real_x11() {
             ])
             .env("TASK8_EXTERNAL_DND_SOURCE", fixture.path())
             .env("TASK8_EXTERNAL_DND_MODE", mode)
+            .env("TASK8_EXTERNAL_DND_SOURCE_TITLE", &source_title)
             .spawn()
             .unwrap());
         let end = Instant::now() + Duration::from_secs(10);
-        while x.window("Task8 external source").is_none() || !view.command_availability().can_paste
-        {
+        while x.window(&source_title).is_none() || !view.command_availability().can_paste {
             pump_for(Duration::from_millis(10));
             assert!(Instant::now() < end);
         }
-        x.place(x.window("Task8 external source").unwrap(), 0);
-        x.place(x.window("Task8 drop destination").unwrap(), 400);
+        x.place(x.window(&source_title).unwrap(), 0);
+        x.place(x.window(&destination_title).unwrap(), 400);
         x.motion(80, 200);
         x.button(true);
         for (a, b) in [(110, 200), (160, 210), (350, 220), (500, 250), (550, 300)] {
