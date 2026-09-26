@@ -706,6 +706,9 @@ impl FileView {
     }
 
     pub fn go_back(&self) {
+        if !self.navigation.state.borrow().history.can_go_back() {
+            return;
+        }
         self.clear_search_results();
         self.cancel_stream_append_waiter();
         self.metadata_target.cancel_metadata_sort_waiter();
@@ -721,6 +724,9 @@ impl FileView {
     }
 
     pub fn go_forward(&self) {
+        if !self.navigation.state.borrow().history.can_go_forward() {
+            return;
+        }
         self.clear_search_results();
         self.cancel_stream_append_waiter();
         self.metadata_target.cancel_metadata_sort_waiter();
@@ -3897,6 +3903,13 @@ mod tests {
             1,
             "a completion during the post-final-flush sort must remain deferred"
         );
+        assert!(
+            !view.tab_state().borrow().history.can_go_back()
+                && !view.tab_state().borrow().history.can_go_forward(),
+            "the initial location has neither history direction available"
+        );
+        view.go_back();
+        view.go_forward();
 
         while sorted.pending() > 0 || view.pending_visible_metadata.borrow().len() > 0 {
             assert!(std::time::Instant::now() < deadline);
