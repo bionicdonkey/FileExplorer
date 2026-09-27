@@ -323,7 +323,7 @@ mod tests {
     #[test]
     fn submitted_callback_observes_executor_context_as_thread_default() {
         let _serial = serial_test_guard();
-        let executor = GioExecutor::shared();
+        let executor = GioExecutor::isolated_for_tests();
         let expected_context = executor.context.clone();
         let (sender, receiver) = mpsc::sync_channel(1);
 
@@ -341,7 +341,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_executor_remains_process_wide_until_explicit_shutdown() {
+    fn shared_executor_remains_process_wide_while_active() {
         let _serial = serial_test_guard();
         let first = GioExecutor::shared();
         let first_weak = Arc::downgrade(&first);
@@ -351,7 +351,6 @@ mod tests {
         let retained = first_weak
             .upgrade()
             .is_some_and(|first| Arc::ptr_eq(&first, &second));
-        second.shutdown_for_tests();
 
         assert!(retained);
     }
@@ -359,7 +358,7 @@ mod tests {
     #[test]
     fn shutdown_cancels_queued_work_and_joins_after_completion_callbacks_run() {
         let _serial = serial_test_guard();
-        let executor = GioExecutor::shared();
+        let executor = GioExecutor::isolated_for_tests();
         let (started, started_receiver) = mpsc::sync_channel(1);
         let callbacks = Arc::new(AtomicUsize::new(0));
         let cancelled = Arc::new(AtomicUsize::new(0));

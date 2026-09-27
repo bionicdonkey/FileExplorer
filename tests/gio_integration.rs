@@ -690,6 +690,172 @@ fn directory_cancellation_retains_executor_request_until_terminal_dto_is_release
     }
     executor.shutdown_for_tests();
 }
+
+#[test]
+fn executor_shutdown_cancels_parallel_owner_requests_without_stale_ui_callbacks() {
+    use std::{
+        sync::{
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+            mpsc, Arc,
+        },
+        time::Duration,
+    };
+    use zorin_explorer::{
+        core::ports::{DirectoryRepository, SearchRepository},
+        infrastructure::{
+            gio_directory::GioDirectoryRepository,
+            gio_executor::{CancellationSignal, GioExecutor},
+            gio_operations::GioOperations,
+            tracker_search::TrackerSearchRepository,
+        },
+    };
+
+    const REQUESTS_PER_CLASS: u64 = 16;
+
+    let executor = GioExecutor::isolated_for_tests();
+    let release_gate = Arc::new(AtomicBool::new(false));
+    let (started, started_receiver) = mpsc::sync_channel(1);
+    executor
+        .submit(CancellationSignal::new(), {
+            let release_gate = release_gate.clone();
+            move |request| {
+                started.send(()).unwrap();
+                while !release_gate.load(Ordering::SeqCst) {
+                    std::thread::yield_now();
+                }
+                request.complete();
+            }
+        })
+        .unwrap();
+    started_receiver
+        .recv_timeout(Duration::from_secs(1))
+        .expect("gate request must occupy the executor before owner teardown");
+
+    let fixture = tempfile::tempdir().unwrap();
+    let source = fixture.path().join("preserve-after-owner-close.txt");
+    std::fs::write(&source, "must survive cancelled operations").unwrap();
+    let location = Location::from_local_path(&source);
+    let directory = Location::from_local_path(fixture.path());
+    let stale_ui_mutations = Arc::new(AtomicUsize::new(0));
+    let mut owner_cancellables = Vec::new();
+
+    {
+        let context = glib::MainContext::new();
+        let _owner = context.acquire().unwrap();
+        let operations = GioOperations::with_executor(context.clone(), executor.clone());
+        for index in 0..REQUESTS_PER_CLASS {
+            let cancellable = gio::Cancellable::new();
+            let stale_ui_mutations = stale_ui_mutations.clone();
+            operations.submit(
+                OperationRequest {
+                    id: OperationId(index),
+                    kind: MutationKind::Delete,
+                    sources: vec![location.clone()],
+                    destination: None,
+                    explicit_target: None,
+                    capability_version: 1,
+                    cancellable: cancellable.clone(),
+                },
+                Box::new(move |_| {
+                    stale_ui_mutations.fetch_add(1, Ordering::SeqCst);
+                }),
+            );
+            owner_cancellables.push(cancellable);
+        }
+    }
+
+    {
+        let context = glib::MainContext::new();
+        let _owner = context.acquire().unwrap();
+        let repository = GioDirectoryRepository::with_executor(context.clone(), executor.clone());
+        for index in 0..REQUESTS_PER_CLASS {
+            let cancellable = gio::Cancellable::new();
+            let stale_ui_mutations = stale_ui_mutations.clone();
+            repository.list(
+                DirectoryRequest {
+                    id: RequestId(100 + index),
+                    location: directory.clone(),
+                    page: PageRequest {
+                        offset: 0,
+                        limit: usize::MAX,
+                    },
+                    cancellable: cancellable.clone(),
+                },
+                Box::new(move |_| {
+                    stale_ui_mutations.fetch_add(1, Ordering::SeqCst);
+                }),
+            );
+            owner_cancellables.push(cancellable);
+        }
+    }
+
+    {
+        let context = glib::MainContext::new();
+        let _owner = context.acquire().unwrap();
+        let repository = GioDirectoryRepository::with_executor(context.clone(), executor.clone());
+        for index in 0..REQUESTS_PER_CLASS {
+            let cancellable = gio::Cancellable::new();
+            let stale_ui_mutations = stale_ui_mutations.clone();
+            repository.inspect_visible_metadata(
+                VisibleMetadataRequest {
+                    id: RequestId(200 + index),
+                    locations: vec![location.clone()],
+                    cancellable: cancellable.clone(),
+                },
+                Box::new(move |_| {
+                    stale_ui_mutations.fetch_add(1, Ordering::SeqCst);
+                }),
+            );
+            owner_cancellables.push(cancellable);
+        }
+    }
+
+    {
+        let context = glib::MainContext::new();
+        let _owner = context.acquire().unwrap();
+        let repository = TrackerSearchRepository::with_executor(context.clone(), executor.clone());
+        for index in 0..REQUESTS_PER_CLASS {
+            let cancellable = gio::Cancellable::new();
+            let stale_ui_mutations = stale_ui_mutations.clone();
+            repository.search(
+                SearchRequest {
+                    id: RequestId(300 + index),
+                    scope: SearchScope::local_fallback(directory.clone()),
+                    query: "preserve".into(),
+                    mode: SearchMode::Filename,
+                    cancellable: cancellable.clone(),
+                },
+                Box::new(move |_| {
+                    stale_ui_mutations.fetch_add(1, Ordering::SeqCst);
+                }),
+            );
+            owner_cancellables.push(cancellable);
+        }
+    }
+
+    assert_eq!(
+        executor.active_request_count_for_tests(),
+        1 + (REQUESTS_PER_CLASS * 4) as usize,
+        "all executor-owned native requests must be live before owner contexts close"
+    );
+    for cancellable in owner_cancellables {
+        cancellable.cancel();
+    }
+    release_gate.store(true, Ordering::SeqCst);
+    executor.shutdown_for_tests();
+
+    assert_eq!(executor.active_request_count_for_tests(), 0);
+    assert_eq!(
+        stale_ui_mutations.load(Ordering::SeqCst),
+        0,
+        "callbacks queued for closed owner contexts must not mutate stale UI state"
+    );
+    assert!(
+        source.exists(),
+        "a cancelled operation must not mutate its source after owner teardown"
+    );
+}
+
 fn run(
     kind: MutationKind,
     sources: Vec<Location>,
