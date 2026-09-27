@@ -513,7 +513,7 @@ fn directory_cancellation_errors_and_unstable_paging_are_explicit() {
 fn directory_cancellation_retains_executor_request_until_terminal_dto_is_released() {
     use std::{
         sync::{
-            atomic::{AtomicBool, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
             mpsc, Arc,
         },
         time::Duration,
@@ -565,6 +565,9 @@ fn directory_cancellation_retains_executor_request_until_terminal_dto_is_release
     let adapter = GioDirectoryRepository::with_executor(context.clone(), executor.clone());
     let received = Rc::new(RefCell::new(None));
     let out = received.clone();
+    let active_at_terminal_delivery = Arc::new(AtomicUsize::new(usize::MAX));
+    let observed_active = active_at_terminal_delivery.clone();
+    let terminal_executor = executor.clone();
     adapter.list(
         DirectoryRequest {
             id: RequestId(88),
@@ -575,12 +578,17 @@ fn directory_cancellation_retains_executor_request_until_terminal_dto_is_release
             },
             cancellable: cancelled.clone(),
         },
-        Box::new(move |completion| *out.borrow_mut() = Some(completion.outcome)),
+        Box::new(move |completion| {
+            observed_active.store(
+                terminal_executor.active_request_count_for_tests(),
+                Ordering::SeqCst,
+            );
+            *out.borrow_mut() = Some(completion.outcome);
+        }),
     );
     cancelled.cancel();
     assert_eq!(executor.active_request_count_for_tests(), 2);
 
-    release_gate.store(true, Ordering::SeqCst);
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while received.borrow().is_none() {
         context.iteration(false);
@@ -591,6 +599,12 @@ fn directory_cancellation_retains_executor_request_until_terminal_dto_is_release
         received.borrow().as_ref(),
         Some(RequestOutcome::Cancelled)
     ));
+    assert_eq!(
+        active_at_terminal_delivery.load(Ordering::SeqCst),
+        1,
+        "only the deliberately held request may remain when the terminal DTO is delivered"
+    );
+    release_gate.store(true, Ordering::SeqCst);
     while executor.active_request_count_for_tests() != 0 {
         assert!(std::time::Instant::now() < deadline);
         std::thread::yield_now();

@@ -6,13 +6,13 @@ use crate::{
 };
 use futures_util::StreamExt;
 use gio::prelude::*;
-use std::{cell::Cell, rc::Rc, sync::Arc};
+use std::{cell::RefCell, rc::Rc, sync::Arc};
 
 #[derive(Clone)]
 pub struct GioDirectoryRepository {
     context: glib::MainContext,
     executor: Arc<GioExecutor>,
-    mount_retry_enabled: Rc<Cell<bool>>,
+    mount_operation: Rc<RefCell<Option<Rc<dyn Fn() -> gio::MountOperation>>>>,
 }
 
 /// The caller owns `Location` and its `gio::File`; the executor receives only
@@ -211,6 +211,7 @@ impl VisibleMetadataData {
 }
 
 enum DirectoryOutcomeData {
+    MountRequired { mountable: bool },
     Succeeded(DirectorySnapshotData),
     Failed(OperationError),
     Cancelled,
@@ -246,12 +247,12 @@ impl GioDirectoryRepository {
         Self {
             context,
             executor,
-            mount_retry_enabled: Rc::new(Cell::new(false)),
+            mount_operation: Rc::new(RefCell::new(None)),
         }
     }
 
-    pub fn set_mount_operation(&self, _factory: impl Fn() -> gio::MountOperation + 'static) {
-        self.mount_retry_enabled.set(true);
+    pub fn set_mount_operation(&self, factory: impl Fn() -> gio::MountOperation + 'static) {
+        *self.mount_operation.borrow_mut() = Some(Rc::new(factory));
     }
 
     fn deliver_list(&self, request: DirectoryRequest, done: DirectoryCallback) {
@@ -259,19 +260,50 @@ impl GioDirectoryRepository {
         let cancellation = cancellation_signal(&request.cancellable);
         let owner_cancellable = request.cancellable.clone();
         let failure_location = request.location.clone();
-        let mount_retry_enabled = self.mount_retry_enabled.get();
+        let callback_data = data.clone();
+        let callback_failure_location = failure_location.clone();
+        let mount_operation = self.mount_operation.borrow().clone();
+        let mount_retry_enabled = mount_operation.is_some();
+        let executor = self.executor.clone();
+        let context = self.context.clone();
         let (send, mut receive) = futures_channel::mpsc::unbounded();
         let failure_send = send.clone();
+        let completion_cancellation = cancellation.clone();
 
         self.context.spawn_local(async move {
-            // This request-context cancellable remains alive until the executor
-            // has released its own native cancellable and sent the terminal DTO.
+            // The caller-owned cancellation bridge and any GTK mount operation
+            // stay on this context; only URI DTOs enter the executor.
             let _owner_cancellable = owner_cancellable;
             if let Some(outcome) = receive.next().await {
-                done(RequestCompletion {
-                    id: data.id,
-                    outcome: into_directory_outcome(outcome),
-                });
+                match outcome {
+                    DirectoryOutcomeData::MountRequired { mountable } => {
+                        let Some(factory) = mount_operation else {
+                            done(RequestCompletion {
+                                id: data.id,
+                                outcome: RequestOutcome::Failed(OperationError::new(
+                                    OperationErrorKind::MountUnavailable,
+                                    Some(&callback_failure_location),
+                                    None,
+                                )),
+                            });
+                            return;
+                        };
+                        mount_on_owner(
+                            context,
+                            request,
+                            callback_data,
+                            mountable,
+                            factory,
+                            completion_cancellation,
+                            executor,
+                            done,
+                        );
+                    }
+                    outcome => done(RequestCompletion {
+                        id: data.id,
+                        outcome: into_directory_outcome(outcome),
+                    }),
+                }
             }
         });
 
@@ -364,6 +396,10 @@ impl DirectoryRepository for GioDirectoryRepository {
             let _owner_cancellable = owner_cancellable;
             loop {
                 match receive.try_recv() {
+                    Ok(DirectoryOutcomeData::MountRequired { .. }) => {
+                        repository.deliver_list(request, Box::new(move |result| sink(result)));
+                        return;
+                    }
                     Ok(DirectoryOutcomeData::Failed(error))
                         if error.kind == OperationErrorKind::MountUnavailable =>
                     {
@@ -433,6 +469,9 @@ impl DirectoryRepository for GioDirectoryRepository {
 
 fn into_directory_outcome(outcome: DirectoryOutcomeData) -> RequestOutcome<DirectorySnapshot> {
     match outcome {
+        DirectoryOutcomeData::MountRequired { .. } => {
+            unreachable!("mount request is handled on its owner context")
+        }
         DirectoryOutcomeData::Succeeded(snapshot) => {
             RequestOutcome::Succeeded(snapshot.into_snapshot())
         }
@@ -523,51 +562,77 @@ fn start_list(
         .clone()
         .into_native(native_request.cancellable().clone());
     let result = enumerate(&native);
+    let mountable = matches!(&result, Err(error) if error.kind == OperationErrorKind::MountUnavailable)
+        && gio::File::for_uri(&data.location)
+            .query_info(
+                "standard::type",
+                gio::FileQueryInfoFlags::NONE,
+                Some(native_request.cancellable()),
+            )
+            .is_ok_and(|info| info.file_type() == gio::FileType::Mountable);
+    let mount_required = matches!(&result, Err(error) if error.kind == OperationErrorKind::MountUnavailable)
+        && mount_retry_enabled
+        && !native_request.synchronize_cancellation();
+    let outcome = if mount_required {
+        DirectoryOutcomeData::MountRequired { mountable }
+    } else {
+        terminal_directory_outcome(&native_request, result)
+    };
     drop(native);
-    if native_request.synchronize_cancellation()
-        || !matches!(&result, Err(error) if error.kind == OperationErrorKind::MountUnavailable)
-        || !mount_retry_enabled
-    {
-        let outcome = terminal_directory_outcome(&native_request, result);
-        native_request.complete();
-        let _ = send.unbounded_send(outcome);
-        return;
-    }
+    native_request.complete();
+    let _ = send.unbounded_send(outcome);
+}
 
-    let operation = gio::MountOperation::new();
-    let requested_uri = data.location.clone();
-    let file = gio::File::for_uri(&requested_uri);
-    let mountable = file
-        .query_info(
-            "standard::type",
-            gio::FileQueryInfoFlags::NONE,
-            Some(native_request.cancellable()),
-        )
-        .is_ok_and(|info| info.file_type() == gio::FileType::Mountable);
+/// GTK's `MountOperation` is thread-affine. Create, use, and release it on the
+/// requesting context; the resulting URI alone is sent back to the executor.
+fn mount_on_owner(
+    context: glib::MainContext,
+    request: DirectoryRequest,
+    data: DirectoryRequestData,
+    mountable: bool,
+    factory: Rc<dyn Fn() -> gio::MountOperation>,
+    cancellation: CancellationSignal,
+    executor: Arc<GioExecutor>,
+    done: DirectoryCallback,
+) {
+    let operation = factory();
+    let file = gio::File::for_uri(&data.location);
+    let cancellable = request.cancellable.clone();
+    let requested = request.location.clone();
     if mountable {
         let callback_operation = operation.clone();
         file.mount_mountable(
             gio::MountMountFlags::NONE,
             Some(&operation),
-            Some(&native_request.cancellable().clone()),
+            Some(&cancellable.clone()),
             move |mounted| {
                 drop(callback_operation);
-                let outcome = if native_request.synchronize_cancellation() {
-                    DirectoryOutcomeData::Cancelled
+                let outcome = if cancellation.is_cancelled() {
+                    Err(RequestOutcome::Cancelled)
                 } else {
-                    match mounted {
-                        Ok(file) => {
-                            retry_directory_listing(&native_request, &data, file.uri().to_string())
-                        }
-                        Err(error) => DirectoryOutcomeData::Failed(OperationError::from_gio(
+                    mounted.map(|file| file.uri().to_string()).map_err(|error| {
+                        RequestOutcome::Failed(OperationError::from_gio(
                             &error,
-                            Some(&location_from_uri(requested_uri)),
+                            Some(&requested),
                             None,
-                        )),
-                    }
+                        ))
+                    })
                 };
-                native_request.complete();
-                let _ = send.unbounded_send(outcome);
+                match outcome {
+                    Ok(resolved_uri) => retry_after_owner_mount(
+                        context,
+                        executor,
+                        cancellation,
+                        data,
+                        cancellable,
+                        resolved_uri,
+                        done,
+                    ),
+                    Err(outcome) => done(RequestCompletion {
+                        id: data.id,
+                        outcome,
+                    }),
+                }
             },
         );
     } else {
@@ -576,59 +641,90 @@ fn start_list(
         file.mount_enclosing_volume(
             gio::MountMountFlags::NONE,
             Some(&operation),
-            Some(&native_request.cancellable().clone()),
+            Some(&cancellable.clone()),
             move |mounted| {
                 drop(callback_operation);
-                let outcome = if native_request.synchronize_cancellation() {
-                    DirectoryOutcomeData::Cancelled
+                let outcome = if cancellation.is_cancelled() {
+                    Err(RequestOutcome::Cancelled)
                 } else {
                     match mounted {
-                        Ok(()) => retry_directory_listing(
-                            &native_request,
-                            &data,
-                            callback_file.uri().to_string(),
-                        ),
+                        Ok(()) => Ok(callback_file.uri().to_string()),
                         Err(error) if error.matches(gio::IOErrorEnum::AlreadyMounted) => {
-                            retry_directory_listing(
-                                &native_request,
-                                &data,
-                                callback_file.uri().to_string(),
-                            )
+                            Ok(callback_file.uri().to_string())
                         }
-                        Err(error) => DirectoryOutcomeData::Failed(OperationError::from_gio(
+                        Err(error) => Err(RequestOutcome::Failed(OperationError::from_gio(
                             &error,
-                            Some(&location_from_uri(requested_uri)),
+                            Some(&requested),
                             None,
-                        )),
+                        ))),
                     }
                 };
                 drop(callback_file);
-                native_request.complete();
-                let _ = send.unbounded_send(outcome);
+                match outcome {
+                    Ok(resolved_uri) => retry_after_owner_mount(
+                        context,
+                        executor,
+                        cancellation,
+                        data,
+                        cancellable,
+                        resolved_uri,
+                        done,
+                    ),
+                    Err(outcome) => done(RequestCompletion {
+                        id: data.id,
+                        outcome,
+                    }),
+                }
             },
         );
     }
 }
 
-fn retry_directory_listing(
-    request: &GioRequest,
-    data: &DirectoryRequestData,
+fn retry_after_owner_mount(
+    context: glib::MainContext,
+    executor: Arc<GioExecutor>,
+    cancellation: CancellationSignal,
+    data: DirectoryRequestData,
+    owner_cancellable: gio::Cancellable,
     resolved_uri: String,
-) -> DirectoryOutcomeData {
-    if request.synchronize_cancellation() {
-        return DirectoryOutcomeData::Cancelled;
-    }
-    let native = DirectoryRequestData {
-        location: resolved_uri,
-        ..data.clone()
-    }
-    .into_native(request.cancellable().clone());
-    let result = enumerate(&native).map(|mut snapshot| {
-        snapshot.location.requested = location_from_uri(data.location.clone());
-        snapshot
+    done: DirectoryCallback,
+) {
+    let (send, mut receive) = futures_channel::mpsc::unbounded();
+    let failure_send = send.clone();
+    let failure_location = location_from_uri(data.location.clone());
+    context.spawn_local(async move {
+        let _owner_cancellable = owner_cancellable;
+        if let Some(outcome) = receive.next().await {
+            done(RequestCompletion {
+                id: data.id,
+                outcome: into_directory_outcome(outcome),
+            });
+        }
     });
-    drop(native);
-    terminal_directory_outcome(request, result)
+    if executor
+        .submit(cancellation, move |native_request| {
+            let native = DirectoryRequestData {
+                location: resolved_uri,
+                ..data.clone()
+            }
+            .into_native(native_request.cancellable().clone());
+            let result = enumerate(&native).map(|mut snapshot| {
+                snapshot.location.requested = location_from_uri(data.location.clone());
+                snapshot
+            });
+            let outcome = terminal_directory_outcome(&native_request, result);
+            drop(native);
+            native_request.complete();
+            let _ = send.unbounded_send(outcome);
+        })
+        .is_err()
+    {
+        let _ = failure_send.unbounded_send(DirectoryOutcomeData::Failed(OperationError::new(
+            OperationErrorKind::Unknown,
+            Some(&failure_location),
+            None,
+        )));
+    }
 }
 fn enumerate(request: &DirectoryRequest) -> Result<DirectorySnapshot, OperationError> {
     enumerate_with_pages(request, None)
@@ -742,4 +838,67 @@ fn enumerate_with_pages(
     })();
     let close = enumerator.close(gio::Cancellable::NONE).map_err(map_error);
     result.and_then(|snapshot| close.map(|_| snapshot))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{cell::Cell, rc::Rc, time::Duration};
+
+    #[gtk::test]
+    fn configured_gtk_mount_operation_is_created_and_used_on_its_owner_context() {
+        let context = glib::MainContext::default();
+        let location = Location::from_uri("smb://fixture/mount-operation").unwrap();
+        let cancellable = gio::Cancellable::new();
+        let cancellation = CancellationSignal::new();
+        cancellable.cancel();
+        cancellation.cancel();
+        let created = Rc::new(Cell::new(0));
+        let completed = Rc::new(Cell::new(false));
+        let created_factory = created.clone();
+        let completed_callback = completed.clone();
+        let executor = GioExecutor::isolated_for_tests();
+        let request = DirectoryRequest {
+            id: RequestId(9),
+            location: location.clone(),
+            page: PageRequest {
+                offset: 0,
+                limit: usize::MAX,
+            },
+            cancellable,
+        };
+
+        mount_on_owner(
+            context.clone(),
+            request,
+            DirectoryRequestData {
+                id: RequestId(9),
+                location: location.uri().to_owned(),
+                page: PageRequest {
+                    offset: 0,
+                    limit: usize::MAX,
+                },
+            },
+            false,
+            Rc::new(move || {
+                created_factory.set(created_factory.get() + 1);
+                gtk::MountOperation::new(None::<&gtk::Window>).upcast()
+            }),
+            cancellation,
+            executor.clone(),
+            Box::new(move |completion| {
+                assert!(matches!(completion.outcome, RequestOutcome::Cancelled));
+                completed_callback.set(true);
+            }),
+        );
+
+        assert_eq!(created.get(), 1);
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while !completed.get() {
+            assert!(std::time::Instant::now() < deadline);
+            context.iteration(false);
+        }
+        assert_eq!(executor.active_request_count_for_tests(), 0);
+        executor.shutdown_for_tests();
+    }
 }
