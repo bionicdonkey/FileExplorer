@@ -1826,3 +1826,42 @@ fn slice5_local_ten_thousand_file_navigation_completes_through_incremental_sort_
     view.close();
     window.close();
 }
+
+#[gtk::test]
+fn slice5_file_view_rejects_late_directory_dto_after_navigation() {
+    use zorin_explorer::{
+        core::contracts::{Capability, CapabilitySnapshot},
+        ui::file_view::FileView,
+    };
+
+    let context = glib::MainContext::default();
+    let first = Location::from_uri("smb://fixture/stale-directory-first").unwrap();
+    let second = Location::from_uri("smb://fixture/stale-directory-second").unwrap();
+    let capabilities = CapabilitySnapshot {
+        supported: [Capability::List].into_iter().collect(),
+        stable_order: true,
+        ..Default::default()
+    };
+    let provider = Rc::new(MockProvider::new(context.clone(), MockConfig::default()));
+    provider.set_directory(first.clone(), vec![], capabilities.clone());
+    provider.set_directory(second.clone(), vec![], capabilities);
+    provider.set_list_results_after_cancellation(true);
+
+    let view = FileView::new_with_repository(first, provider.clone());
+    view.navigate(second.clone());
+    provider.advance(1);
+    scale_pump_until(|| !view.has_pending_navigation());
+
+    let state = view.tab_state();
+    assert_eq!(state.borrow().location, second);
+    assert_eq!(
+        state
+            .borrow()
+            .directory
+            .as_ref()
+            .map(|snapshot| snapshot.location.requested.clone()),
+        Some(second),
+        "the late first-directory DTO must not replace the current navigation"
+    );
+    view.close();
+}

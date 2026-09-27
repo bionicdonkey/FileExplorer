@@ -901,4 +901,74 @@ mod tests {
         assert_eq!(executor.active_request_count_for_tests(), 0);
         executor.shutdown_for_tests();
     }
+
+    #[gtk::test]
+    fn retry_after_owner_mount_is_drained_by_executor_shutdown() {
+        use std::{
+            sync::{
+                atomic::{AtomicBool, Ordering},
+                mpsc, Arc,
+            },
+            time::Duration,
+        };
+
+        let context = glib::MainContext::default();
+        let fixture = tempfile::tempdir().unwrap();
+        let location = Location::from_local_path(fixture.path());
+        let executor = GioExecutor::isolated_for_tests();
+        let release_gate = Arc::new(AtomicBool::new(false));
+        let (started, started_receiver) = mpsc::sync_channel(1);
+        executor
+            .submit(CancellationSignal::new(), {
+                let release_gate = release_gate.clone();
+                move |request| {
+                    started.send(()).unwrap();
+                    while !release_gate.load(Ordering::SeqCst) {
+                        std::thread::yield_now();
+                    }
+                    request.complete();
+                }
+            })
+            .unwrap();
+        started_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("gate request must occupy the executor before retry submission");
+
+        let completed = Rc::new(Cell::new(false));
+        let completion = completed.clone();
+        // Mount authentication belongs to the owner context and requires an
+        // external provider. Enter the production retry continuation directly
+        // so the executor-owned half is deterministic and still exercises its
+        // real URI DTO conversion, native request, and terminal callback path.
+        retry_after_owner_mount(
+            context.clone(),
+            executor.clone(),
+            CancellationSignal::new(),
+            DirectoryRequestData {
+                id: RequestId(10),
+                location: location.uri().to_owned(),
+                page: PageRequest {
+                    offset: 0,
+                    limit: usize::MAX,
+                },
+            },
+            gio::Cancellable::new(),
+            location.uri().to_owned(),
+            Box::new(move |result| {
+                assert!(matches!(result.outcome, RequestOutcome::Cancelled));
+                completion.set(true);
+            }),
+        );
+
+        assert_eq!(executor.active_request_count_for_tests(), 2);
+        release_gate.store(true, Ordering::SeqCst);
+        executor.shutdown_for_tests();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while !completed.get() {
+            assert!(std::time::Instant::now() < deadline);
+            context.iteration(false);
+        }
+        assert_eq!(executor.active_request_count_for_tests(), 0);
+    }
 }

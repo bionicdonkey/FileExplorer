@@ -833,10 +833,56 @@ fn executor_shutdown_cancels_parallel_owner_requests_without_stale_ui_callbacks(
         }
     }
 
+    {
+        let context = glib::MainContext::new();
+        let _owner = context.acquire().unwrap();
+        let operations = GioOperations::with_executor(context.clone(), executor.clone());
+        for index in 0..REQUESTS_PER_CLASS {
+            let cancellable = gio::Cancellable::new();
+            let stale_ui_mutations = stale_ui_mutations.clone();
+            operations.inspect_capabilities(
+                CapabilityRequest {
+                    id: RequestId(400 + index),
+                    location: location.clone(),
+                    cancellable: cancellable.clone(),
+                },
+                Box::new(move |_| {
+                    stale_ui_mutations.fetch_add(1, Ordering::SeqCst);
+                }),
+            );
+            owner_cancellables.push(cancellable);
+        }
+    }
+
+    {
+        let context = glib::MainContext::new();
+        let _owner = context.acquire().unwrap();
+        let repository = GioDirectoryRepository::with_executor(context.clone(), executor.clone());
+        for index in 0..REQUESTS_PER_CLASS {
+            let cancellable = gio::Cancellable::new();
+            let stale_ui_mutations = stale_ui_mutations.clone();
+            repository.list_pages(
+                DirectoryRequest {
+                    id: RequestId(500 + index),
+                    location: directory.clone(),
+                    page: PageRequest {
+                        offset: 0,
+                        limit: 1,
+                    },
+                    cancellable: cancellable.clone(),
+                },
+                Box::new(move |_| {
+                    stale_ui_mutations.fetch_add(1, Ordering::SeqCst);
+                }),
+            );
+            owner_cancellables.push(cancellable);
+        }
+    }
+
     assert_eq!(
         executor.active_request_count_for_tests(),
-        1 + (REQUESTS_PER_CLASS * 4) as usize,
-        "all executor-owned native requests must be live before owner contexts close"
+        1 + (REQUESTS_PER_CLASS * 6) as usize,
+        "all operation, capability, directory, paged, metadata, and search requests must be live before owner contexts close"
     );
     for cancellable in owner_cancellables {
         cancellable.cancel();

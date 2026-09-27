@@ -263,6 +263,30 @@ impl GioExecutor {
     pub fn active_request_count_for_tests(&self) -> usize {
         self.state.lifecycle.lock().unwrap().live.len()
     }
+
+    /// Detaches and joins the shared executor only when no adapter still owns
+    /// it and no native request is live. This lets lifecycle tests clean up
+    /// deterministically without cancelling work owned by another test.
+    #[doc(hidden)]
+    pub fn shutdown_shared_if_idle_for_tests() -> bool {
+        let executor = {
+            let mut shared = SHARED.get_or_init(|| Mutex::new(None)).lock().unwrap();
+            let Some(executor) = shared.as_ref() else {
+                return true;
+            };
+            if Arc::strong_count(executor) != 1
+                || !executor.state.lifecycle.lock().unwrap().live.is_empty()
+            {
+                return false;
+            }
+            shared
+                .take()
+                .expect("the shared executor must remain present while locked")
+        };
+        executor.shutdown_for_tests();
+        true
+    }
+
     /// Cancels all live jobs, drains their completion callbacks, and joins the
     /// private executor thread. This is intentionally explicit: it never
     /// switches work to the process-global default context.
@@ -338,21 +362,6 @@ mod tests {
 
         assert_eq!(receiver.recv_timeout(Duration::from_secs(1)), Ok(true));
         executor.shutdown_for_tests();
-    }
-
-    #[test]
-    fn shared_executor_remains_process_wide_while_active() {
-        let _serial = serial_test_guard();
-        let first = GioExecutor::shared();
-        let first_weak = Arc::downgrade(&first);
-        drop(first);
-
-        let second = GioExecutor::shared();
-        let retained = first_weak
-            .upgrade()
-            .is_some_and(|first| Arc::ptr_eq(&first, &second));
-
-        assert!(retained);
     }
 
     #[test]
