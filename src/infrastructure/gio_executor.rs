@@ -213,6 +213,11 @@ impl GioExecutor {
         }
     }
 
+    #[doc(hidden)]
+    pub fn isolated_for_tests() -> Arc<Self> {
+        Arc::new(Self::start())
+    }
+
     /// Starts `job` on the executor thread.
     ///
     /// The `GioRequest` passed to the job is the request's native-lifetime
@@ -251,6 +256,12 @@ impl GioExecutor {
         });
 
         Ok(())
+    }
+    /// Test-only lifecycle observation for adapters that must prove a terminal
+    /// DTO follows native request release.
+    #[doc(hidden)]
+    pub fn active_request_count_for_tests(&self) -> usize {
+        self.state.lifecycle.lock().unwrap().live.len()
     }
     /// Cancels all live jobs, drains their completion callbacks, and joins the
     /// private executor thread. This is intentionally explicit: it never

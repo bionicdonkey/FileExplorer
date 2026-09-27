@@ -8,12 +8,13 @@
 //! a cancelled cancellable expresses intent, not backend acknowledgement. Never
 //! enumerate synchronously, perform filesystem work, spawn commands, or format
 //! backend messages in callers. All such work belongs behind these ports.
+//! Cancellation is intent only: terminal callbacks follow executor-owned native release.
 
 use super::contracts::*;
 use gio::prelude::CancellableExt;
 
 pub type DirectoryCallback = Box<dyn FnOnce(RequestCompletion<DirectorySnapshot>)>;
-pub type VisibleMetadataCallback = Box<dyn FnOnce(RequestCompletion<Vec<VisibleMetadata>>) >;
+pub type VisibleMetadataCallback = Box<dyn FnOnce(RequestCompletion<Vec<VisibleMetadata>>)>;
 /// Ordered pages from one enumeration cursor, ending in exactly one page with
 /// no continuation or a terminal failure/cancellation. No tree pre-count.
 pub type DirectoryPageSink = Box<dyn FnMut(RequestCompletion<DirectorySnapshot>)>;

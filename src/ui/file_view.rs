@@ -4369,6 +4369,11 @@ mod tests {
         let cancellations = provider.visible_metadata_request_cancellables();
         view.navigate(second);
         assert!(cancellations[0].is_cancelled());
+        assert_eq!(
+            provider.active_visible_metadata_requests(),
+            1,
+            "cancellation is intent; the provider retains native request ownership until its delayed completion"
+        );
         provider.advance(1);
         while context.pending() {
             context.iteration(false);
@@ -4376,6 +4381,11 @@ mod tests {
 
         assert!(view.visible_metadata.borrow_mut().get(&target).is_none());
         assert_eq!(view.pending_visible_metadata.borrow().len(), 0);
+        assert_eq!(
+            provider.active_visible_metadata_requests(),
+            0,
+            "the cancelled native request must release after its terminal reply"
+        );
         view.close();
     }
 

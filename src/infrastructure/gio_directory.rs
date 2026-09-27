@@ -1,24 +1,293 @@
-//! Cancellable GIO enumeration. Only owned domain snapshots cross the worker
-//! boundary; callbacks are deferred onto the repository's owning main context.
-use crate::core::{contracts::*, ports::*, FileItem, Location, ResolvedLocation};
+//! Cancellable GIO directory work. Native GIO remains on the owned executor;
+//! only URI-based DTOs cross back to the requesting main context.
+use crate::{
+    core::{contracts::*, ports::*, FileItem, Location, ResolvedLocation},
+    infrastructure::gio_executor::{CancellationSignal, GioExecutor, GioRequest},
+};
+use futures_util::StreamExt;
 use gio::prelude::*;
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::Cell, rc::Rc, sync::Arc};
 
 #[derive(Clone)]
 pub struct GioDirectoryRepository {
     context: glib::MainContext,
-    mount_operation: Rc<RefCell<Option<Rc<dyn Fn() -> gio::MountOperation>>>>,
+    executor: Arc<GioExecutor>,
+    mount_retry_enabled: Rc<Cell<bool>>,
+}
+
+/// The caller owns `Location` and its `gio::File`; the executor receives only
+/// canonical URIs and creates its GIO values on its own thread-default context.
+#[derive(Clone)]
+struct DirectoryRequestData {
+    id: RequestId,
+    location: String,
+    page: PageRequest,
+}
+
+impl From<&DirectoryRequest> for DirectoryRequestData {
+    fn from(request: &DirectoryRequest) -> Self {
+        Self {
+            id: request.id,
+            location: request.location.uri().to_owned(),
+            page: request.page,
+        }
+    }
+}
+
+impl DirectoryRequestData {
+    fn into_native(self, cancellable: gio::Cancellable) -> DirectoryRequest {
+        DirectoryRequest {
+            id: self.id,
+            location: location_from_uri(self.location),
+            page: self.page,
+            cancellable,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct VisibleMetadataRequestData {
+    id: RequestId,
+    locations: Vec<String>,
+}
+
+impl From<&VisibleMetadataRequest> for VisibleMetadataRequestData {
+    fn from(request: &VisibleMetadataRequest) -> Self {
+        Self {
+            id: request.id,
+            locations: request
+                .locations
+                .iter()
+                .map(|location| location.uri().to_owned())
+                .collect(),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct CapabilitySnapshotData {
+    version: u64,
+    supported: std::collections::BTreeSet<Capability>,
+    stable_order: bool,
+    containment: ContainmentData,
+}
+
+#[derive(Clone)]
+enum ContainmentData {
+    Opaque,
+    KnownAncestors(Vec<String>),
+}
+
+impl From<CapabilitySnapshot> for CapabilitySnapshotData {
+    fn from(snapshot: CapabilitySnapshot) -> Self {
+        Self {
+            version: snapshot.version,
+            supported: snapshot.supported,
+            stable_order: snapshot.stable_order,
+            containment: match snapshot.containment {
+                Containment::Opaque => ContainmentData::Opaque,
+                Containment::KnownAncestors(locations) => ContainmentData::KnownAncestors(
+                    locations
+                        .into_iter()
+                        .map(|location| location.uri().to_owned())
+                        .collect(),
+                ),
+            },
+        }
+    }
+}
+
+impl CapabilitySnapshotData {
+    fn into_snapshot(self) -> CapabilitySnapshot {
+        CapabilitySnapshot {
+            version: self.version,
+            supported: self.supported,
+            stable_order: self.stable_order,
+            containment: match self.containment {
+                ContainmentData::Opaque => Containment::Opaque,
+                ContainmentData::KnownAncestors(locations) => Containment::KnownAncestors(
+                    locations.into_iter().map(location_from_uri).collect(),
+                ),
+            },
+        }
+    }
+}
+
+#[derive(Clone)]
+struct EntrySnapshotData {
+    location: String,
+    display_name: String,
+    kind: EntryKind,
+    size: Option<u64>,
+    modified: Option<std::time::SystemTime>,
+    content_type: Option<String>,
+    capabilities: CapabilitySnapshotData,
+}
+
+impl From<EntrySnapshot> for EntrySnapshotData {
+    fn from(snapshot: EntrySnapshot) -> Self {
+        Self {
+            location: snapshot.location.uri().to_owned(),
+            display_name: snapshot.display_name,
+            kind: snapshot.kind,
+            size: snapshot.size,
+            modified: snapshot.modified,
+            content_type: snapshot.content_type,
+            capabilities: snapshot.capabilities.into(),
+        }
+    }
+}
+
+impl EntrySnapshotData {
+    fn into_snapshot(self) -> EntrySnapshot {
+        EntrySnapshot {
+            location: location_from_uri(self.location),
+            display_name: self.display_name,
+            kind: self.kind,
+            size: self.size,
+            modified: self.modified,
+            content_type: self.content_type,
+            capabilities: self.capabilities.into_snapshot(),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct DirectorySnapshotData {
+    requested: String,
+    resolved: String,
+    entries: Vec<EntrySnapshotData>,
+    capabilities: CapabilitySnapshotData,
+    next_page: Option<PageRequest>,
+}
+
+impl From<DirectorySnapshot> for DirectorySnapshotData {
+    fn from(snapshot: DirectorySnapshot) -> Self {
+        Self {
+            requested: snapshot.location.requested.uri().to_owned(),
+            resolved: snapshot.location.resolved.uri().to_owned(),
+            entries: snapshot.entries.into_iter().map(Into::into).collect(),
+            capabilities: snapshot.capabilities.into(),
+            next_page: snapshot.next_page,
+        }
+    }
+}
+
+impl DirectorySnapshotData {
+    fn into_snapshot(self) -> DirectorySnapshot {
+        DirectorySnapshot {
+            location: ResolvedLocation {
+                requested: location_from_uri(self.requested),
+                resolved: location_from_uri(self.resolved),
+            },
+            entries: self
+                .entries
+                .into_iter()
+                .map(EntrySnapshotData::into_snapshot)
+                .collect(),
+            capabilities: self.capabilities.into_snapshot(),
+            next_page: self.next_page,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct VisibleMetadataData {
+    location: String,
+    size: Option<u64>,
+    modified: Option<std::time::SystemTime>,
+    content_type: Option<String>,
+}
+
+impl VisibleMetadataData {
+    fn into_metadata(self) -> VisibleMetadata {
+        VisibleMetadata {
+            location: location_from_uri(self.location),
+            size: self.size,
+            modified: self.modified,
+            content_type: self.content_type,
+        }
+    }
+}
+
+enum DirectoryOutcomeData {
+    Succeeded(DirectorySnapshotData),
+    Failed(OperationError),
+    Cancelled,
+}
+
+enum VisibleMetadataOutcomeData {
+    Succeeded(Vec<VisibleMetadataData>),
+    Failed(OperationError),
+    Cancelled,
+}
+
+fn location_from_uri(uri: String) -> Location {
+    Location::from_uri(&uri).expect("directory URI was validated at the public boundary")
+}
+
+fn cancellation_signal(cancellable: &gio::Cancellable) -> CancellationSignal {
+    let signal = CancellationSignal::new();
+    if cancellable.is_cancelled() {
+        signal.cancel();
+    } else {
+        let signal_for_callback = signal.clone();
+        cancellable.connect_cancelled(move |_| signal_for_callback.cancel());
+    }
+    signal
 }
 
 impl GioDirectoryRepository {
     pub fn new(context: glib::MainContext) -> Self {
+        Self::with_executor(context, GioExecutor::shared())
+    }
+
+    pub fn with_executor(context: glib::MainContext, executor: Arc<GioExecutor>) -> Self {
         Self {
             context,
-            mount_operation: Rc::new(RefCell::new(None)),
+            executor,
+            mount_retry_enabled: Rc::new(Cell::new(false)),
         }
     }
-    pub fn set_mount_operation(&self, factory: impl Fn() -> gio::MountOperation + 'static) {
-        *self.mount_operation.borrow_mut() = Some(Rc::new(factory));
+
+    pub fn set_mount_operation(&self, _factory: impl Fn() -> gio::MountOperation + 'static) {
+        self.mount_retry_enabled.set(true);
+    }
+
+    fn deliver_list(&self, request: DirectoryRequest, done: DirectoryCallback) {
+        let data = DirectoryRequestData::from(&request);
+        let cancellation = cancellation_signal(&request.cancellable);
+        let owner_cancellable = request.cancellable.clone();
+        let failure_location = request.location.clone();
+        let mount_retry_enabled = self.mount_retry_enabled.get();
+        let (send, mut receive) = futures_channel::mpsc::unbounded();
+        let failure_send = send.clone();
+
+        self.context.spawn_local(async move {
+            // This request-context cancellable remains alive until the executor
+            // has released its own native cancellable and sent the terminal DTO.
+            let _owner_cancellable = owner_cancellable;
+            if let Some(outcome) = receive.next().await {
+                done(RequestCompletion {
+                    id: data.id,
+                    outcome: into_directory_outcome(outcome),
+                });
+            }
+        });
+
+        if self
+            .executor
+            .submit(cancellation, move |native_request| {
+                start_list(native_request, data, mount_retry_enabled, send);
+            })
+            .is_err()
+        {
+            let _ = failure_send.unbounded_send(DirectoryOutcomeData::Failed(OperationError::new(
+                OperationErrorKind::Unknown,
+                Some(&failure_location),
+                None,
+            )));
+        }
     }
 }
 
@@ -43,178 +312,324 @@ impl DirectoryRepository for GioDirectoryRepository {
         });
         Some(monitor)
     }
+
     fn inspect_visible_metadata(
         &self,
         request: VisibleMetadataRequest,
         done: VisibleMetadataCallback,
     ) {
+        let data = VisibleMetadataRequestData::from(&request);
+        let cancellation = cancellation_signal(&request.cancellable);
+        let owner_cancellable = request.cancellable.clone();
+        let failure_location = request.locations.first().cloned();
+        let (send, mut receive) = futures_channel::mpsc::unbounded();
+        let failure_send = send.clone();
+
         self.context.spawn_local(async move {
-            let worker = request.clone();
-            let metadata = gio::spawn_blocking(move || {
-                worker
-                    .locations
-                    .into_iter()
-                    .filter_map(|location| {
-                        if worker.cancellable.is_cancelled() {
-                            return None;
-                        }
-                        let info = gio::File::for_uri(location.uri())
-                            .query_info(
-                                "standard::fast-content-type,standard::size,time::modified",
-                                gio::FileQueryInfoFlags::NONE,
-                                Some(&worker.cancellable),
-                            )
-                            .ok()?;
-                        Some(VisibleMetadata {
-                            location,
-                            size: info
-                                .has_attribute("standard::size")
-                                .then(|| info.size() as u64),
-                            modified: info.has_attribute("time::modified").then(|| {
-                                std::time::UNIX_EPOCH
-                                    + std::time::Duration::from_secs(
-                                        info.attribute_uint64("time::modified"),
-                                    )
-                            }),
-                            content_type: info
-                                .attribute_string("standard::fast-content-type")
-                                .map(|value| value.to_string()),
-                        })
-                    })
-                    .collect()
+            let _owner_cancellable = owner_cancellable;
+            if let Some(outcome) = receive.next().await {
+                done(RequestCompletion {
+                    id: data.id,
+                    outcome: into_metadata_outcome(outcome),
+                });
+            }
+        });
+
+        if self
+            .executor
+            .submit(cancellation, move |native_request| {
+                let outcome = inspect_metadata(&data, &native_request);
+                native_request.complete();
+                let _ = send.unbounded_send(outcome);
             })
-            .await
-            .unwrap_or_default();
-            let outcome = if request.cancellable.is_cancelled() {
-                RequestOutcome::Cancelled
-            } else {
-                RequestOutcome::Succeeded(metadata)
-            };
-            done(RequestCompletion {
-                id: request.id,
-                outcome,
-            });
-        });
+            .is_err()
+        {
+            let _ = failure_send.unbounded_send(VisibleMetadataOutcomeData::Failed(
+                OperationError::new(OperationErrorKind::Unknown, failure_location.as_ref(), None),
+            ));
+        }
     }
+
     fn list_pages(&self, request: DirectoryRequest, mut sink: DirectoryPageSink) {
+        let data = DirectoryRequestData::from(&request);
+        let cancellation = cancellation_signal(&request.cancellable);
+        let owner_cancellable = request.cancellable.clone();
+        let failure_location = request.location.clone();
         let (send, receive) = std::sync::mpsc::sync_channel(2);
-        let worker = request.clone();
-        std::thread::spawn(move || {
-            let mut emit = |snapshot| send.send(RequestOutcome::Succeeded(snapshot)).is_ok();
-            let result = enumerate_with_pages(&worker, Some(&mut emit));
-            let outcome = if worker.cancellable.is_cancelled() {
-                RequestOutcome::Cancelled
-            } else {
-                match result {
-                    Ok(snapshot) => RequestOutcome::Succeeded(snapshot),
-                    Err(error) => RequestOutcome::Failed(error),
-                }
-            };
-            let _ = send.send(outcome);
-        });
+        let callback_failure_location = failure_location.clone();
+        let failure_send = send.clone();
         let repository = self.clone();
+
         self.context.spawn_local(async move {
+            let _owner_cancellable = owner_cancellable;
             loop {
                 match receive.try_recv() {
-                    Ok(RequestOutcome::Failed(error)) if error.kind == OperationErrorKind::MountUnavailable => {
-                        // Preserve the established native authentication/mount
-                        // interaction. The fallback owns cancellation and retry.
-                        repository.list(request, Box::new(move |result| sink(result)));
+                    Ok(DirectoryOutcomeData::Failed(error))
+                        if error.kind == OperationErrorKind::MountUnavailable =>
+                    {
+                        repository.deliver_list(request, Box::new(move |result| sink(result)));
                         return;
                     }
                     Ok(outcome) => {
-                        let terminal = !matches!(&outcome, RequestOutcome::Succeeded(snapshot) if snapshot.next_page.is_some());
-                        sink(RequestCompletion { id: request.id, outcome });
-                        if terminal { return; }
+                        let terminal = !matches!(
+                            &outcome,
+                            DirectoryOutcomeData::Succeeded(snapshot) if snapshot.next_page.is_some()
+                        );
+                        sink(RequestCompletion {
+                            id: data.id,
+                            outcome: into_directory_outcome(outcome),
+                        });
+                        if terminal {
+                            return;
+                        }
                     }
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        sink(RequestCompletion { id: request.id, outcome: RequestOutcome::Failed(OperationError::new(OperationErrorKind::Unknown, Some(&request.location), None)) });
+                        sink(RequestCompletion {
+                            id: data.id,
+                            outcome: RequestOutcome::Failed(OperationError::new(
+                                OperationErrorKind::Unknown,
+                                Some(&callback_failure_location),
+                                None,
+                            )),
+                        });
                         return;
                     }
                     Err(std::sync::mpsc::TryRecvError::Empty) => {}
                 }
-                // Yield between bounded pages so input and the first frame can
-                // run while the same enumeration cursor continues in the worker.
                 glib::timeout_future(std::time::Duration::from_millis(1)).await;
             }
         });
+
+        if self
+            .executor
+            .submit(cancellation, move |native_request| {
+                let native = data
+                    .clone()
+                    .into_native(native_request.cancellable().clone());
+                let mut emit = |snapshot: DirectorySnapshot| {
+                    send.send(DirectoryOutcomeData::Succeeded(snapshot.into()))
+                        .is_ok()
+                };
+                let result = enumerate_with_pages(&native, Some(&mut emit));
+                let outcome = terminal_directory_outcome(&native_request, result);
+                drop(native);
+                native_request.complete();
+                let _ = send.send(outcome);
+            })
+            .is_err()
+        {
+            let _ = failure_send.send(DirectoryOutcomeData::Failed(OperationError::new(
+                OperationErrorKind::Unknown,
+                Some(&failure_location),
+                None,
+            )));
+        }
     }
+
     fn list(&self, request: DirectoryRequest, done: DirectoryCallback) {
-        let worker_request = request.clone();
-        let mount_operation = self.mount_operation.clone();
-        self.context.spawn_local(async move {
-            let mut result = gio::spawn_blocking(move || enumerate(&worker_request)).await;
-            if matches!(&result, Ok(Err(error)) if error.kind == OperationErrorKind::MountUnavailable)
-                && !request.cancellable.is_cancelled()
-            {
-                let factory = mount_operation.borrow().clone();
-                if let Some(factory) = factory {
-                    let operation = factory();
-                    let type_request = request.clone();
-                    let mountable = gio::spawn_blocking(move || {
-                        gio::File::for_uri(type_request.location.uri()).query_info(
-                            "standard::type", gio::FileQueryInfoFlags::NONE, Some(&type_request.cancellable),
-                        ).is_ok_and(|info| info.file_type() == gio::FileType::Mountable)
-                    }).await.unwrap_or(false);
-                    let (send, receive) = futures_channel::oneshot::channel();
-                    let file = gio::File::for_uri(request.location.uri());
-                    if mountable {
-                        file.mount_mountable(gio::MountMountFlags::NONE, Some(&operation), Some(&request.cancellable),
-                            move |result| { let _ = send.send(result); });
-                    } else {
-                        let mounted_file = file.clone();
-                        file.mount_enclosing_volume(
-                            gio::MountMountFlags::NONE, Some(&operation), Some(&request.cancellable),
-                            move |result| {
-                                let result = match result {
-                                    Err(error) if error.matches(gio::IOErrorEnum::AlreadyMounted) => Ok(mounted_file),
-                                    result => result.map(|_| mounted_file),
-                                };
-                                let _ = send.send(result);
-                            },
-                        );
-                    }
-                    let mounted = receive.await;
-                    // The operation and its authentication UI live for precisely
-                    // this request; navigation cancellation cancels the GIO call.
-                    drop(operation);
-                    match mounted {
-                        Ok(Ok(file)) => {
-                            if let Ok(resolved) = Location::try_from_file(file) {
-                                let mut worker_request = request.clone();
-                                worker_request.location = resolved;
-                                result = gio::spawn_blocking(move || enumerate(&worker_request)).await;
-                                if let Ok(Ok(snapshot)) = &mut result { snapshot.location.requested = request.location.clone(); }
-                            } else {
-                                result = Ok(Err(OperationError::new(OperationErrorKind::InvalidRequest, Some(&request.location), None)));
-                            }
-                        }
-                        Ok(Err(error)) => result = Ok(Err(OperationError::from_gio(&error, Some(&request.location), None))),
-                        Err(_) => {}
-                    }
-                }
-            }
-            let outcome = if request.cancellable.is_cancelled() {
-                RequestOutcome::Cancelled
-            } else {
-                match result {
-                    Ok(Ok(snapshot)) => RequestOutcome::Succeeded(snapshot),
-                    Ok(Err(error)) => RequestOutcome::Failed(error),
-                    Err(_) => RequestOutcome::Failed(OperationError::new(
-                        OperationErrorKind::Unknown,
-                        Some(&request.location),
-                        None,
-                    )),
-                }
-            };
-            done(RequestCompletion {
-                id: request.id,
-                outcome,
-            });
-        });
+        self.deliver_list(request, done);
     }
 }
 
+fn into_directory_outcome(outcome: DirectoryOutcomeData) -> RequestOutcome<DirectorySnapshot> {
+    match outcome {
+        DirectoryOutcomeData::Succeeded(snapshot) => {
+            RequestOutcome::Succeeded(snapshot.into_snapshot())
+        }
+        DirectoryOutcomeData::Failed(error) => RequestOutcome::Failed(error),
+        DirectoryOutcomeData::Cancelled => RequestOutcome::Cancelled,
+    }
+}
+
+fn into_metadata_outcome(
+    outcome: VisibleMetadataOutcomeData,
+) -> RequestOutcome<Vec<VisibleMetadata>> {
+    match outcome {
+        VisibleMetadataOutcomeData::Succeeded(metadata) => RequestOutcome::Succeeded(
+            metadata
+                .into_iter()
+                .map(VisibleMetadataData::into_metadata)
+                .collect(),
+        ),
+        VisibleMetadataOutcomeData::Failed(error) => RequestOutcome::Failed(error),
+        VisibleMetadataOutcomeData::Cancelled => RequestOutcome::Cancelled,
+    }
+}
+
+fn inspect_metadata(
+    data: &VisibleMetadataRequestData,
+    request: &GioRequest,
+) -> VisibleMetadataOutcomeData {
+    if request.synchronize_cancellation() {
+        return VisibleMetadataOutcomeData::Cancelled;
+    }
+    let metadata = data
+        .locations
+        .iter()
+        .filter_map(|uri| {
+            if request.synchronize_cancellation() {
+                return None;
+            }
+            let info = gio::File::for_uri(uri)
+                .query_info(
+                    "standard::fast-content-type,standard::size,time::modified",
+                    gio::FileQueryInfoFlags::NONE,
+                    Some(request.cancellable()),
+                )
+                .ok()?;
+            Some(VisibleMetadataData {
+                location: uri.clone(),
+                size: info
+                    .has_attribute("standard::size")
+                    .then(|| info.size() as u64),
+                modified: info.has_attribute("time::modified").then(|| {
+                    std::time::UNIX_EPOCH
+                        + std::time::Duration::from_secs(info.attribute_uint64("time::modified"))
+                }),
+                content_type: info
+                    .attribute_string("standard::fast-content-type")
+                    .map(|value| value.to_string()),
+            })
+        })
+        .collect();
+    if request.synchronize_cancellation() {
+        VisibleMetadataOutcomeData::Cancelled
+    } else {
+        VisibleMetadataOutcomeData::Succeeded(metadata)
+    }
+}
+
+fn terminal_directory_outcome(
+    request: &GioRequest,
+    result: Result<DirectorySnapshot, OperationError>,
+) -> DirectoryOutcomeData {
+    if request.synchronize_cancellation() {
+        DirectoryOutcomeData::Cancelled
+    } else {
+        match result {
+            Ok(snapshot) => DirectoryOutcomeData::Succeeded(snapshot.into()),
+            Err(error) => DirectoryOutcomeData::Failed(error),
+        }
+    }
+}
+
+fn start_list(
+    native_request: GioRequest,
+    data: DirectoryRequestData,
+    mount_retry_enabled: bool,
+    send: futures_channel::mpsc::UnboundedSender<DirectoryOutcomeData>,
+) {
+    let native = data
+        .clone()
+        .into_native(native_request.cancellable().clone());
+    let result = enumerate(&native);
+    drop(native);
+    if native_request.synchronize_cancellation()
+        || !matches!(&result, Err(error) if error.kind == OperationErrorKind::MountUnavailable)
+        || !mount_retry_enabled
+    {
+        let outcome = terminal_directory_outcome(&native_request, result);
+        native_request.complete();
+        let _ = send.unbounded_send(outcome);
+        return;
+    }
+
+    let operation = gio::MountOperation::new();
+    let requested_uri = data.location.clone();
+    let file = gio::File::for_uri(&requested_uri);
+    let mountable = file
+        .query_info(
+            "standard::type",
+            gio::FileQueryInfoFlags::NONE,
+            Some(native_request.cancellable()),
+        )
+        .is_ok_and(|info| info.file_type() == gio::FileType::Mountable);
+    if mountable {
+        let callback_operation = operation.clone();
+        file.mount_mountable(
+            gio::MountMountFlags::NONE,
+            Some(&operation),
+            Some(&native_request.cancellable().clone()),
+            move |mounted| {
+                drop(callback_operation);
+                let outcome = if native_request.synchronize_cancellation() {
+                    DirectoryOutcomeData::Cancelled
+                } else {
+                    match mounted {
+                        Ok(file) => {
+                            retry_directory_listing(&native_request, &data, file.uri().to_string())
+                        }
+                        Err(error) => DirectoryOutcomeData::Failed(OperationError::from_gio(
+                            &error,
+                            Some(&location_from_uri(requested_uri)),
+                            None,
+                        )),
+                    }
+                };
+                native_request.complete();
+                let _ = send.unbounded_send(outcome);
+            },
+        );
+    } else {
+        let callback_file = file.clone();
+        let callback_operation = operation.clone();
+        file.mount_enclosing_volume(
+            gio::MountMountFlags::NONE,
+            Some(&operation),
+            Some(&native_request.cancellable().clone()),
+            move |mounted| {
+                drop(callback_operation);
+                let outcome = if native_request.synchronize_cancellation() {
+                    DirectoryOutcomeData::Cancelled
+                } else {
+                    match mounted {
+                        Ok(()) => retry_directory_listing(
+                            &native_request,
+                            &data,
+                            callback_file.uri().to_string(),
+                        ),
+                        Err(error) if error.matches(gio::IOErrorEnum::AlreadyMounted) => {
+                            retry_directory_listing(
+                                &native_request,
+                                &data,
+                                callback_file.uri().to_string(),
+                            )
+                        }
+                        Err(error) => DirectoryOutcomeData::Failed(OperationError::from_gio(
+                            &error,
+                            Some(&location_from_uri(requested_uri)),
+                            None,
+                        )),
+                    }
+                };
+                drop(callback_file);
+                native_request.complete();
+                let _ = send.unbounded_send(outcome);
+            },
+        );
+    }
+}
+
+fn retry_directory_listing(
+    request: &GioRequest,
+    data: &DirectoryRequestData,
+    resolved_uri: String,
+) -> DirectoryOutcomeData {
+    if request.synchronize_cancellation() {
+        return DirectoryOutcomeData::Cancelled;
+    }
+    let native = DirectoryRequestData {
+        location: resolved_uri,
+        ..data.clone()
+    }
+    .into_native(request.cancellable().clone());
+    let result = enumerate(&native).map(|mut snapshot| {
+        snapshot.location.requested = location_from_uri(data.location.clone());
+        snapshot
+    });
+    drop(native);
+    terminal_directory_outcome(request, result)
+}
 fn enumerate(request: &DirectoryRequest) -> Result<DirectorySnapshot, OperationError> {
     enumerate_with_pages(request, None)
 }

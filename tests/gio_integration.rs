@@ -509,6 +509,94 @@ fn directory_cancellation_errors_and_unstable_paging_are_explicit() {
     ));
 }
 
+#[test]
+fn directory_cancellation_retains_executor_request_until_terminal_dto_is_released() {
+    use std::{
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            mpsc, Arc,
+        },
+        time::Duration,
+    };
+    use zorin_explorer::{
+        core::ports::DirectoryRepository,
+        infrastructure::{
+            gio_directory::GioDirectoryRepository,
+            gio_executor::{CancellationSignal, GioExecutor},
+        },
+    };
+
+    let context = glib::MainContext::new();
+    let _guard = context.acquire().unwrap();
+    let executor = GioExecutor::isolated_for_tests();
+    let release_gate = Arc::new(AtomicBool::new(false));
+    let (started, started_receiver) = mpsc::sync_channel(1);
+    executor
+        .submit(CancellationSignal::new(), {
+            let release_gate = release_gate.clone();
+            move |request| {
+                let mut request = Some(request);
+                let source = glib::timeout_source_new(
+                    Duration::from_millis(1),
+                    None,
+                    glib::Priority::DEFAULT,
+                    move || {
+                        if !release_gate.load(Ordering::SeqCst) {
+                            return glib::ControlFlow::Continue;
+                        }
+                        request
+                            .take()
+                            .expect("gate completion runs once")
+                            .complete();
+                        glib::ControlFlow::Break
+                    },
+                );
+                source.attach(Some(&glib::MainContext::ref_thread_default()));
+                started.send(()).unwrap();
+            }
+        })
+        .unwrap();
+    started_receiver
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap();
+
+    let directory = tempfile::tempdir().unwrap();
+    let cancelled = gio::Cancellable::new();
+    let adapter = GioDirectoryRepository::with_executor(context.clone(), executor.clone());
+    let received = Rc::new(RefCell::new(None));
+    let out = received.clone();
+    adapter.list(
+        DirectoryRequest {
+            id: RequestId(88),
+            location: Location::from_local_path(directory.path()),
+            page: PageRequest {
+                offset: 0,
+                limit: usize::MAX,
+            },
+            cancellable: cancelled.clone(),
+        },
+        Box::new(move |completion| *out.borrow_mut() = Some(completion.outcome)),
+    );
+    cancelled.cancel();
+    assert_eq!(executor.active_request_count_for_tests(), 2);
+
+    release_gate.store(true, Ordering::SeqCst);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while received.borrow().is_none() {
+        context.iteration(false);
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::yield_now();
+    }
+    assert!(matches!(
+        received.borrow().as_ref(),
+        Some(RequestOutcome::Cancelled)
+    ));
+    while executor.active_request_count_for_tests() != 0 {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::yield_now();
+    }
+    executor.shutdown_for_tests();
+}
 fn run(
     kind: MutationKind,
     sources: Vec<Location>,

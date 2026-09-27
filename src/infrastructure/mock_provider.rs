@@ -81,6 +81,7 @@ struct MockState {
     visible_metadata_requests: Vec<Location>,
     list_results_after_cancellation: bool,
     visible_metadata_cancellables: Vec<gio::Cancellable>,
+    active_visible_metadata_requests: usize,
 }
 
 #[derive(Clone)]
@@ -109,6 +110,7 @@ impl MockProvider {
                 visible_metadata_requests: Vec::new(),
                 list_results_after_cancellation: false,
                 visible_metadata_cancellables: Vec::new(),
+                active_visible_metadata_requests: 0,
             })),
         }
     }
@@ -168,6 +170,10 @@ impl MockProvider {
 
     pub fn visible_metadata_request_cancellables(&self) -> Vec<gio::Cancellable> {
         self.state.borrow().visible_metadata_cancellables.clone()
+    }
+
+    pub fn active_visible_metadata_requests(&self) -> usize {
+        self.state.borrow().active_visible_metadata_requests
     }
 
     /// Make due work ready in submission order for equal deadlines. This never
@@ -623,6 +629,7 @@ impl DirectoryRepository for MockProvider {
         request: VisibleMetadataRequest,
         done: VisibleMetadataCallback,
     ) {
+        self.state.borrow_mut().active_visible_metadata_requests += 1;
         self.state
             .borrow_mut()
             .visible_metadata_requests
@@ -655,6 +662,7 @@ impl DirectoryRepository for MockProvider {
                     .collect();
                 RequestOutcome::Succeeded(metadata)
             };
+            provider.state.borrow_mut().active_visible_metadata_requests -= 1;
             done(RequestCompletion {
                 id: request.id,
                 outcome,
