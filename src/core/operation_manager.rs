@@ -9,6 +9,7 @@ use crate::application::operations::{
 };
 use crate::core::contracts::{ConflictDecision, MutationKind, OperationId, OperationRequest};
 use crate::core::{Location, RecoverableStateNotice};
+use crate::infrastructure::gio_executor::GioExecutor;
 use crate::infrastructure::gio_operations::GioOperations;
 use serde::{Deserialize, Serialize};
 use std::rc::Rc;
@@ -100,6 +101,7 @@ pub struct OperationManager {
     persistence: Arc<Mutex<()>>,
     retention_days: Arc<AtomicU64>,
     recoverable_notices: Arc<Mutex<Vec<RecoverableStateNotice>>>,
+    executor: Arc<GioExecutor>,
 }
 
 impl Default for OperationManager {
@@ -115,6 +117,7 @@ impl Default for OperationManager {
             persistence: Default::default(),
             retention_days: Arc::new(AtomicU64::new(7)),
             recoverable_notices: Arc::new(Mutex::new(Vec::new())),
+            executor: GioExecutor::shared(),
         }
     }
 }
@@ -348,7 +351,10 @@ impl OperationManager {
             std::thread::spawn(move || {
                 let context = glib::MainContext::new();
                 let _guard = context.acquire().unwrap();
-                let adapter = Rc::new(GioOperations::new_uri(context.clone()));
+                let adapter = Rc::new(GioOperations::new_uri_with_executor(
+                    context.clone(),
+                    manager.executor.clone(),
+                ));
                 let coordinator = OperationCoordinator::new(adapter.clone());
                 loop {
                     match receive.recv_timeout(std::time::Duration::from_millis(2)) {
@@ -1042,7 +1048,12 @@ mod tests {
         assert_eq!(stored["records"][1]["outcome"]["effect"], "Complete");
         let source_path = source.display().to_string();
         let target_path = target.display().to_string();
-        for sensitive in [&source_path, &target_path, "private-source-name", "private-target-name"] {
+        for sensitive in [
+            &source_path,
+            &target_path,
+            "private-source-name",
+            "private-target-name",
+        ] {
             assert!(
                 !raw_history.contains(sensitive),
                 "persisted history leaked {sensitive}"

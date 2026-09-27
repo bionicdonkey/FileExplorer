@@ -1,15 +1,19 @@
 use gio::prelude::CancellableExt;
 use glib::prelude::ObjectType;
 use std::{
+    cell::RefCell,
     collections::HashMap,
     sync::{
         atomic::{AtomicBool, Ordering},
-        mpsc, Arc, Mutex, OnceLock,
+        mpsc, Arc, Mutex, OnceLock, Weak,
     },
     thread::{self, JoinHandle},
 };
 
 static SHARED: OnceLock<Mutex<Option<Arc<GioExecutor>>>> = OnceLock::new();
+thread_local! {
+    static APPLICATION_DEFAULT: RefCell<Option<Weak<GioExecutor>>> = const { RefCell::new(None) };
+}
 
 /// A process-wide owner for native GIO asynchronous work.
 ///
@@ -166,7 +170,26 @@ impl ExecutorState {
 }
 
 impl GioExecutor {
+    /// Creates the executor owned by one application instance.
+    ///
+    /// Application startup registers this instance as the default for its
+    /// production adapters, leaving the process-wide fallback untouched.
+    pub fn for_application() -> Arc<Self> {
+        Arc::new(Self::start())
+    }
+
+    /// Makes an application-owned executor the default used by production
+    /// adapters constructed during that application's lifetime.
+    pub fn install_as_application_default(executor: &Arc<Self>) {
+        APPLICATION_DEFAULT.with(|current| *current.borrow_mut() = Some(Arc::downgrade(executor)));
+    }
+
     pub fn shared() -> Arc<Self> {
+        if let Some(executor) =
+            APPLICATION_DEFAULT.with(|current| current.borrow().as_ref().and_then(Weak::upgrade))
+        {
+            return executor;
+        }
         let shared = SHARED.get_or_init(|| Mutex::new(None));
         let mut current = shared.lock().unwrap();
         if let Some(executor) = current.as_ref() {
@@ -264,6 +287,11 @@ impl GioExecutor {
         self.state.lifecycle.lock().unwrap().live.len()
     }
 
+    #[doc(hidden)]
+    pub fn is_shutdown_for_tests(&self) -> bool {
+        self.thread.lock().unwrap().is_none()
+    }
+
     /// Detaches and joins the shared executor only when no adapter still owns
     /// it and no native request is live. This lets lifecycle tests clean up
     /// deterministically without cancelling work owned by another test.
@@ -287,11 +315,10 @@ impl GioExecutor {
         true
     }
 
-    /// Cancels all live jobs, drains their completion callbacks, and joins the
-    /// private executor thread. This is intentionally explicit: it never
-    /// switches work to the process-global default context.
-    #[doc(hidden)]
-    pub fn shutdown_for_tests(&self) {
+    /// Cancels live jobs, drains native completion callbacks, and joins the
+    /// private executor thread without switching work to the process-global
+    /// default context.
+    pub fn shutdown(&self) {
         let (cancellables, should_quit) = {
             let mut lifecycle = self.state.lifecycle.lock().unwrap();
             if lifecycle.closing {
@@ -315,6 +342,12 @@ impl GioExecutor {
             thread.join().expect("GIO executor thread must not panic");
         }
         Self::clear_shared(self);
+        Self::clear_application_default(self);
+    }
+
+    #[doc(hidden)]
+    pub fn shutdown_for_tests(&self) {
+        self.shutdown();
     }
 
     fn clear_shared(this: &Self) {
@@ -325,6 +358,19 @@ impl GioExecutor {
         {
             *shared = None;
         }
+    }
+
+    fn clear_application_default(this: &Self) {
+        APPLICATION_DEFAULT.with(|application| {
+            if application
+                .borrow()
+                .as_ref()
+                .and_then(Weak::upgrade)
+                .is_some_and(|executor| std::ptr::eq(Arc::as_ptr(&executor), this))
+            {
+                *application.borrow_mut() = None;
+            }
+        });
     }
 }
 

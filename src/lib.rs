@@ -1,6 +1,7 @@
 pub mod core;
 pub mod application {
     pub mod commands;
+    pub mod lifecycle;
     pub mod navigation;
     pub mod operations;
     pub mod performance;

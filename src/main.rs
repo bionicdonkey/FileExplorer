@@ -1,5 +1,8 @@
 use adw::prelude::*;
 use adw::Application;
+use zorin_explorer::{
+    application::lifecycle::install_executor_shutdown, infrastructure::gio_executor::GioExecutor,
+};
 
 fn main() {
     // Re-entry point for the polkit-backed elevated retry: `pkexec` launches
@@ -13,8 +16,10 @@ fn main() {
     let app = Application::builder()
         .application_id("com.zorin.Explorer")
         .build();
+    let executor = GioExecutor::for_application();
+    install_executor_shutdown(&app, executor.clone());
 
-    app.connect_activate(|app| {
+    app.connect_activate(move |app| {
         if let Some(display) = gtk::gdk::Display::default() {
             let provider = gtk::CssProvider::new();
             provider.load_from_string(include_str!("../resources/style.css"));
