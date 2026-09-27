@@ -63,6 +63,27 @@ impl Drop for TestChild {
         }
     }
 }
+
+#[test]
+fn finished_sentinel_is_published_without_leaving_its_temporary_file() {
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::write(fixture.path().join("finished.tmp"), "incomplete").unwrap();
+
+    publish_finished(fixture.path(), "rejected");
+
+    assert_eq!(
+        std::fs::read_to_string(fixture.path().join("finished")).unwrap(),
+        "rejected"
+    );
+    assert!(!fixture.path().join("finished.tmp").exists());
+}
+
+fn publish_finished(root: &Path, result: &str) {
+    let temporary = root.join("finished.tmp");
+    std::fs::write(&temporary, result).unwrap();
+    std::fs::rename(temporary, root.join("finished")).unwrap();
+}
+
 extern "C" {
     fn dlopen(name: *const c_char, flags: c_int) -> *mut c_void;
     fn dlsym(library: *mut c_void, name: *const c_char) -> *mut c_void;
@@ -313,11 +334,7 @@ fn external_source(root: &Path) {
         if delete {
             std::fs::remove_file(root.join("source.txt")).unwrap();
         }
-        std::fs::write(
-            root.join("finished"),
-            if delete { "move" } else { "rejected" },
-        )
-        .unwrap();
+        publish_finished(&root, if delete { "move" } else { "rejected" });
         finished.set(true);
     });
     label.add_controller(source);
