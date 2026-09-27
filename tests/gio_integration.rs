@@ -229,6 +229,85 @@ fn search_result(scope: SearchScope, mode: SearchMode, cancelled: bool) -> Searc
 }
 
 #[test]
+fn tracker_fallback_waits_for_executor_context_and_keeps_unavailable_explicit() {
+    use std::{
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            mpsc, Arc,
+        },
+        time::Duration,
+    };
+    use zorin_explorer::{
+        core::ports::SearchRepository,
+        infrastructure::{
+            gio_executor::{CancellationSignal, GioExecutor},
+            tracker_search::TrackerSearchRepository,
+        },
+    };
+
+    // This gate catches a fallback that escapes onto gio::spawn_blocking: it
+    // would complete despite the dedicated executor context being occupied.
+    let context = glib::MainContext::new();
+    let _guard = context.acquire().unwrap();
+    let executor = GioExecutor::isolated_for_tests();
+    let release_gate = Arc::new(AtomicBool::new(false));
+    let (started, started_receiver) = mpsc::sync_channel(1);
+    executor
+        .submit(CancellationSignal::new(), {
+            let release_gate = release_gate.clone();
+            move |request| {
+                started.send(()).unwrap();
+                while !release_gate.load(Ordering::SeqCst) {
+                    std::thread::yield_now();
+                }
+                request.complete();
+            }
+        })
+        .unwrap();
+    started_receiver
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap();
+
+    let adapter = TrackerSearchRepository::with_executor(context.clone(), executor.clone());
+    let received = Rc::new(RefCell::new(None));
+    let output = received.clone();
+    let temporary = tempfile::tempdir().unwrap();
+    adapter.search(
+        SearchRequest {
+            id: RequestId(124),
+            scope: SearchScope::local_fallback(Location::from_local_path(temporary.path())),
+            query: "report".into(),
+            mode: SearchMode::Content,
+            cancellable: gio::Cancellable::new(),
+        },
+        Box::new(move |completion| *output.borrow_mut() = Some(completion.outcome)),
+    );
+
+    let blocked_until = std::time::Instant::now() + Duration::from_millis(100);
+    while std::time::Instant::now() < blocked_until {
+        context.iteration(false);
+        assert!(
+            received.borrow().is_none(),
+            "fallback must execute on the injected executor context"
+        );
+        std::thread::yield_now();
+    }
+
+    release_gate.store(true, Ordering::SeqCst);
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while received.borrow().is_none() {
+        context.iteration(false);
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::yield_now();
+    }
+    assert!(matches!(
+        received.borrow().as_ref(),
+        Some(SearchOutcome::Unsupported { .. })
+    ));
+    executor.shutdown_for_tests();
+}
+
+#[test]
 fn slice2_search_local_depth_stable_order_result_and_time_bounds() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::create_dir(temp.path().join("child")).unwrap();

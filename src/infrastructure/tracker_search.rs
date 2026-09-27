@@ -1,43 +1,369 @@
 //! URI search boundary. An installed index is not itself a usable client API:
 //! builds without a Tracker client explicitly advertise indexed search as
 //! unavailable. Filename fallback is local, metadata-only and deterministic.
-use crate::core::{contracts::*, ports::*, FileItem, Location};
+use crate::{
+    core::{contracts::*, ports::*, FileItem, Location},
+    infrastructure::gio_executor::{CancellationSignal, GioExecutor, GioRequest},
+};
+use futures_util::StreamExt;
 use gio::prelude::*;
 use std::{
     collections::{BTreeMap, HashSet, VecDeque},
-    time::Instant,
+    sync::Arc,
+    time::{Duration, Instant},
 };
 
 pub struct TrackerSearchRepository {
     context: glib::MainContext,
+    executor: Arc<GioExecutor>,
+}
+
+/// Search request data contains only owned values, so no caller-context GIO
+/// objects cross to the executor.
+#[derive(Clone)]
+struct SearchRequestData {
+    id: RequestId,
+    scope: SearchScopeData,
+    query: String,
+    mode: SearchMode,
+}
+
+#[derive(Clone)]
+struct SearchScopeData {
+    root: String,
+    max_depth: u32,
+    max_results: usize,
+    timeout: Duration,
+}
+
+impl From<&SearchRequest> for SearchRequestData {
+    fn from(request: &SearchRequest) -> Self {
+        Self {
+            id: request.id,
+            scope: (&request.scope).into(),
+            query: request.query.clone(),
+            mode: request.mode,
+        }
+    }
+}
+
+impl From<&SearchScope> for SearchScopeData {
+    fn from(scope: &SearchScope) -> Self {
+        Self {
+            root: scope.root.uri().to_owned(),
+            max_depth: scope.max_depth,
+            max_results: scope.max_results,
+            timeout: scope.timeout,
+        }
+    }
+}
+
+impl SearchScopeData {
+    fn into_scope(self) -> SearchScope {
+        SearchScope {
+            root: location_from_uri(self.root),
+            max_depth: self.max_depth,
+            max_results: self.max_results,
+            timeout: self.timeout,
+        }
+    }
+}
+
+impl SearchRequestData {
+    fn into_native(self, cancellable: gio::Cancellable) -> SearchRequest {
+        SearchRequest {
+            id: self.id,
+            scope: self.scope.into_scope(),
+            query: self.query,
+            mode: self.mode,
+            cancellable,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct CapabilitySnapshotData {
+    version: u64,
+    supported: std::collections::BTreeSet<Capability>,
+    stable_order: bool,
+    containment: ContainmentData,
+}
+
+#[derive(Clone)]
+enum ContainmentData {
+    Opaque,
+    KnownAncestors(Vec<String>),
+}
+
+impl From<CapabilitySnapshot> for CapabilitySnapshotData {
+    fn from(snapshot: CapabilitySnapshot) -> Self {
+        Self {
+            version: snapshot.version,
+            supported: snapshot.supported,
+            stable_order: snapshot.stable_order,
+            containment: match snapshot.containment {
+                Containment::Opaque => ContainmentData::Opaque,
+                Containment::KnownAncestors(locations) => ContainmentData::KnownAncestors(
+                    locations
+                        .into_iter()
+                        .map(|location| location.uri().to_owned())
+                        .collect(),
+                ),
+            },
+        }
+    }
+}
+
+impl CapabilitySnapshotData {
+    fn into_snapshot(self) -> CapabilitySnapshot {
+        CapabilitySnapshot {
+            version: self.version,
+            supported: self.supported,
+            stable_order: self.stable_order,
+            containment: match self.containment {
+                ContainmentData::Opaque => Containment::Opaque,
+                ContainmentData::KnownAncestors(locations) => Containment::KnownAncestors(
+                    locations.into_iter().map(location_from_uri).collect(),
+                ),
+            },
+        }
+    }
+}
+
+#[derive(Clone)]
+struct EntrySnapshotData {
+    location: String,
+    display_name: String,
+    kind: EntryKind,
+    size: Option<u64>,
+    modified: Option<std::time::SystemTime>,
+    content_type: Option<String>,
+    capabilities: CapabilitySnapshotData,
+}
+
+impl From<EntrySnapshot> for EntrySnapshotData {
+    fn from(snapshot: EntrySnapshot) -> Self {
+        Self {
+            location: snapshot.location.uri().to_owned(),
+            display_name: snapshot.display_name,
+            kind: snapshot.kind,
+            size: snapshot.size,
+            modified: snapshot.modified,
+            content_type: snapshot.content_type,
+            capabilities: snapshot.capabilities.into(),
+        }
+    }
+}
+
+impl EntrySnapshotData {
+    fn into_snapshot(self) -> EntrySnapshot {
+        EntrySnapshot {
+            location: location_from_uri(self.location),
+            display_name: self.display_name,
+            kind: self.kind,
+            size: self.size,
+            modified: self.modified,
+            content_type: self.content_type,
+            capabilities: self.capabilities.into_snapshot(),
+        }
+    }
+}
+
+enum SearchOutcomeData {
+    Completed {
+        matches: Vec<EntrySnapshotData>,
+        declared_scope: SearchScopeData,
+        scope_limited: bool,
+        limits: Vec<SearchLimit>,
+    },
+    Incomplete {
+        matches: Vec<EntrySnapshotData>,
+        reason: SearchIncompleteReason,
+        declared_scope: SearchScopeData,
+        retry: RetryClass,
+        error: Option<OperationError>,
+    },
+    Unsupported {
+        declared_scope: SearchScopeData,
+        error: OperationError,
+    },
+}
+
+impl From<SearchOutcome> for SearchOutcomeData {
+    fn from(outcome: SearchOutcome) -> Self {
+        match outcome {
+            SearchOutcome::Completed {
+                matches,
+                declared_scope,
+                scope_limited,
+                limits,
+            } => Self::Completed {
+                matches: matches.into_iter().map(Into::into).collect(),
+                declared_scope: (&declared_scope).into(),
+                scope_limited,
+                limits,
+            },
+            SearchOutcome::Incomplete {
+                matches,
+                reason,
+                declared_scope,
+                retry,
+                error,
+            } => Self::Incomplete {
+                matches: matches.into_iter().map(Into::into).collect(),
+                reason,
+                declared_scope: (&declared_scope).into(),
+                retry,
+                error,
+            },
+            SearchOutcome::Unsupported {
+                declared_scope,
+                error,
+            } => Self::Unsupported {
+                declared_scope: (&declared_scope).into(),
+                error,
+            },
+        }
+    }
+}
+
+impl SearchOutcomeData {
+    fn into_outcome(self) -> SearchOutcome {
+        match self {
+            Self::Completed {
+                matches,
+                declared_scope,
+                scope_limited,
+                limits,
+            } => SearchOutcome::Completed {
+                matches: matches
+                    .into_iter()
+                    .map(EntrySnapshotData::into_snapshot)
+                    .collect(),
+                declared_scope: declared_scope.into_scope(),
+                scope_limited,
+                limits,
+            },
+            Self::Incomplete {
+                matches,
+                reason,
+                declared_scope,
+                retry,
+                error,
+            } => SearchOutcome::Incomplete {
+                matches: matches
+                    .into_iter()
+                    .map(EntrySnapshotData::into_snapshot)
+                    .collect(),
+                reason,
+                declared_scope: declared_scope.into_scope(),
+                retry,
+                error,
+            },
+            Self::Unsupported {
+                declared_scope,
+                error,
+            } => SearchOutcome::Unsupported {
+                declared_scope: declared_scope.into_scope(),
+                error,
+            },
+        }
+    }
+
+    fn executor_failure(scope: SearchScopeData) -> Self {
+        Self::Incomplete {
+            matches: vec![],
+            reason: SearchIncompleteReason::ProviderFailure,
+            declared_scope: scope,
+            retry: RetryClass::AfterRefresh,
+            error: None,
+        }
+    }
+}
+
+fn location_from_uri(uri: String) -> Location {
+    Location::from_uri(&uri).expect("search URI was validated at the public boundary")
+}
+
+fn cancellation_signal(cancellable: &gio::Cancellable) -> CancellationSignal {
+    let signal = CancellationSignal::new();
+    if cancellable.is_cancelled() {
+        signal.cancel();
+    } else {
+        let signal_for_callback = signal.clone();
+        cancellable.connect_cancelled(move |_| signal_for_callback.cancel());
+    }
+    signal
 }
 
 impl TrackerSearchRepository {
     pub fn new(context: glib::MainContext) -> Self {
-        Self { context }
+        Self::with_executor(context, GioExecutor::shared())
+    }
+
+    pub fn with_executor(context: glib::MainContext, executor: Arc<GioExecutor>) -> Self {
+        Self { context, executor }
     }
 }
 
 impl SearchRepository for TrackerSearchRepository {
     fn search(&self, request: SearchRequest, done: SearchCallback) {
+        let data = SearchRequestData::from(&request);
+        let callback_id = data.id;
+        let failure_scope = data.scope.clone();
+        let cancellation = cancellation_signal(&request.cancellable);
+        let owner_cancellable = request.cancellable.clone();
+        let (send, mut receive) = futures_channel::mpsc::unbounded::<SearchOutcomeData>();
+        let failure_send = send.clone();
+
         self.context.spawn_local(async move {
-            let worker = request.clone();
-            let outcome = gio::spawn_blocking(move || fallback(&worker))
-                .await
-                .unwrap_or_else(|_| {
-                    incomplete(
-                        &request,
-                        vec![],
-                        SearchIncompleteReason::ProviderFailure,
-                        None,
-                    )
+            // The caller owns this cancellable; its cancellation signal is all
+            // the executor receives.
+            let _owner_cancellable = owner_cancellable;
+            if let Some(outcome) = receive.next().await {
+                done(SearchCompletion {
+                    id: callback_id,
+                    outcome: outcome.into_outcome(),
                 });
-            done(SearchCompletion {
-                id: request.id,
-                outcome,
-            });
+            }
         });
+
+        if self
+            .executor
+            .submit(cancellation, move |native_request| {
+                start_fallback(native_request, data, send);
+            })
+            .is_err()
+        {
+            let _ = failure_send.unbounded_send(SearchOutcomeData::executor_failure(failure_scope));
+        }
     }
+}
+
+fn start_fallback(
+    native_request: GioRequest,
+    data: SearchRequestData,
+    send: futures_channel::mpsc::UnboundedSender<SearchOutcomeData>,
+) {
+    let request = data.into_native(native_request.cancellable().clone());
+    let mut outcome = fallback(&request);
+    if native_request.synchronize_cancellation() {
+        outcome = cancelled_outcome(&request, outcome);
+    }
+    let outcome = SearchOutcomeData::from(outcome);
+    drop(request);
+    native_request.complete();
+    let _ = send.unbounded_send(outcome);
+}
+
+fn cancelled_outcome(request: &SearchRequest, outcome: SearchOutcome) -> SearchOutcome {
+    let matches = match outcome {
+        SearchOutcome::Completed { matches, .. } | SearchOutcome::Incomplete { matches, .. } => {
+            matches
+        }
+        SearchOutcome::Unsupported { .. } => vec![],
+    };
+    incomplete(request, matches, SearchIncompleteReason::Cancelled, None)
 }
 
 fn incomplete(
