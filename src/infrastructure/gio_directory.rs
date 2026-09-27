@@ -2,7 +2,9 @@
 //! only URI-based DTOs cross back to the requesting main context.
 use crate::{
     core::{contracts::*, ports::*, FileItem, Location, ResolvedLocation},
-    infrastructure::gio_executor::{CancellationSignal, GioExecutor, GioRequest},
+    infrastructure::gio_executor::{
+        CancellationSignal, GioExecutor, GioRequest, OwnerMountHandoff, OwnerMountRequest,
+    },
 };
 use futures_util::StreamExt;
 use gio::prelude::*;
@@ -211,7 +213,10 @@ impl VisibleMetadataData {
 }
 
 enum DirectoryOutcomeData {
-    MountRequired { mountable: bool },
+    MountRequired {
+        mountable: bool,
+        handoff: OwnerMountHandoff,
+    },
     Succeeded(DirectorySnapshotData),
     Failed(OperationError),
     Cancelled,
@@ -276,7 +281,7 @@ impl GioDirectoryRepository {
             let _owner_cancellable = owner_cancellable;
             if let Some(outcome) = receive.next().await {
                 match outcome {
-                    DirectoryOutcomeData::MountRequired { mountable } => {
+                    DirectoryOutcomeData::MountRequired { mountable, handoff } => {
                         let Some(factory) = mount_operation else {
                             done(RequestCompletion {
                                 id: data.id,
@@ -288,6 +293,7 @@ impl GioDirectoryRepository {
                             });
                             return;
                         };
+                        let owner_request = handoff.begin_owner_mount(&request.cancellable);
                         mount_on_owner(
                             context,
                             request,
@@ -296,6 +302,7 @@ impl GioDirectoryRepository {
                             factory,
                             completion_cancellation,
                             executor,
+                            owner_request,
                             done,
                         );
                     }
@@ -573,11 +580,13 @@ fn start_list(
     let mount_required = matches!(&result, Err(error) if error.kind == OperationErrorKind::MountUnavailable)
         && mount_retry_enabled
         && !native_request.synchronize_cancellation();
-    let outcome = if mount_required {
-        DirectoryOutcomeData::MountRequired { mountable }
-    } else {
-        terminal_directory_outcome(&native_request, result)
-    };
+    if mount_required {
+        drop(native);
+        let handoff = native_request.into_owner_handoff();
+        let _ = send.unbounded_send(DirectoryOutcomeData::MountRequired { mountable, handoff });
+        return;
+    }
+    let outcome = terminal_directory_outcome(&native_request, result);
     drop(native);
     native_request.complete();
     let _ = send.unbounded_send(outcome);
@@ -593,6 +602,7 @@ fn mount_on_owner(
     factory: Rc<dyn Fn() -> gio::MountOperation>,
     cancellation: CancellationSignal,
     executor: Arc<GioExecutor>,
+    owner_request: OwnerMountRequest,
     done: DirectoryCallback,
 ) {
     let operation = factory();
@@ -601,12 +611,16 @@ fn mount_on_owner(
     let requested = request.location.clone();
     if mountable {
         let callback_operation = operation.clone();
+        let mut owner_request = Some(owner_request);
         file.mount_mountable(
             gio::MountMountFlags::NONE,
             Some(&operation),
             Some(&cancellable.clone()),
             move |mounted| {
                 drop(callback_operation);
+                let owner_request = owner_request
+                    .take()
+                    .expect("mount completion must run only once");
                 let outcome = if cancellation.is_cancelled() {
                     Err(RequestOutcome::Cancelled)
                 } else {
@@ -619,31 +633,41 @@ fn mount_on_owner(
                     })
                 };
                 match outcome {
-                    Ok(resolved_uri) => retry_after_owner_mount(
-                        context,
-                        executor,
-                        cancellation,
-                        data,
-                        cancellable,
-                        resolved_uri,
-                        done,
-                    ),
-                    Err(outcome) => done(RequestCompletion {
-                        id: data.id,
-                        outcome,
-                    }),
+                    Ok(resolved_uri) => {
+                        owner_request.complete();
+                        retry_after_owner_mount(
+                            context,
+                            executor,
+                            cancellation,
+                            data,
+                            cancellable,
+                            resolved_uri,
+                            done,
+                        );
+                    }
+                    Err(outcome) => {
+                        owner_request.complete();
+                        done(RequestCompletion {
+                            id: data.id,
+                            outcome,
+                        });
+                    }
                 }
             },
         );
     } else {
         let callback_file = file.clone();
         let callback_operation = operation.clone();
+        let mut owner_request = Some(owner_request);
         file.mount_enclosing_volume(
             gio::MountMountFlags::NONE,
             Some(&operation),
             Some(&cancellable.clone()),
             move |mounted| {
                 drop(callback_operation);
+                let owner_request = owner_request
+                    .take()
+                    .expect("mount completion must run only once");
                 let outcome = if cancellation.is_cancelled() {
                     Err(RequestOutcome::Cancelled)
                 } else {
@@ -661,19 +685,25 @@ fn mount_on_owner(
                 };
                 drop(callback_file);
                 match outcome {
-                    Ok(resolved_uri) => retry_after_owner_mount(
-                        context,
-                        executor,
-                        cancellation,
-                        data,
-                        cancellable,
-                        resolved_uri,
-                        done,
-                    ),
-                    Err(outcome) => done(RequestCompletion {
-                        id: data.id,
-                        outcome,
-                    }),
+                    Ok(resolved_uri) => {
+                        owner_request.complete();
+                        retry_after_owner_mount(
+                            context,
+                            executor,
+                            cancellation,
+                            data,
+                            cancellable,
+                            resolved_uri,
+                            done,
+                        );
+                    }
+                    Err(outcome) => {
+                        owner_request.complete();
+                        done(RequestCompletion {
+                            id: data.id,
+                            outcome,
+                        });
+                    }
                 }
             },
         );
@@ -867,6 +897,19 @@ mod tests {
             },
             cancellable,
         };
+        let owner_cancellable = request.cancellable.clone();
+        let (handoff_send, handoff_receive) = std::sync::mpsc::sync_channel(1);
+        executor
+            .submit(cancellation.clone(), move |native_request| {
+                handoff_send
+                    .send(native_request.into_owner_handoff())
+                    .unwrap();
+            })
+            .unwrap();
+        let owner_request = handoff_receive
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .begin_owner_mount(&owner_cancellable);
 
         mount_on_owner(
             context.clone(),
@@ -886,6 +929,7 @@ mod tests {
             }),
             cancellation,
             executor.clone(),
+            owner_request,
             Box::new(move |completion| {
                 assert!(matches!(completion.outcome, RequestOutcome::Cancelled));
                 completed_callback.set(true);

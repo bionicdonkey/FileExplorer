@@ -1,7 +1,6 @@
 use gio::prelude::CancellableExt;
 use glib::prelude::ObjectType;
 use std::{
-    cell::RefCell,
     collections::HashMap,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -11,9 +10,7 @@ use std::{
 };
 
 static SHARED: OnceLock<Mutex<Option<Arc<GioExecutor>>>> = OnceLock::new();
-thread_local! {
-    static APPLICATION_DEFAULT: RefCell<Option<Weak<GioExecutor>>> = const { RefCell::new(None) };
-}
+static APPLICATION_DEFAULT: OnceLock<Mutex<Option<Weak<GioExecutor>>>> = OnceLock::new();
 
 /// A process-wide owner for native GIO asynchronous work.
 ///
@@ -122,6 +119,22 @@ pub struct GioRequest {
     cancellation: CancellationSignal,
     completion: Option<RequestCompletion>,
 }
+
+/// The lifecycle half of an executor request while native work is running on
+/// the requesting main context. It deliberately owns no GLib or GTK values.
+pub struct OwnerMountHandoff {
+    cancellation: CancellationSignal,
+    completion: Option<RequestCompletion>,
+}
+
+/// Retains an executor request until an owner-context mount callback has
+/// released its native GTK/GIO values.
+pub struct OwnerMountRequest {
+    // Drop the cancellation bridge before the owner callback releases its
+    // cancellable, so shutdown cannot observe a freed native object.
+    _cancellation_lease: CancellationLease,
+    completion: Option<RequestCompletion>,
+}
 struct RequestCompletion {
     id: u64,
     state: Arc<ExecutorState>,
@@ -145,6 +158,34 @@ impl GioRequest {
         self.cancellable.is_cancelled()
     }
 
+    pub fn complete(mut self) {
+        self.completion.take();
+    }
+
+    /// Releases the executor-native request and retains only its lifecycle
+    /// accounting while an owner-context mount operation is in flight.
+    pub fn into_owner_handoff(mut self) -> OwnerMountHandoff {
+        OwnerMountHandoff {
+            cancellation: self.cancellation.clone(),
+            completion: self.completion.take(),
+        }
+    }
+}
+
+impl OwnerMountHandoff {
+    /// Begins the owner-context half of a mount request. Executor shutdown
+    /// cancels this cancellable and waits for `OwnerMountRequest::complete`.
+    pub fn begin_owner_mount(self, cancellable: &gio::Cancellable) -> OwnerMountRequest {
+        OwnerMountRequest {
+            _cancellation_lease: self.cancellation.attach(cancellable),
+            completion: self.completion,
+        }
+    }
+}
+
+impl OwnerMountRequest {
+    /// Marks the owner-context mount callback and all of its native values as
+    /// released. Dropping the request has the same lifecycle effect.
     pub fn complete(mut self) {
         self.completion.take();
     }
@@ -181,12 +222,19 @@ impl GioExecutor {
     /// Makes an application-owned executor the default used by production
     /// adapters constructed during that application's lifetime.
     pub fn install_as_application_default(executor: &Arc<Self>) {
-        APPLICATION_DEFAULT.with(|current| *current.borrow_mut() = Some(Arc::downgrade(executor)));
+        *APPLICATION_DEFAULT
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .unwrap() = Some(Arc::downgrade(executor));
     }
 
     pub fn shared() -> Arc<Self> {
-        if let Some(executor) =
-            APPLICATION_DEFAULT.with(|current| current.borrow().as_ref().and_then(Weak::upgrade))
+        if let Some(executor) = APPLICATION_DEFAULT
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(Weak::upgrade)
         {
             return executor;
         }
@@ -361,38 +409,34 @@ impl GioExecutor {
     }
 
     fn clear_application_default(this: &Self) {
-        APPLICATION_DEFAULT.with(|application| {
-            if application
-                .borrow()
-                .as_ref()
-                .and_then(Weak::upgrade)
-                .is_some_and(|executor| std::ptr::eq(Arc::as_ptr(&executor), this))
-            {
-                *application.borrow_mut() = None;
-            }
-        });
+        let mut application = APPLICATION_DEFAULT
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .unwrap();
+        if application
+            .as_ref()
+            .and_then(Weak::upgrade)
+            .is_some_and(|executor| std::ptr::eq(Arc::as_ptr(&executor), this))
+        {
+            *application = None;
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gio::prelude::CancellableExtManual;
     use std::{
         sync::{
             atomic::{AtomicUsize, Ordering},
-            mpsc, Arc, Mutex, OnceLock,
+            mpsc, Arc,
         },
         time::Duration,
     };
 
-    fn serial_test_guard() -> std::sync::MutexGuard<'static, ()> {
-        static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
-        GUARD.get_or_init(|| Mutex::new(())).lock().unwrap()
-    }
-
     #[test]
     fn submitted_callback_observes_executor_context_as_thread_default() {
-        let _serial = serial_test_guard();
         let executor = GioExecutor::isolated_for_tests();
         let expected_context = executor.context.clone();
         let (sender, receiver) = mpsc::sync_channel(1);
@@ -412,7 +456,6 @@ mod tests {
 
     #[test]
     fn shutdown_cancels_queued_work_and_joins_after_completion_callbacks_run() {
-        let _serial = serial_test_guard();
         let executor = GioExecutor::isolated_for_tests();
         let (started, started_receiver) = mpsc::sync_channel(1);
         let callbacks = Arc::new(AtomicUsize::new(0));
@@ -453,5 +496,39 @@ mod tests {
 
         assert_eq!(cancelled.load(Ordering::SeqCst), 1);
         assert_eq!(callbacks.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn shutdown_during_owner_mount_waits_for_the_owner_callback_to_release_native_values() {
+        let executor = GioExecutor::isolated_for_tests();
+        let (handoff_send, handoff_receive) = mpsc::sync_channel(1);
+
+        executor
+            .submit(CancellationSignal::new(), move |request| {
+                handoff_send.send(request.into_owner_handoff()).unwrap();
+            })
+            .unwrap();
+
+        let owner_cancellable = gio::Cancellable::new();
+        let owner_request = handoff_receive
+            .recv_timeout(Duration::from_secs(1))
+            .expect("mount handoff must retain the executor request")
+            .begin_owner_mount(&owner_cancellable);
+        let (cancelled_send, cancelled_receive) = mpsc::sync_channel(1);
+        owner_cancellable.connect_cancelled(move |_| cancelled_send.send(()).unwrap());
+
+        let executor_for_shutdown = executor.clone();
+        let shutdown = std::thread::spawn(move || executor_for_shutdown.shutdown_for_tests());
+        cancelled_receive
+            .recv_timeout(Duration::from_secs(1))
+            .expect("executor shutdown must cancel the owner-context mount");
+        assert!(
+            !shutdown.is_finished(),
+            "shutdown must not join before the owner mount callback releases its request"
+        );
+
+        owner_request.complete();
+        shutdown.join().unwrap();
+        assert_eq!(executor.active_request_count_for_tests(), 0);
     }
 }
