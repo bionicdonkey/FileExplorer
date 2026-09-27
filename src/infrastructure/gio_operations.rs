@@ -1,19 +1,329 @@
-//! GIO boundary. All I/O runs on workers, all port callbacks on the owner
-//! context. GIO owns move semantics, including cross-filesystem fallback.
-use crate::core::{contracts::*, ports::*, Location};
+//! GIO boundary. Native I/O runs on the owned executor; DTO callbacks return
+//! on the requesting context. GIO owns move semantics, including cross-filesystem fallback.
+use crate::{
+    core::{contracts::*, ports::*, Location},
+    infrastructure::gio_executor::{CancellationSignal, GioExecutor},
+};
 use futures_util::StreamExt;
 use gio::prelude::*;
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct GioOperations {
     context: glib::MainContext,
+    executor: Arc<GioExecutor>,
     uri_operations: bool,
-    elevated: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<OperationId>>>,
+    elevated: Arc<std::sync::Mutex<std::collections::HashSet<OperationId>>>,
+}
+
+/// Pure request data that may cross from the caller to the executor.
+/// `Location` owns a `gio::File`, so only its validated URI crosses threads.
+#[derive(Clone)]
+struct OperationRequestData {
+    id: OperationId,
+    kind: MutationKind,
+    sources: Vec<String>,
+    destination: Option<String>,
+    explicit_target: Option<String>,
+    capability_version: u64,
+}
+
+impl OperationRequestData {
+    fn from_request(request: &OperationRequest) -> Self {
+        Self {
+            id: request.id,
+            kind: request.kind,
+            sources: request
+                .sources
+                .iter()
+                .map(|location| location.uri().to_owned())
+                .collect(),
+            destination: request
+                .destination
+                .as_ref()
+                .map(|location| location.uri().to_owned()),
+            explicit_target: request
+                .explicit_target
+                .as_ref()
+                .map(|location| location.uri().to_owned()),
+            capability_version: request.capability_version,
+        }
+    }
+
+    fn into_native(self, cancellable: gio::Cancellable) -> OperationRequest {
+        OperationRequest {
+            id: self.id,
+            kind: self.kind,
+            sources: locations_from_uris(self.sources),
+            destination: self.destination.map(|uri| location_from_uri(uri)),
+            explicit_target: self.explicit_target.map(|uri| location_from_uri(uri)),
+            capability_version: self.capability_version,
+            cancellable,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct CapabilityRequestData {
+    id: RequestId,
+    location: String,
+}
+
+impl From<&CapabilityRequest> for CapabilityRequestData {
+    fn from(request: &CapabilityRequest) -> Self {
+        Self {
+            id: request.id,
+            location: request.location.uri().to_owned(),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct CompletionData {
+    effect: MutationEffect,
+    completed: Vec<String>,
+    remaining: Vec<String>,
+}
+
+impl From<OperationCompletion> for CompletionData {
+    fn from(completion: OperationCompletion) -> Self {
+        Self {
+            effect: completion.effect,
+            completed: completion
+                .completed
+                .into_iter()
+                .map(|location| location.uri().to_owned())
+                .collect(),
+            remaining: completion
+                .remaining
+                .into_iter()
+                .map(|location| location.uri().to_owned())
+                .collect(),
+        }
+    }
+}
+
+impl CompletionData {
+    fn into_completion(self) -> OperationCompletion {
+        OperationCompletion {
+            effect: self.effect,
+            completed: locations_from_uris(self.completed),
+            remaining: locations_from_uris(self.remaining),
+        }
+    }
+}
+
+enum OperationEventData {
+    Started {
+        id: OperationId,
+        sequence: u64,
+    },
+    Progress {
+        id: OperationId,
+        sequence: u64,
+        progress: OperationProgress,
+    },
+    CancelRequested {
+        id: OperationId,
+        sequence: u64,
+    },
+    Succeeded {
+        id: OperationId,
+        sequence: u64,
+        completion: CompletionData,
+    },
+    Failed {
+        id: OperationId,
+        sequence: u64,
+        error: OperationError,
+        completion: CompletionData,
+    },
+    Cancelled {
+        id: OperationId,
+        sequence: u64,
+        completion: CompletionData,
+    },
+}
+
+impl From<OperationEvent> for OperationEventData {
+    fn from(event: OperationEvent) -> Self {
+        match event {
+            OperationEvent::Started { id, sequence } => Self::Started { id, sequence },
+            OperationEvent::Progress {
+                id,
+                sequence,
+                progress,
+            } => Self::Progress {
+                id,
+                sequence,
+                progress,
+            },
+            OperationEvent::CancelRequested { id, sequence } => {
+                Self::CancelRequested { id, sequence }
+            }
+            OperationEvent::Succeeded {
+                id,
+                sequence,
+                completion,
+            } => Self::Succeeded {
+                id,
+                sequence,
+                completion: completion.into(),
+            },
+            OperationEvent::Failed {
+                id,
+                sequence,
+                error,
+                completion,
+            } => Self::Failed {
+                id,
+                sequence,
+                error,
+                completion: completion.into(),
+            },
+            OperationEvent::Cancelled {
+                id,
+                sequence,
+                outcome,
+            } => Self::Cancelled {
+                id,
+                sequence,
+                completion: outcome.completion.into(),
+            },
+        }
+    }
+}
+
+impl OperationEventData {
+    fn into_event(self) -> OperationEvent {
+        match self {
+            Self::Started { id, sequence } => OperationEvent::Started { id, sequence },
+            Self::Progress {
+                id,
+                sequence,
+                progress,
+            } => OperationEvent::Progress {
+                id,
+                sequence,
+                progress,
+            },
+            Self::CancelRequested { id, sequence } => {
+                OperationEvent::CancelRequested { id, sequence }
+            }
+            Self::Succeeded {
+                id,
+                sequence,
+                completion,
+            } => OperationEvent::Succeeded {
+                id,
+                sequence,
+                completion: completion.into_completion(),
+            },
+            Self::Failed {
+                id,
+                sequence,
+                error,
+                completion,
+            } => OperationEvent::Failed {
+                id,
+                sequence,
+                error,
+                completion: completion.into_completion(),
+            },
+            Self::Cancelled {
+                id,
+                sequence,
+                completion,
+            } => OperationEvent::Cancelled {
+                id,
+                sequence,
+                outcome: CancellationOutcome {
+                    completion: completion.into_completion(),
+                },
+            },
+        }
+    }
+}
+
+enum ContainmentData {
+    Opaque,
+    KnownAncestors(Vec<String>),
+}
+
+struct CapabilitySnapshotData {
+    version: u64,
+    supported: std::collections::BTreeSet<Capability>,
+    stable_order: bool,
+    containment: ContainmentData,
+}
+
+impl From<CapabilitySnapshot> for CapabilitySnapshotData {
+    fn from(snapshot: CapabilitySnapshot) -> Self {
+        Self {
+            version: snapshot.version,
+            supported: snapshot.supported,
+            stable_order: snapshot.stable_order,
+            containment: match snapshot.containment {
+                Containment::Opaque => ContainmentData::Opaque,
+                Containment::KnownAncestors(locations) => ContainmentData::KnownAncestors(
+                    locations
+                        .into_iter()
+                        .map(|location| location.uri().to_owned())
+                        .collect(),
+                ),
+            },
+        }
+    }
+}
+
+impl CapabilitySnapshotData {
+    fn into_snapshot(self) -> CapabilitySnapshot {
+        CapabilitySnapshot {
+            version: self.version,
+            supported: self.supported,
+            stable_order: self.stable_order,
+            containment: match self.containment {
+                ContainmentData::Opaque => Containment::Opaque,
+                ContainmentData::KnownAncestors(locations) => {
+                    Containment::KnownAncestors(locations_from_uris(locations))
+                }
+            },
+        }
+    }
+}
+
+enum RequestOutcomeData {
+    Succeeded(CapabilitySnapshotData),
+    Failed(OperationError),
+    Cancelled,
+}
+
+fn location_from_uri(uri: String) -> Location {
+    Location::from_uri(&uri).expect("operation URI was validated at the public boundary")
+}
+
+fn locations_from_uris(uris: Vec<String>) -> Vec<Location> {
+    uris.into_iter().map(location_from_uri).collect()
+}
+
+fn cancellation_signal(cancellable: &gio::Cancellable) -> CancellationSignal {
+    let signal = CancellationSignal::new();
+    if cancellable.is_cancelled() {
+        signal.cancel();
+    } else {
+        let signal_for_callback = signal.clone();
+        cancellable.connect_cancelled(move |_| signal_for_callback.cancel());
+    }
+    signal
 }
 impl GioOperations {
     pub fn new(context: glib::MainContext) -> Self {
+        Self::with_executor(context, GioExecutor::shared())
+    }
+    pub fn with_executor(context: glib::MainContext, executor: Arc<GioExecutor>) -> Self {
         Self {
             context,
+            executor,
             uri_operations: false,
             elevated: Default::default(),
         }
@@ -21,9 +331,12 @@ impl GioOperations {
     /// Production GIO/GVfs boundary. Unsupported actions are determined from
     /// provider metadata and GIO outcomes, not from the URI's scheme.
     pub fn new_uri(context: glib::MainContext) -> Self {
+        Self::new_uri_with_executor(context, GioExecutor::shared())
+    }
+    pub fn new_uri_with_executor(context: glib::MainContext, executor: Arc<GioExecutor>) -> Self {
         Self {
             uri_operations: true,
-            ..Self::new(context)
+            ..Self::with_executor(context, executor)
         }
     }
     pub(crate) fn authorize_elevated_retry(&self, id: OperationId) {
@@ -107,35 +420,72 @@ impl GioOperations {
         done: CapabilityCallback,
     ) {
         let uri_operations = self.uri_operations;
+        let executor = self.executor.clone();
+        let data = CapabilityRequestData::from(&request);
+        let cancellation = cancellation_signal(&request.cancellable);
+        let owner_cancellable = request.cancellable.clone();
+        let failure_location = request.location.clone();
+        let (send, mut receive) = futures_channel::mpsc::unbounded::<RequestOutcomeData>();
+        let failure_send = send.clone();
+
         self.context.spawn_local(async move {
-            let location = request.location.clone();
-            let cancel = request.cancellable.clone();
-            let result = gio::spawn_blocking(move || {
-                if uri_operations {
-                    inspect_uri_for(&location, &cancel, capability)
-                } else {
-                    inspect_local_for(&location, &cancel, capability)
-                }
-            })
-            .await;
-            let outcome = if request.cancellable.is_cancelled() {
-                RequestOutcome::Cancelled
-            } else {
-                match result {
-                    Ok(Ok(capabilities)) => RequestOutcome::Succeeded(capabilities),
-                    Ok(Err(error)) => RequestOutcome::Failed(error),
-                    Err(_) => RequestOutcome::Failed(OperationError::new(
-                        OperationErrorKind::Unknown,
-                        Some(&request.location),
-                        None,
-                    )),
-                }
-            };
-            done(RequestCompletion {
-                id: request.id,
-                outcome,
-            });
+            // Retain the request-side native cancellable on its owner context
+            // until the executor has acknowledged a terminal result.
+            let _owner_cancellable = owner_cancellable;
+            if let Some(outcome) = receive.next().await {
+                done(RequestCompletion {
+                    id: data.id,
+                    outcome: match outcome {
+                        RequestOutcomeData::Succeeded(snapshot) => {
+                            RequestOutcome::Succeeded(snapshot.into_snapshot())
+                        }
+                        RequestOutcomeData::Failed(error) => RequestOutcome::Failed(error),
+                        RequestOutcomeData::Cancelled => RequestOutcome::Cancelled,
+                    },
+                });
+            }
         });
+
+        if executor
+            .submit(cancellation, move |native_request| {
+                let location = location_from_uri(data.location);
+                let outcome = if native_request.synchronize_cancellation() {
+                    RequestOutcomeData::Cancelled
+                } else {
+                    let result = if uri_operations {
+                        inspect_uri_for(&location, native_request.cancellable(), capability)
+                    } else {
+                        inspect_local_for(&location, native_request.cancellable(), capability)
+                    };
+                    if native_request.synchronize_cancellation() {
+                        RequestOutcomeData::Cancelled
+                    } else {
+                        match result {
+                            Ok(snapshot) => RequestOutcomeData::Succeeded(snapshot.into()),
+                            Err(error) => RequestOutcomeData::Failed(error),
+                        }
+                    }
+                };
+
+                let mut completion = Some((native_request, outcome));
+                let source = glib::idle_source_new(None, glib::Priority::DEFAULT, move || {
+                    let (native_request, outcome) = completion
+                        .take()
+                        .expect("executor completion source runs once");
+                    native_request.complete();
+                    let _ = send.unbounded_send(outcome);
+                    glib::ControlFlow::Break
+                });
+                source.attach(Some(&glib::MainContext::ref_thread_default()));
+            })
+            .is_err()
+        {
+            let _ = failure_send.unbounded_send(RequestOutcomeData::Failed(OperationError::new(
+                OperationErrorKind::Unknown,
+                Some(&failure_location),
+                None,
+            )));
+        }
     }
     fn dispatch(
         &self,
@@ -143,43 +493,88 @@ impl GioOperations {
         decision: Option<ConflictDecision>,
         mut sink: OperationSink,
     ) {
-        let (send, mut receive) = futures_channel::mpsc::unbounded();
-        let join_guard = send.clone();
+        let (send, mut receive) = futures_channel::mpsc::unbounded::<OperationEventData>();
+        let failure_send = send.clone();
+        let failure_sources = request.sources.clone();
+        let failure_destination = request.destination.clone();
+        let failure_id = request.id;
+        let data = OperationRequestData::from_request(&request);
+        let cancellation = cancellation_signal(&request.cancellable);
+        let owner_cancellable = request.cancellable.clone();
         let elevated = self.elevated.lock().unwrap().remove(&request.id);
         let uri_operations = self.uri_operations;
-        let worker = std::thread::spawn(move || {
-            let mut sink = |event| {
-                let _ = send.unbounded_send(event);
-            };
-            if elevated {
-                execute_elevated(request, &mut sink);
-            } else {
-                execute_inner_mode(request, decision, uri_operations, &mut sink);
-            }
-        });
-        std::thread::spawn(move || {
-            // This is deliberately a plain Rust thread. `gio::spawn_blocking`
-            // creates a GTask whose completion can outlive this owner context.
-            let _ = worker.join();
-            drop(join_guard);
-        });
+        let executor = self.executor.clone();
+
         self.context.spawn_local(async move {
+            let _owner_cancellable = owner_cancellable;
             let mut terminal = None;
             while let Some(event) = receive.next().await {
+                let event = event.into_event();
                 if event.is_terminal() {
                     terminal = Some(event);
                 } else if terminal.is_none() {
                     sink(event);
                 }
             }
-            // A terminal event means the operation is decided, not that the
-            // worker has released its GIO objects. The plain Rust join bridge
-            // keeps the stream open until that worker exits, without creating
-            // a GTask on this owner context.
             if let Some(event) = terminal {
                 sink(event);
             }
         });
+
+        if executor
+            .submit(cancellation.clone(), move |native_request| {
+                let request = data.into_native(native_request.cancellable().clone());
+                let mut terminal = None;
+                let mut emit = |event: OperationEvent| {
+                    let event = OperationEventData::from(event);
+                    if matches!(
+                        event,
+                        OperationEventData::Succeeded { .. }
+                            | OperationEventData::Failed { .. }
+                            | OperationEventData::Cancelled { .. }
+                    ) {
+                        terminal = Some(event);
+                    } else {
+                        let _ = send.unbounded_send(event);
+                    }
+                };
+                if elevated {
+                    execute_elevated(request, &mut emit);
+                } else {
+                    native_request.synchronize_cancellation();
+                    execute_inner_mode(request, decision, uri_operations, &mut emit);
+                }
+
+                let mut completion = Some((native_request, terminal));
+                let source = glib::idle_source_new(None, glib::Priority::DEFAULT, move || {
+                    let (native_request, terminal) = completion
+                        .take()
+                        .expect("executor completion source runs once");
+                    native_request.complete();
+                    if let Some(event) = terminal {
+                        let _ = send.unbounded_send(event);
+                    }
+                    glib::ControlFlow::Break
+                });
+                source.attach(Some(&glib::MainContext::ref_thread_default()));
+            })
+            .is_err()
+        {
+            let _ = failure_send.unbounded_send(OperationEventData::Failed {
+                id: failure_id,
+                sequence: 1,
+                error: OperationError::new(
+                    OperationErrorKind::Unknown,
+                    failure_sources.first(),
+                    failure_destination.as_ref(),
+                ),
+                completion: OperationCompletion {
+                    remaining: failure_sources,
+                    ..Default::default()
+                }
+                .into(),
+            });
+        }
     }
 }
 

@@ -1,7 +1,7 @@
 use std::{cell::RefCell, rc::Rc};
 use zorin_explorer::{
     core::{contracts::*, ports::FileOperations, Location},
-    infrastructure::gio_operations::GioOperations,
+    infrastructure::{gio_executor::GioExecutor, gio_operations::GioOperations},
 };
 
 use gio::prelude::*;
@@ -516,7 +516,7 @@ fn run(
 ) -> Vec<OperationEvent> {
     let context = glib::MainContext::new();
     let _guard = context.acquire().unwrap();
-    let adapter = GioOperations::new(context.clone());
+    let adapter = GioOperations::with_executor(context.clone(), GioExecutor::shared());
     let received = Rc::new(RefCell::new(Vec::new()));
     let out = received.clone();
     adapter.submit(
@@ -565,6 +565,7 @@ fn local_copy_move_conflict_and_delete_preserve_actual_effects_after_owner_teard
             Some(OperationEvent::Succeeded { .. })
         ));
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "data");
+        assert_eq!(events.iter().filter(|event| event.is_terminal()).count(), 1);
         std::fs::write(&target, "keep").unwrap();
         let events = run(
             MutationKind::Move,
@@ -574,6 +575,7 @@ fn local_copy_move_conflict_and_delete_preserve_actual_effects_after_owner_teard
         assert!(
             matches!(events.last(), Some(OperationEvent::Failed { error, completion, .. }) if error.kind == OperationErrorKind::Conflict && completion.effect == MutationEffect::Unchanged)
         );
+        assert_eq!(events.iter().filter(|event| event.is_terminal()).count(), 1);
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
         let events = run(
             MutationKind::Move,
@@ -584,6 +586,7 @@ fn local_copy_move_conflict_and_delete_preserve_actual_effects_after_owner_teard
             events.last(),
             Some(OperationEvent::Succeeded { .. })
         ));
+        assert_eq!(events.iter().filter(|event| event.is_terminal()).count(), 1);
         assert!(!source.exists());
         assert!(moved.exists());
         let events = run(
@@ -597,6 +600,7 @@ fn local_copy_move_conflict_and_delete_preserve_actual_effects_after_owner_teard
         assert!(
             matches!(events.last(), Some(OperationEvent::Failed { completion, .. }) if completion.effect == MutationEffect::PartiallyChanged && completion.completed == [Location::from_local_path(&moved)])
         );
+        assert_eq!(events.iter().filter(|event| event.is_terminal()).count(), 1);
         assert!(!moved.exists());
     }
 }

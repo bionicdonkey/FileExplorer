@@ -1,7 +1,11 @@
 use gio::prelude::CancellableExt;
+use glib::prelude::ObjectType;
 use std::{
     collections::HashMap,
-    sync::{mpsc, Arc, Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc, Mutex, OnceLock,
+    },
     thread::{self, JoinHandle},
 };
 
@@ -27,19 +31,93 @@ struct ExecutorState {
 struct Lifecycle {
     closing: bool,
     next_request: u64,
-    live: HashMap<u64, gio::Cancellable>,
+    live: HashMap<u64, CancellationSignal>,
+}
+/// A thread-safe cancellation intent that carries no owning GLib reference.
+///
+/// The requesting context owns its public `gio::Cancellable`; the executor
+/// creates and owns the native request cancellable. The signal stores only an
+/// executor-published borrowed pointer while that native cancellable is alive.
+/// `GCancellable` explicitly supports cancellation from another thread, and
+/// the lock guarantees the executor never drops it while a cancellation call
+/// is in progress.
+#[derive(Clone, Default)]
+pub struct CancellationSignal(Arc<CancellationState>);
+
+#[derive(Default)]
+struct CancellationState {
+    cancelled: AtomicBool,
+    active_cancellable: Mutex<Option<usize>>,
 }
 
+struct CancellationLease {
+    state: Arc<CancellationState>,
+}
+
+impl CancellationSignal {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn cancel(&self) {
+        self.0.cancelled.store(true, Ordering::Release);
+        self.0.cancel_active();
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.cancelled.load(Ordering::Acquire)
+    }
+
+    fn attach(&self, cancellable: &gio::Cancellable) -> CancellationLease {
+        let mut active = self.0.active_cancellable.lock().unwrap();
+        *active = Some(cancellable.as_ptr() as usize);
+        if self.is_cancelled() {
+            cancel_native(*active);
+        }
+        CancellationLease {
+            state: self.0.clone(),
+        }
+    }
+}
+
+impl CancellationState {
+    fn cancel_active(&self) {
+        let active = self.active_cancellable.lock().unwrap();
+        cancel_native(*active);
+    }
+}
+
+impl Drop for CancellationLease {
+    fn drop(&mut self) {
+        // Holding this lock excludes a cancellation callback that may be using
+        // the borrowed pointer. Clear it before `GioRequest` releases the
+        // executor-owned `gio::Cancellable`.
+        *self.state.active_cancellable.lock().unwrap() = None;
+    }
+}
+
+fn cancel_native(cancellable: Option<usize>) {
+    if let Some(cancellable) = cancellable {
+        // `g_cancellable_cancel` is documented as thread-safe. This uses a
+        // borrowed pointer only; no GObject reference crosses contexts.
+        unsafe { gio::ffi::g_cancellable_cancel(cancellable as *mut gio::ffi::GCancellable) };
+    }
+}
+
+///
 /// The lifetime token for one native GIO request.
 ///
 /// Move this token into the native completion callback. Calling `complete`, or
 /// dropping the token, makes shutdown aware that the callback released its
 /// request-owned GIO values.
 pub struct GioRequest {
+    // Drop this lease before `cancellable`, so the bridge cannot observe a
+    // freed native object.
+    _cancellation_lease: CancellationLease,
     cancellable: gio::Cancellable,
+    cancellation: CancellationSignal,
     completion: Option<RequestCompletion>,
 }
-
 struct RequestCompletion {
     id: u64,
     state: Arc<ExecutorState>,
@@ -53,6 +131,14 @@ pub enum SubmitError {
 impl GioRequest {
     pub fn cancellable(&self) -> &gio::Cancellable {
         &self.cancellable
+    }
+
+    /// Applies a cross-thread cancellation intent from the executor thread.
+    pub fn synchronize_cancellation(&self) -> bool {
+        if self.cancellation.is_cancelled() {
+            self.cancellable.cancel();
+        }
+        self.cancellable.is_cancelled()
     }
 
     pub fn complete(mut self) {
@@ -132,7 +218,7 @@ impl GioExecutor {
     /// The `GioRequest` passed to the job is the request's native-lifetime
     /// token. Move it into the native completion callback and call `complete`
     /// only after releasing native request values.
-    pub fn submit<F>(&self, cancellable: gio::Cancellable, job: F) -> Result<(), SubmitError>
+    pub fn submit<F>(&self, cancellation: CancellationSignal, job: F) -> Result<(), SubmitError>
     where
         F: FnOnce(GioRequest) + Send + 'static,
     {
@@ -143,20 +229,29 @@ impl GioExecutor {
             }
             let id = lifecycle.next_request;
             lifecycle.next_request += 1;
-            lifecycle.live.insert(id, cancellable.clone());
-            GioRequest {
-                cancellable,
-                completion: Some(RequestCompletion {
-                    id,
-                    state: self.state.clone(),
-                }),
-            }
+            lifecycle.live.insert(id, cancellation.clone());
+            (id, self.state.clone())
         };
 
-        self.context.spawn(async move { job(request) });
+        self.context.spawn(async move {
+            // This is deliberately inside the executor future: no native
+            // cancellable crosses from the requesting context.
+            let cancellable = gio::Cancellable::new();
+            let request = GioRequest {
+                _cancellation_lease: cancellation.attach(&cancellable),
+                cancellable,
+                cancellation,
+                completion: Some(RequestCompletion {
+                    id: request.0,
+                    state: request.1,
+                }),
+            };
+            request.synchronize_cancellation();
+            job(request)
+        });
+
         Ok(())
     }
-
     /// Cancels all live jobs, drains their completion callbacks, and joins the
     /// private executor thread. This is intentionally explicit: it never
     /// switches work to the process-global default context.
@@ -174,8 +269,8 @@ impl GioExecutor {
             )
         };
 
-        for cancellable in cancellables {
-            cancellable.cancel();
+        for cancellation in cancellables {
+            cancellation.cancel();
         }
         if should_quit {
             self.state.main_loop.quit();
@@ -222,7 +317,7 @@ mod tests {
         let (sender, receiver) = mpsc::sync_channel(1);
 
         executor
-            .submit(gio::Cancellable::new(), move |request| {
+            .submit(CancellationSignal::new(), move |request| {
                 let on_executor_context =
                     glib::MainContext::ref_thread_default() == expected_context;
                 sender.send(on_executor_context).unwrap();
@@ -259,7 +354,7 @@ mod tests {
         let cancelled = Arc::new(AtomicUsize::new(0));
 
         executor
-            .submit(gio::Cancellable::new(), {
+            .submit(CancellationSignal::new(), {
                 let callbacks = callbacks.clone();
                 let cancelled = cancelled.clone();
                 move |request| {
