@@ -55,6 +55,12 @@ struct MetadataSortWaiter {
     active: Rc<std::cell::Cell<bool>>,
 }
 
+struct FlowBoxThumbnailWaiter {
+    image: glib::WeakRef<Image>,
+    item: FileItem,
+    thumbnails: bool,
+}
+
 /// The only state retained by a visible-metadata completion. Callbacks keep a
 /// weak reference to this target, rather than retaining the whole FileView
 /// after its tab has closed.
@@ -81,6 +87,8 @@ struct VisibleMetadataTarget {
             >,
         >,
     >,
+    flowbox_thumbnail_waiters:
+        RefCell<std::collections::HashMap<Location, Vec<FlowBoxThumbnailWaiter>>>,
 }
 
 impl VisibleMetadataTarget {
@@ -93,6 +101,9 @@ impl VisibleMetadataTarget {
         if cancelled_locations.is_empty() {
             return;
         }
+        self.flowbox_thumbnail_waiters
+            .borrow_mut()
+            .retain(|location, _| !cancelled_locations.contains(location));
 
         let retained = self
             .cache
@@ -206,7 +217,86 @@ impl VisibleMetadataTarget {
         self.cancel_metadata_sort_waiter();
         self.cache.borrow_mut().invalidate();
         self.pending.borrow_mut().invalidate();
+        self.flowbox_thumbnail_waiters.borrow_mut().clear();
         self.generation.set(None);
+    }
+
+    fn request_flowbox_thumbnail_metadata(
+        self: &Rc<Self>,
+        image: &Image,
+        item: &FileItem,
+        thumbnails: bool,
+    ) {
+        let generation = self.prepare_generation();
+        let cached = self.cache.borrow_mut().get(item.location());
+        if let Some(VisibleMetadataCacheEntry::Resolved(metadata)) = cached.as_ref() {
+            apply_thumbnail(image, &item.with_visible_metadata(metadata), thumbnails);
+            return;
+        }
+
+        self.flowbox_thumbnail_waiters
+            .borrow_mut()
+            .entry(item.location().clone())
+            .or_default()
+            .push(FlowBoxThumbnailWaiter {
+                image: image.downgrade(),
+                item: item.clone(),
+                thumbnails,
+            });
+        if matches!(cached, Some(VisibleMetadataCacheEntry::Pending)) {
+            return;
+        }
+
+        self.cache
+            .borrow_mut()
+            .insert(item.location().clone(), VisibleMetadataCacheEntry::Pending);
+        let request = crate::core::contracts::VisibleMetadataRequest {
+            id: crate::core::contracts::RequestId::allocate(),
+            locations: vec![item.location().clone()],
+            cancellable: gio::Cancellable::new(),
+        };
+        self.register(&request);
+        let request_id = request.id;
+        let target = Rc::downgrade(self);
+        self.navigation.inspect_visible_metadata(
+            request,
+            Box::new(move |result| {
+                if let Some(target) = target.upgrade() {
+                    target.complete(generation, request_id, result);
+                }
+            }),
+        );
+    }
+
+    fn apply_flowbox_thumbnail_waiters(
+        &self,
+        metadata: &[crate::core::contracts::VisibleMetadata],
+    ) {
+        let metadata_by_location: std::collections::HashMap<_, _> = metadata
+            .iter()
+            .map(|entry| (entry.location.clone(), entry))
+            .collect();
+        let waiters = {
+            let mut waiters = self.flowbox_thumbnail_waiters.borrow_mut();
+            metadata_by_location
+                .keys()
+                .filter_map(|location| waiters.remove(location))
+                .flatten()
+                .collect::<Vec<_>>()
+        };
+        for waiter in waiters {
+            let Some(metadata) = metadata_by_location.get(waiter.item.location()) else {
+                continue;
+            };
+            let Some(image) = waiter.image.upgrade() else {
+                continue;
+            };
+            apply_thumbnail(
+                &image,
+                &waiter.item.with_visible_metadata(metadata),
+                waiter.thumbnails,
+            );
+        }
     }
 
     fn register(&self, request: &crate::core::contracts::VisibleMetadataRequest) {
@@ -235,7 +325,8 @@ impl VisibleMetadataTarget {
             return;
         }
         if let crate::core::contracts::RequestOutcome::Succeeded(metadata) = result.outcome {
-            self.apply(metadata);
+            self.apply(metadata.clone());
+            self.apply_flowbox_thumbnail_waiters(&metadata);
         }
     }
 
@@ -585,6 +676,7 @@ impl FileView {
             generation: visible_metadata_generation.clone(),
             cache: visible_metadata.clone(),
             requests: Default::default(),
+            flowbox_thumbnail_waiters: Default::default(),
         });
         let view = Self {
             widget: scroll,
@@ -882,39 +974,8 @@ impl FileView {
         if !thumbnails || item.is_dir() || item.content_type_resolved() {
             return;
         }
-        let generation = self.navigation.state.borrow().navigation_generation;
-        let state = self.navigation.state.clone();
-        let item = item.clone();
-        let image = image.downgrade();
-        let request = crate::core::contracts::VisibleMetadataRequest {
-            id: crate::core::contracts::RequestId::allocate(),
-            locations: vec![item.location().clone()],
-            cancellable: gio::Cancellable::new(),
-        };
-        self.navigation.inspect_visible_metadata(
-            request,
-            Box::new(move |result| {
-                if state.borrow().navigation_generation != generation
-                    || matches!(state.borrow().status, NavigationStatus::Closed)
-                {
-                    return;
-                }
-                let crate::core::contracts::RequestOutcome::Succeeded(metadata) = result.outcome
-                else {
-                    return;
-                };
-                let Some(metadata) = metadata
-                    .iter()
-                    .find(|metadata| metadata.location == *item.location())
-                else {
-                    return;
-                };
-                let Some(image) = image.upgrade() else {
-                    return;
-                };
-                apply_thumbnail(&image, &item.with_visible_metadata(metadata), thumbnails);
-            }),
-        );
+        self.metadata_target
+            .request_flowbox_thumbnail_metadata(image, item, thumbnails);
     }
 
     #[cfg(test)]
@@ -4662,6 +4723,102 @@ mod tests {
                 .map(|texture| (texture.width(), texture.height())),
             Some((256, 256))
         );
+        super::invalidate_thumbnails();
+    }
+
+    #[gtk::test]
+    fn flowbox_thumbnail_metadata_callback_rebinds_after_reload_without_painting_stale_tile() {
+        use crate::core::contracts::{CapabilitySnapshot, EntryKind, EntrySnapshot};
+        use crate::infrastructure::mock_provider::{MockConfig, MockProvider};
+        use gio::prelude::CancellableExt;
+        use glib::object::CastNone;
+        use std::time::{Duration, Instant};
+
+        super::invalidate_thumbnails();
+        let directory = tempfile::tempdir().unwrap();
+        let image_path = directory.path().join("delayed-flowbox.png");
+        let pixbuf =
+            gtk::gdk_pixbuf::Pixbuf::new(gtk::gdk_pixbuf::Colorspace::Rgb, true, 8, 16, 16)
+                .unwrap();
+        pixbuf.fill(0x00ff00ff);
+        pixbuf.savev(&image_path, "png", &[]).unwrap();
+
+        let root = Location::from_uri("smb://fixture/flowbox-thumbnail-rebind").unwrap();
+        let location = Location::from_local_path(&image_path);
+        let entry = EntrySnapshot {
+            location: location.clone(),
+            display_name: "delayed-flowbox.png".into(),
+            kind: EntryKind::File,
+            size: None,
+            modified: None,
+            content_type: Some("image/png".into()),
+            capabilities: CapabilitySnapshot::default(),
+        };
+        let context = glib::MainContext::default();
+        let provider = std::rc::Rc::new(MockProvider::new(context.clone(), MockConfig::default()));
+        provider.set_directory(root.clone(), vec![entry], CapabilitySnapshot::default());
+        let view = FileView::new_with_repository(root, provider.clone());
+        provider.advance(1);
+        while context.pending() {
+            context.iteration(false);
+        }
+        provider.advance(1);
+        while context.pending() {
+            context.iteration(false);
+        }
+        let unresolved = FileItem::from_snapshot(&EntrySnapshot {
+            location: location.clone(),
+            display_name: "delayed-flowbox.png".into(),
+            kind: EntryKind::File,
+            size: None,
+            modified: None,
+            content_type: None,
+            capabilities: CapabilitySnapshot::default(),
+        });
+        let stale_image = gtk::Image::new();
+        view.request_flowbox_thumbnail_metadata(&stale_image, &unresolved, true);
+        let cancellations = provider.visible_metadata_request_cancellables();
+        assert_eq!(cancellations.len(), 1);
+
+        view.reload();
+        assert!(cancellations[0].is_cancelled());
+
+        let rebound_image = gtk::Image::new();
+        view.request_flowbox_thumbnail_metadata(&rebound_image, &unresolved, true);
+        assert_eq!(
+            provider.visible_metadata_requests(),
+            vec![location.clone(), location.clone()],
+            "reload must cancel the stale FlowBox request and permit a fresh binding"
+        );
+        provider.advance(1);
+        while context.pending() {
+            context.iteration(false);
+        }
+        assert!(matches!(
+            view.visible_metadata.borrow_mut().get(&location),
+            Some(super::VisibleMetadataCacheEntry::Resolved(metadata))
+                if metadata.content_type.as_deref() == Some("image/png")
+        ));
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while rebound_image
+            .paintable()
+            .and_downcast::<gtk::gdk::Texture>()
+            .is_none()
+        {
+            assert!(
+                Instant::now() < deadline,
+                "the fresh FlowBox metadata callback did not promote the thumbnail"
+            );
+            context.iteration(false);
+        }
+        assert!(
+            stale_image
+                .paintable()
+                .and_downcast::<gtk::gdk::Texture>()
+                .is_none(),
+            "a cancelled FlowBox callback must not paint its detached tile"
+        );
+        view.close();
         super::invalidate_thumbnails();
     }
 
