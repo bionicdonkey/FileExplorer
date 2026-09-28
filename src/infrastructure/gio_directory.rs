@@ -450,14 +450,17 @@ impl DirectoryRepository for GioDirectoryRepository {
                     .clone()
                     .into_native(native_request.cancellable().clone());
                 let mut emit = |snapshot: DirectorySnapshot| {
-                    send.send(DirectoryOutcomeData::Succeeded(snapshot.into()))
-                        .is_ok()
+                    send_directory_outcome(
+                        &send,
+                        DirectoryOutcomeData::Succeeded(snapshot.into()),
+                        &native_request,
+                    )
                 };
                 let result = enumerate_with_pages(&native, Some(&mut emit));
                 let outcome = terminal_directory_outcome(&native_request, result);
                 drop(native);
+                let _ = send_directory_outcome(&send, outcome, &native_request);
                 native_request.complete();
-                let _ = send.send(outcome);
             })
             .is_err()
         {
@@ -471,6 +474,29 @@ impl DirectoryRepository for GioDirectoryRepository {
 
     fn list(&self, request: DirectoryRequest, done: DirectoryCallback) {
         self.deliver_list(request, done);
+    }
+}
+
+/// Sends bounded page output without permanently occupying the executor when
+/// an owner context stops iterating. Shutdown flips the request cancellation
+/// signal directly, so this loop releases the native request promptly.
+fn send_directory_outcome(
+    send: &std::sync::mpsc::SyncSender<DirectoryOutcomeData>,
+    mut outcome: DirectoryOutcomeData,
+    request: &GioRequest,
+) -> bool {
+    loop {
+        match send.try_send(outcome) {
+            Ok(()) => return true,
+            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => return false,
+            Err(std::sync::mpsc::TrySendError::Full(returned)) => {
+                outcome = returned;
+                if request.synchronize_cancellation() {
+                    return false;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
     }
 }
 

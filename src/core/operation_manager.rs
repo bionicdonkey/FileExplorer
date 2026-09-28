@@ -24,11 +24,81 @@ pub struct OperationSummary {
     pub retry_of: Option<u64>,
     pub explicit_target: Option<String>,
 }
+/// Plain data sent to the detached operation coordinator worker. Native GIO
+/// values are deliberately reconstructed only after the worker owns them.
 struct Submission {
-    request: OperationRequest,
+    request: OperationRequestData,
     confirmed_delete: bool,
     decision: Option<ConflictDecision>,
     retry_of: Option<OperationId>,
+}
+
+struct OperationRequestData {
+    id: OperationId,
+    kind: MutationKind,
+    sources: Vec<String>,
+    destination: Option<String>,
+    explicit_target: Option<String>,
+    capability_version: u64,
+}
+
+impl Submission {
+    fn from_request(
+        request: OperationRequest,
+        confirmed_delete: bool,
+        decision: Option<ConflictDecision>,
+        retry_of: Option<OperationId>,
+    ) -> Self {
+        Self {
+            request: OperationRequestData::from(request),
+            confirmed_delete,
+            decision,
+            retry_of,
+        }
+    }
+}
+
+impl From<OperationRequest> for OperationRequestData {
+    fn from(request: OperationRequest) -> Self {
+        Self {
+            id: request.id,
+            kind: request.kind,
+            sources: request
+                .sources
+                .into_iter()
+                .map(|location| location.uri().to_owned())
+                .collect(),
+            destination: request
+                .destination
+                .map(|location| location.uri().to_owned()),
+            explicit_target: request
+                .explicit_target
+                .map(|location| location.uri().to_owned()),
+            capability_version: request.capability_version,
+        }
+    }
+}
+
+impl OperationRequestData {
+    fn into_request(self) -> OperationRequest {
+        OperationRequest {
+            id: self.id,
+            kind: self.kind,
+            sources: self
+                .sources
+                .into_iter()
+                .map(|uri| Location::from_uri(&uri).expect("validated operation URI"))
+                .collect(),
+            destination: self
+                .destination
+                .map(|uri| Location::from_uri(&uri).expect("validated operation destination URI")),
+            explicit_target: self
+                .explicit_target
+                .map(|uri| Location::from_uri(&uri).expect("validated operation target URI")),
+            capability_version: self.capability_version,
+            cancellable: gio::Cancellable::new(),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -224,14 +294,16 @@ impl OperationManager {
         confirmed_delete: bool,
     ) -> u64 {
         self.enqueue(Submission {
-            request: OperationRequest {
+            request: OperationRequestData {
                 id: OperationId(self.next_id.fetch_add(1, Ordering::Relaxed) + 1),
                 kind,
-                sources,
-                destination,
-                explicit_target,
+                sources: sources
+                    .into_iter()
+                    .map(|location| location.uri().to_owned())
+                    .collect(),
+                destination: destination.map(|location| location.uri().to_owned()),
+                explicit_target: explicit_target.map(|location| location.uri().to_owned()),
                 capability_version: 1,
-                cancellable: gio::Cancellable::new(),
             },
             confirmed_delete,
             decision,
@@ -277,29 +349,29 @@ impl OperationManager {
         confirmed_delete: bool,
         decision: Option<ConflictDecision>,
     ) -> u64 {
-        let request = OperationRequest {
-            id: OperationId(self.next_id.fetch_add(1, Ordering::Relaxed) + 1),
-            kind: match kind {
-                OperationKind::Copy => MutationKind::Copy,
-                OperationKind::Move => MutationKind::Move,
-                OperationKind::Create => MutationKind::Create,
-                OperationKind::Rename => MutationKind::Rename,
-                OperationKind::Trash => MutationKind::Trash,
-                OperationKind::Delete => MutationKind::Delete,
-            },
-            sources: sources
-                .iter()
-                .map(|p| Location::from_local_path(p))
-                .collect(),
-            destination: destination.as_ref().map(|p| Location::from_local_path(p)),
-            explicit_target: explicit_target
-                .as_ref()
-                .map(|p| Location::from_local_path(p)),
-            capability_version: 1,
-            cancellable: gio::Cancellable::new(),
-        };
         self.enqueue(Submission {
-            request,
+            request: OperationRequestData {
+                id: OperationId(self.next_id.fetch_add(1, Ordering::Relaxed) + 1),
+                kind: match kind {
+                    OperationKind::Copy => MutationKind::Copy,
+                    OperationKind::Move => MutationKind::Move,
+                    OperationKind::Create => MutationKind::Create,
+                    OperationKind::Rename => MutationKind::Rename,
+                    OperationKind::Trash => MutationKind::Trash,
+                    OperationKind::Delete => MutationKind::Delete,
+                },
+                sources: sources
+                    .iter()
+                    .map(|path| Location::from_local_path(path).uri().to_owned())
+                    .collect(),
+                destination: destination
+                    .as_ref()
+                    .map(|path| Location::from_local_path(path).uri().to_owned()),
+                explicit_target: explicit_target
+                    .as_ref()
+                    .map(|path| Location::from_local_path(path).uri().to_owned()),
+                capability_version: 1,
+            },
             confirmed_delete,
             decision,
             retry_of: None,
@@ -319,14 +391,22 @@ impl OperationManager {
         self.records.lock().unwrap().push(OperationRecord {
             id,
             kind,
-            source_uris: request.sources.iter().map(|l| l.uri().to_owned()).collect(),
+            source_uris: request.sources.clone(),
             sources: request
                 .sources
                 .iter()
-                .filter_map(Location::local_path)
+                .filter_map(|uri| {
+                    Location::from_uri(uri)
+                        .ok()
+                        .and_then(|location| location.local_path())
+                })
                 .collect(),
-            destination_uri: request.destination.as_ref().map(|l| l.uri().to_owned()),
-            destination: request.destination.as_ref().and_then(Location::local_path),
+            destination_uri: request.destination.clone(),
+            destination: request
+                .destination
+                .as_deref()
+                .and_then(|uri| Location::from_uri(uri).ok())
+                .and_then(|location| location.local_path()),
             completed: 0,
             total: request.sources.len().max(1),
             state: OperationState::Queued,
@@ -359,7 +439,7 @@ impl OperationManager {
                 loop {
                     match receive.recv_timeout(std::time::Duration::from_millis(2)) {
                         Ok(submission) => {
-                            let request = submission.request;
+                            let request = submission.request.into_request();
                             let id = request.id.0;
                             let result = if let Some(original) = submission.retry_of {
                                 adapter.authorize_elevated_retry(request.id);
@@ -500,12 +580,12 @@ impl OperationManager {
         let new_id = OperationId(self.next_id.fetch_add(1, Ordering::Relaxed) + 1);
         let request = crate::application::operations::elevated_retry_request(&original, new_id)
             .map_err(|e| e.to_string())?;
-        self.enqueue(Submission {
+        self.enqueue(Submission::from_request(
             request,
-            confirmed_delete: false,
-            decision: None,
-            retry_of: Some(original.id),
-        });
+            false,
+            None,
+            Some(original.id),
+        ));
         Ok(())
     }
     pub fn summary(&self, id: u64) -> Option<OperationSummary> {
@@ -876,6 +956,41 @@ fn update(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uri_submission_reconstructs_native_request_only_on_worker() {
+        let submission = OperationRequestData {
+            id: OperationId(9),
+            kind: MutationKind::Copy,
+            sources: vec!["file:///tmp/source".to_owned()],
+            destination: Some("file:///tmp/destination".to_owned()),
+            explicit_target: None,
+            capability_version: 3,
+        };
+        let (sent, received) = mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            let request = submission.into_request();
+            sent.send((
+                request.id,
+                request.sources[0].uri().to_owned(),
+                request.destination.unwrap().uri().to_owned(),
+                request.capability_version,
+            ))
+            .unwrap();
+        })
+        .join()
+        .unwrap();
+
+        assert_eq!(
+            received.recv().unwrap(),
+            (
+                OperationId(9),
+                "file:///tmp/source".to_owned(),
+                "file:///tmp/destination".to_owned(),
+                3,
+            )
+        );
+    }
     #[test]
     fn create_and_rename_facades_submit_uri_operations_with_terminal_events() {
         let directory = tempfile::tempdir().unwrap();

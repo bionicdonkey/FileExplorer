@@ -17,7 +17,8 @@ fn main() {
         .application_id("com.zorin.Explorer")
         .build();
     let executor = GioExecutor::for_application();
-    install_executor_shutdown(&app, executor.clone());
+    let shutdown = install_executor_shutdown(&app, executor.clone());
+    shutdown.install_quit_action();
 
     app.connect_activate(move |app| {
         if let Some(display) = gtk::gdk::Display::default() {
@@ -33,5 +34,5 @@ fn main() {
         window.present();
     });
 
-    app.run();
+    shutdown.run();
 }

@@ -8,10 +8,16 @@ use std::{
     time::{Duration, Instant},
 };
 
-use gio::prelude::{ApplicationExt, ApplicationExtManual, CancellableExt};
+use gio::prelude::{ActionGroupExt, ApplicationExt, ApplicationExtManual, CancellableExt};
 use gtk::prelude::GtkWindowExt;
 use zorin_explorer::{
     application::lifecycle::install_executor_shutdown,
+    core::{
+        contracts::{DirectoryRequest, PageRequest, RequestId},
+        ports::DirectoryRepository,
+        Location,
+    },
+    infrastructure::gio_directory::GioDirectoryRepository,
     infrastructure::gio_executor::{CancellationSignal, GioExecutor},
 };
 
@@ -208,6 +214,7 @@ fn programmatic_quit_drains_owner_mount_before_application_quits() {
     });
 
     let shutdown = install_executor_shutdown(&application, executor.clone());
+    shutdown.install_quit_action();
     let shutdown_after_callback = Arc::new(AtomicBool::new(false));
     application.connect_shutdown({
         let callback_released = callback_released.clone();
@@ -220,7 +227,7 @@ fn programmatic_quit_drains_owner_mount_before_application_quits() {
     application.connect_activate(move |application| {
         let window = gtk::ApplicationWindow::new(application);
         window.present();
-        shutdown.quit();
+        application.activate_action("quit", None);
     });
 
     application.run_with_args::<&str>(&[]);
@@ -229,6 +236,112 @@ fn programmatic_quit_drains_owner_mount_before_application_quits() {
     assert!(shutdown_after_callback.load(Ordering::SeqCst));
     assert_eq!(executor.active_request_count_for_tests(), 0);
     assert!(executor.is_shutdown_for_tests());
+}
+
+#[gtk::test]
+fn close_veto_runs_before_lifecycle_drain_and_keep_waiting_keeps_executor_operational() {
+    let _serial = serial_test_guard();
+    let application = gtk::Application::builder()
+        .application_id("io.github.explorer.ExecutorCloseVetoFixture")
+        .flags(gio::ApplicationFlags::NON_UNIQUE)
+        .build();
+    let executor = GioExecutor::for_application();
+    let (handoff_send, handoff_receive) = mpsc::sync_channel(1);
+    executor
+        .submit(CancellationSignal::new(), move |request| {
+            handoff_send.send(request.into_owner_handoff()).unwrap();
+        })
+        .unwrap();
+
+    let owner_cancellable = gio::Cancellable::new();
+    let owner_request = handoff_receive
+        .recv_timeout(Duration::from_secs(1))
+        .expect("owner mount lifecycle must retain the executor request")
+        .begin_owner_mount(&owner_cancellable);
+    let owner_request = Rc::new(RefCell::new(Some(owner_request)));
+    let shutdown = install_executor_shutdown(&application, executor.clone());
+    let kept_waiting = Arc::new(AtomicBool::new(false));
+    let kept_waiting_on_activate = kept_waiting.clone();
+    application.connect_activate(move |application| {
+        let window = gtk::ApplicationWindow::new(application);
+        window.connect_close_request({
+            let kept_waiting = kept_waiting_on_activate.clone();
+            move |_| {
+                kept_waiting.store(true, Ordering::SeqCst);
+                glib::Propagation::Stop
+            }
+        });
+        window.present();
+        glib::idle_add_local_once(move || window.close());
+        let shutdown = shutdown.clone();
+        let owner_request = owner_request.clone();
+        let owner_cancellable = owner_cancellable.clone();
+        let kept_waiting_after_veto = kept_waiting_on_activate.clone();
+        glib::timeout_add_local_once(Duration::from_millis(30), move || {
+            assert!(kept_waiting_after_veto.load(Ordering::SeqCst));
+            assert!(
+                !owner_cancellable.is_cancelled(),
+                "keeping the close confirmation open must not cancel active work"
+            );
+            owner_request
+                .borrow_mut()
+                .take()
+                .expect("test owner request must still be live")
+                .complete();
+            shutdown.quit();
+        });
+    });
+
+    application.run_with_args::<&str>(&[]);
+
+    assert!(kept_waiting.load(Ordering::SeqCst));
+    assert!(executor.is_shutdown_for_tests());
+}
+
+#[test]
+fn shutdown_cancels_large_paged_listing_when_owner_context_never_iterates() {
+    let _serial = serial_test_guard();
+    let directory = tempfile::tempdir().unwrap();
+    for index in 0..(128 * 3 + 1) {
+        std::fs::write(directory.path().join(format!("entry-{index:04}")), b"x").unwrap();
+    }
+
+    let context = glib::MainContext::new();
+    let _owner = context.acquire().unwrap();
+    let executor = GioExecutor::isolated_for_tests();
+    let repository = GioDirectoryRepository::with_executor(context.clone(), executor.clone());
+    repository.list_pages(
+        DirectoryRequest {
+            id: RequestId(41),
+            location: Location::from_local_path(directory.path()),
+            page: PageRequest {
+                offset: 0,
+                limit: usize::MAX,
+            },
+            cancellable: gio::Cancellable::new(),
+        },
+        Box::new(|_| panic!("an uniterated owner context must not receive pages")),
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while executor.active_request_count_for_tests() == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "listing request must reach executor"
+        );
+        std::thread::yield_now();
+    }
+
+    let (finished, finished_receiver) = mpsc::sync_channel(1);
+    let executor_for_shutdown = executor.clone();
+    std::thread::spawn(move || {
+        executor_for_shutdown.shutdown_for_tests();
+        finished.send(()).unwrap();
+    });
+    finished_receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("shutdown must cancel a producer blocked behind unconsumed pages");
+    assert_eq!(executor.active_request_count_for_tests(), 0);
 }
 
 #[gtk::test]

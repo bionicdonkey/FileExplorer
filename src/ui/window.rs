@@ -2155,7 +2155,9 @@ fn show_close_operations_dialog(parent: &ApplicationWindow, operations: Operatio
     dialog.connect_response(None, move |_, response| {
         if response == "close" {
             operations.cancel_all_active();
-            window.destroy();
+            if let Some(application) = window.application() {
+                application.activate_action("quit", None);
+            }
         }
     });
     dialog.present();

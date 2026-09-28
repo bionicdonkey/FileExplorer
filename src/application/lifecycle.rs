@@ -5,7 +5,7 @@ use std::sync::{
 use std::time::Duration;
 
 use crate::infrastructure::gio_executor::GioExecutor;
-use gio::prelude::ApplicationExt;
+use gio::prelude::{ActionMapExt, ApplicationExt, ApplicationExtManual};
 use glib::object::IsA;
 use glib::prelude::ObjectExt;
 use gtk::prelude::{GtkApplicationExt, GtkWindowExt};
@@ -30,7 +30,14 @@ pub fn install_executor_shutdown(
     }
     application.connect_window_added({
         let shutdown = shutdown.clone();
-        move |_, window| shutdown.defer_window_close(window)
+        move |_, window| {
+            // ExplorerWindow installs its active-operation confirmation while it
+            // is constructed. Attach afterwards so a Keep Waiting response
+            // vetoes this lifecycle handler before it can begin shutdown.
+            let shutdown = shutdown.clone();
+            let window = window.clone();
+            glib::idle_add_local_once(move || shutdown.defer_window_close(&window));
+        }
     });
     shutdown
 }
@@ -52,6 +59,25 @@ impl ApplicationShutdown {
     /// remains active until owner-mount completions release their leases.
     pub fn quit(&self) {
         self.begin_drain(DrainCompletion::QuitApplication);
+    }
+
+    /// Installs the only production programmatic quit entry point. The raw
+    /// GTK quit call remains private to the post-drain completion below.
+    pub fn install_quit_action(&self) {
+        let Some(application) = self.application.upgrade() else {
+            return;
+        };
+        let action = gio::SimpleAction::new("quit", None);
+        let shutdown = self.clone();
+        action.connect_activate(move |_, _| shutdown.quit());
+        application.add_action(&action);
+    }
+
+    /// Runs the application while this coordinator remains owned by main.
+    pub fn run(&self) {
+        if let Some(application) = self.application.upgrade() {
+            application.run();
+        }
     }
 
     fn defer_window_close(&self, window: &gtk::Window) {
