@@ -80,6 +80,7 @@ struct MockState {
     search_behavior: MockSearchBehavior,
     visible_metadata_requests: Vec<Location>,
     list_results_after_cancellation: bool,
+    visible_metadata_results_after_cancellation: bool,
     visible_metadata_cancellables: Vec<gio::Cancellable>,
     active_visible_metadata_requests: usize,
 }
@@ -109,6 +110,7 @@ impl MockProvider {
                 search_behavior: MockSearchBehavior::default(),
                 visible_metadata_requests: Vec::new(),
                 list_results_after_cancellation: false,
+                visible_metadata_results_after_cancellation: false,
                 visible_metadata_cancellables: Vec::new(),
                 active_visible_metadata_requests: 0,
             })),
@@ -166,6 +168,13 @@ impl MockProvider {
     /// list after the caller has cancelled its token.
     pub fn set_list_results_after_cancellation(&self, enabled: bool) {
         self.state.borrow_mut().list_results_after_cancellation = enabled;
+    }
+    /// Test providers may model a backend that completes metadata inspection
+    /// after the caller has cancelled its token.
+    pub fn set_visible_metadata_results_after_cancellation(&self, enabled: bool) {
+        self.state
+            .borrow_mut()
+            .visible_metadata_results_after_cancellation = enabled;
     }
 
     pub fn visible_metadata_request_cancellables(&self) -> Vec<gio::Cancellable> {
@@ -639,7 +648,12 @@ impl DirectoryRepository for MockProvider {
             .visible_metadata_cancellables
             .push(request.cancellable.clone());
         self.schedule(Box::new(move |provider| {
-            let outcome = if request.cancellable.is_cancelled() {
+            let outcome = if request.cancellable.is_cancelled()
+                && !provider
+                    .state
+                    .borrow()
+                    .visible_metadata_results_after_cancellation
+            {
                 RequestOutcome::Cancelled
             } else {
                 let state = provider.state.borrow();

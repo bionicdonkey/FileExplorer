@@ -299,6 +299,53 @@ impl VisibleMetadataTarget {
         }
     }
 
+    fn discard_missing_successful_metadata(
+        &self,
+        requested: &[Location],
+        metadata: &[crate::core::contracts::VisibleMetadata],
+    ) {
+        let returned = metadata
+            .iter()
+            .map(|entry| entry.location.clone())
+            .collect::<std::collections::HashSet<_>>();
+        let missing = requested
+            .iter()
+            .filter(|location| !returned.contains(*location))
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
+        if missing.is_empty() {
+            return;
+        }
+
+        self.flowbox_thumbnail_waiters
+            .borrow_mut()
+            .retain(|location, _| !missing.contains(location));
+        let mut cache = self.cache.borrow_mut();
+        let retained_cache = cache
+            .entries()
+            .into_iter()
+            .filter(|(location, entry)| {
+                !missing.contains(location)
+                    || matches!(entry, VisibleMetadataCacheEntry::Resolved(_))
+            })
+            .collect::<Vec<_>>();
+        cache.invalidate();
+        for (location, entry) in retained_cache {
+            cache.insert(location, entry);
+        }
+        drop(cache);
+        let mut pending = self.pending.borrow_mut();
+        let retained_pending = pending
+            .entries()
+            .into_iter()
+            .filter(|(location, _)| !missing.contains(location))
+            .collect::<Vec<_>>();
+        pending.invalidate();
+        for (location, entry) in retained_pending {
+            pending.insert(location, entry);
+        }
+    }
+
     fn register(&self, request: &crate::core::contracts::VisibleMetadataRequest) {
         self.requests.borrow_mut().insert(
             request.id,
@@ -314,8 +361,10 @@ impl VisibleMetadataTarget {
             Vec<crate::core::contracts::VisibleMetadata>,
         >,
     ) {
-        if self.requests.borrow_mut().remove(&request_id).is_none()
-            || result.id != request_id
+        let Some((_, requested)) = self.requests.borrow_mut().remove(&request_id) else {
+            return;
+        };
+        if result.id != request_id
             || self.navigation.state.borrow().navigation_generation != generation
             || matches!(
                 self.navigation.state.borrow().status,
@@ -325,6 +374,7 @@ impl VisibleMetadataTarget {
             return;
         }
         if let crate::core::contracts::RequestOutcome::Succeeded(metadata) = result.outcome {
+            self.discard_missing_successful_metadata(&requested, &metadata);
             self.apply(metadata.clone());
             self.apply_flowbox_thumbnail_waiters(&metadata);
         }
@@ -4224,6 +4274,57 @@ mod tests {
     }
 
     #[gtk::test]
+    fn slice5_empty_visible_metadata_completion_retries_the_requested_location() {
+        use crate::core::contracts::{EntryKind, EntrySnapshot};
+        use crate::infrastructure::mock_provider::{MockConfig, MockProvider};
+
+        let context = glib::MainContext::default();
+        let root = Location::from_uri("smb://fixture/empty-metadata").unwrap();
+        let target = Location::from_uri(&format!("{}/missing.txt", root.uri())).unwrap();
+        let provider = std::rc::Rc::new(MockProvider::new(context.clone(), MockConfig::default()));
+        provider.set_directory(root.clone(), Vec::new(), Default::default());
+        let view = FileView::new_with_repository(root, provider.clone());
+        provider.advance(1);
+        while context.pending() {
+            context.iteration(false);
+        }
+        let item = FileItem::from_snapshot(&EntrySnapshot {
+            location: target.clone(),
+            display_name: "missing.txt".into(),
+            kind: EntryKind::File,
+            size: None,
+            modified: None,
+            content_type: None,
+            capabilities: Default::default(),
+        });
+
+        let image = gtk::Image::new();
+        view.request_flowbox_thumbnail_metadata(&image, &item, true);
+        provider.advance(1);
+        while context.pending() {
+            context.iteration(false);
+        }
+
+        assert!(view.visible_metadata.borrow_mut().get(&target).is_none());
+        assert_eq!(view.pending_visible_metadata.borrow().len(), 0);
+        assert!(view
+            .metadata_target
+            .flowbox_thumbnail_waiters
+            .borrow()
+            .get(&target)
+            .is_none());
+
+        let rebound_image = gtk::Image::new();
+        view.request_flowbox_thumbnail_metadata(&rebound_image, &item, true);
+        assert_eq!(
+            provider.visible_metadata_requests(),
+            vec![target.clone(), target],
+            "a successful response that omits a requested location must permit a retry"
+        );
+        view.close();
+    }
+
+    #[gtk::test]
     fn slice5_pending_rebind_does_not_apply_deferred_metadata_from_an_evicted_resolution() {
         use super::{ListRow, VisibleMetadataCacheEntry};
         use crate::application::performance::CachePolicy;
@@ -4459,16 +4560,19 @@ mod tests {
         let second = Location::from_uri("smb://fixture/navigation-metadata-second").unwrap();
         let target = Location::from_uri(&format!("{}/report.txt", first.uri())).unwrap();
         let provider = std::rc::Rc::new(MockProvider::new(context.clone(), MockConfig::default()));
-        let view = FileView::new_with_repository(first, provider.clone());
-        let item = FileItem::from_snapshot(&EntrySnapshot {
+        let entry = EntrySnapshot {
             location: target.clone(),
             display_name: "report.txt".into(),
             kind: EntryKind::File,
-            size: None,
+            size: Some(99),
             modified: None,
-            content_type: None,
+            content_type: Some("text/plain".into()),
             capabilities: Default::default(),
-        });
+        };
+        provider.set_directory(first.clone(), vec![entry.clone()], Default::default());
+        provider.set_visible_metadata_results_after_cancellation(true);
+        let view = FileView::new_with_repository(first, provider.clone());
+        let item = FileItem::from_snapshot(&entry);
 
         view.request_visible_metadata(&item);
         let cancellations = provider.visible_metadata_request_cancellables();
