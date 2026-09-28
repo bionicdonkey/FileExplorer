@@ -711,6 +711,10 @@ fn slice4_platform_layout_renders_large_text_narrow_rtl_and_high_contrast() {
     let old_font = settings.gtk_font_name();
     let old_animations = settings.is_gtk_enable_animations();
     let old_direction = gtk::Widget::default_direction();
+    // This fixture exercises layout only. A local URI avoids starting a remote
+    // breadcrumb metadata query that would outlive the case being measured.
+    let location_fixture = tempfile::tempdir().unwrap();
+    let location = Location::from_local_path(location_fixture.path());
     let application = adw::Application::builder()
         .application_id("io.github.explorer.AccessibilityFixture")
         .build();
@@ -740,12 +744,7 @@ fn slice4_platform_layout_renders_large_text_narrow_rtl_and_high_contrast() {
         if high_contrast {
             window.add_css_class("high-contrast");
         }
-        let header = HeaderControls::new(Rc::new(RefCell::new(
-            Location::from_uri(
-                "smb://server/share/Long%20folder%20name/Another%20long%20folder/Final%20folder",
-            )
-            .unwrap(),
-        )));
+        let header = HeaderControls::new(Rc::new(RefCell::new(location.clone())));
         let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         toolbar.append(&gtk::SearchEntry::new());
         for label in ["Sort", "Group", "View"] {
@@ -802,7 +801,22 @@ fn slice4_platform_layout_renders_large_text_narrow_rtl_and_high_contrast() {
                 .save_to_png(std::path::Path::new(&directory).join(format!("{name}.png")))
                 .unwrap();
         }
+        window.set_content(gtk::Widget::NONE);
         window.close();
+        drop(body);
+        drop(header);
+        drop(toolbar);
+        drop(sidebar);
+        drop(window);
+        while context.pending() {
+            context.iteration(false);
+        }
+    }
+    application.quit();
+    drop(application);
+    let context = glib::MainContext::default();
+    while context.pending() {
+        context.iteration(false);
     }
     settings.set_gtk_font_name(old_font.as_deref());
     settings.set_gtk_enable_animations(old_animations);

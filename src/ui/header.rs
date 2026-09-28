@@ -26,6 +26,36 @@ pub enum FileAction {
     MoveToTrash,
 }
 
+#[derive(Default)]
+struct BreadcrumbMetadataRequests {
+    active: RefCell<Vec<gio::Cancellable>>,
+}
+
+impl BreadcrumbMetadataRequests {
+    fn cancel_all(&self) {
+        let active = self.active.borrow_mut().drain(..).collect::<Vec<_>>();
+        for cancellable in active {
+            cancellable.cancel();
+        }
+    }
+
+    fn track(&self, cancellable: gio::Cancellable) {
+        self.active.borrow_mut().push(cancellable);
+    }
+
+    fn complete(&self, completed: &gio::Cancellable) {
+        self.active
+            .borrow_mut()
+            .retain(|active| active != completed);
+    }
+}
+
+impl Drop for BreadcrumbMetadataRequests {
+    fn drop(&mut self) {
+        self.cancel_all();
+    }
+}
+
 /// A clickable breadcrumb trail over a `Stack` that swaps to a plain `Entry`
 /// on double-click, so typing or pasting a path works the same way anywhere
 /// this bar is used. Shared by the main window's header and the in-app
@@ -38,6 +68,7 @@ pub struct LocationBar {
     stack: Stack,
     on_navigate: Rc<RefCell<Option<Box<dyn Fn(Location)>>>>,
     committed_uri: Rc<RefCell<String>>,
+    breadcrumb_metadata_requests: Rc<BreadcrumbMetadataRequests>,
 }
 
 impl LocationBar {
@@ -103,6 +134,7 @@ impl LocationBar {
         breadcrumbs.add_controller(click);
 
         let on_navigate = Rc::new(RefCell::new(None));
+        let breadcrumb_metadata_requests = Rc::new(BreadcrumbMetadataRequests::default());
         let bar = Self {
             widget: stack.clone(),
             entry,
@@ -110,6 +142,7 @@ impl LocationBar {
             stack,
             on_navigate,
             committed_uri,
+            breadcrumb_metadata_requests,
         };
         bar.set_uri(initial.uri());
         bar
@@ -184,6 +217,7 @@ impl LocationBar {
     }
 
     pub fn set_section(&self, title: &str) {
+        self.breadcrumb_metadata_requests.cancel_all();
         while let Some(child) = self.breadcrumbs.first_child() {
             self.breadcrumbs.remove(&child);
         }
@@ -204,6 +238,7 @@ impl LocationBar {
     }
 
     fn render_breadcrumbs(&self, path: &std::path::Path) {
+        self.breadcrumb_metadata_requests.cancel_all();
         while let Some(child) = self.breadcrumbs.first_child() {
             self.breadcrumbs.remove(&child);
         }
@@ -267,6 +302,7 @@ impl LocationBar {
     }
 
     fn render_uri_breadcrumbs(&self, uri: &str) {
+        self.breadcrumb_metadata_requests.cancel_all();
         if let Ok(location) = Location::from_uri(uri) {
             if let Some(path) = location.local_path() {
                 self.render_breadcrumbs(&path);
@@ -307,12 +343,19 @@ impl LocationBar {
             self.connect_location_breadcrumb(&button, location.clone(), current);
             self.breadcrumbs.append(&button);
             let weak = button.downgrade();
+            let cancellable = gio::Cancellable::new();
+            self.breadcrumb_metadata_requests.track(cancellable.clone());
+            let requests = Rc::downgrade(&self.breadcrumb_metadata_requests);
+            let completed = cancellable.clone();
             gio::File::for_uri(location.uri()).query_info_async(
                 "standard::display-name",
                 gio::FileQueryInfoFlags::NONE,
                 glib::Priority::DEFAULT,
-                gio::Cancellable::NONE,
+                Some(&cancellable),
                 move |result| {
+                    if let Some(requests) = requests.upgrade() {
+                        requests.complete(&completed);
+                    }
                     if let (Some(button), Ok(info)) = (weak.upgrade(), result) {
                         if !info.display_name().is_empty() {
                             button.set_label(&info.display_name());
@@ -558,5 +601,38 @@ mod tests {
             header.trash.tooltip_text().as_deref(),
             Some("This location does not support Trash")
         );
+    }
+
+    #[gtk::test]
+    fn replacing_remote_breadcrumbs_cancels_their_metadata_requests() {
+        let bar = super::LocationBar::new(
+            &crate::core::Location::from_uri("smb://host/share/child").unwrap(),
+        );
+        let pending = bar.breadcrumb_metadata_requests.active.borrow().clone();
+        assert!(
+            !pending.is_empty(),
+            "remote breadcrumbs must retain their in-flight metadata requests"
+        );
+
+        bar.set_uri("file:///tmp");
+
+        assert!(pending
+            .iter()
+            .all(gio::prelude::CancellableExt::is_cancelled));
+    }
+
+    #[gtk::test]
+    fn dropping_remote_breadcrumbs_cancels_their_metadata_requests() {
+        let bar = super::LocationBar::new(
+            &crate::core::Location::from_uri("smb://host/share/child").unwrap(),
+        );
+        let pending = bar.breadcrumb_metadata_requests.active.borrow().clone();
+        assert!(!pending.is_empty());
+
+        drop(bar);
+
+        assert!(pending
+            .iter()
+            .all(gio::prelude::CancellableExt::is_cancelled));
     }
 }
