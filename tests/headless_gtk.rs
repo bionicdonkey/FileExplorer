@@ -714,7 +714,13 @@ fn slice4_platform_layout_renders_large_text_narrow_rtl_and_high_contrast() {
     // This fixture exercises layout only. A local URI avoids starting a remote
     // breadcrumb metadata query that would outlive the case being measured.
     let location_fixture = tempfile::tempdir().unwrap();
-    let location = Location::from_local_path(location_fixture.path());
+    let location = Location::from_local_path(
+        &location_fixture
+            .path()
+            .join("Long folder name")
+            .join("Another long folder")
+            .join("Final folder"),
+    );
     let application = adw::Application::builder()
         .application_id("io.github.explorer.AccessibilityFixture")
         .build();
