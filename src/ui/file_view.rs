@@ -875,6 +875,48 @@ impl FileView {
         );
     }
 
+    /// The compact FlowBox grid owns concrete image widgets instead of a
+    /// ListModel row. Its rendered file tiles are therefore the visible-range
+    /// boundary for metadata needed to promote a deferred thumbnail.
+    fn request_flowbox_thumbnail_metadata(&self, image: &Image, item: &FileItem, thumbnails: bool) {
+        if !thumbnails || item.is_dir() || item.content_type_resolved() {
+            return;
+        }
+        let generation = self.navigation.state.borrow().navigation_generation;
+        let state = self.navigation.state.clone();
+        let item = item.clone();
+        let image = image.downgrade();
+        let request = crate::core::contracts::VisibleMetadataRequest {
+            id: crate::core::contracts::RequestId::allocate(),
+            locations: vec![item.location().clone()],
+            cancellable: gio::Cancellable::new(),
+        };
+        self.navigation.inspect_visible_metadata(
+            request,
+            Box::new(move |result| {
+                if state.borrow().navigation_generation != generation
+                    || matches!(state.borrow().status, NavigationStatus::Closed)
+                {
+                    return;
+                }
+                let crate::core::contracts::RequestOutcome::Succeeded(metadata) = result.outcome
+                else {
+                    return;
+                };
+                let Some(metadata) = metadata
+                    .iter()
+                    .find(|metadata| metadata.location == *item.location())
+                else {
+                    return;
+                };
+                let Some(image) = image.upgrade() else {
+                    return;
+                };
+                apply_thumbnail(&image, &item.with_visible_metadata(metadata), thumbnails);
+            }),
+        );
+    }
+
     #[cfg(test)]
     fn apply_visible_metadata(&self, metadata: Vec<crate::core::contracts::VisibleMetadata>) {
         self.prepare_visible_metadata_generation();
@@ -2334,6 +2376,7 @@ impl FileView {
         if let Some(keys) = self.stream_selection.borrow_mut().take() {
             self.restore_stream_selection(keys);
         }
+        self.metadata_target.flush();
         self.flush_visible_metadata();
     }
 
@@ -2613,6 +2656,7 @@ impl FileView {
             tile.set_margin_bottom(layout.vertical_padding);
             let icon = item_image(item, options.thumbnails);
             icon.set_pixel_size(options.grid_size.icon_size());
+            self.request_flowbox_thumbnail_metadata(&icon, item, options.thumbnails);
             tile.append(&icon);
             tile.append(&grid_tile_label(item.name(), layout.label_width_chars));
             attach_drag_source(&tile, item.clone(), self.clone());
@@ -4554,6 +4598,73 @@ mod tests {
         assert_eq!(local_image_thumbnail_file(&item), Some(image_path));
     }
 
+    #[gtk::test]
+    fn thumbnail_decodes_after_delayed_visible_content_type_metadata() {
+        use crate::core::contracts::{
+            CapabilitySnapshot, EntryKind, EntrySnapshot, VisibleMetadata,
+        };
+        use glib::object::CastNone;
+        use gtk::gdk::prelude::TextureExt;
+        use std::time::{Duration, Instant};
+
+        super::invalidate_thumbnails();
+        let directory = tempfile::tempdir().unwrap();
+        let image_path = directory.path().join("delayed.png");
+        let pixbuf =
+            gtk::gdk_pixbuf::Pixbuf::new(gtk::gdk_pixbuf::Colorspace::Rgb, true, 8, 16, 16)
+                .unwrap();
+        pixbuf.fill(0x00ff00ff);
+        pixbuf.savev(&image_path, "png", &[]).unwrap();
+        let unresolved = FileItem::from_snapshot(&EntrySnapshot {
+            location: Location::from_local_path(&image_path),
+            display_name: "delayed.png".into(),
+            kind: EntryKind::File,
+            size: None,
+            modified: None,
+            content_type: None,
+            capabilities: CapabilitySnapshot::default(),
+        });
+        let image = gtk::Image::new();
+        super::apply_thumbnail(&image, &unresolved, true);
+
+        assert!(!super::THUMBNAILS.with(|state| {
+            let mut state = state.borrow_mut();
+            state.running
+                || !state.queue.is_empty()
+                || state.cache.get(unresolved.location()).is_some()
+        }));
+
+        let resolved = unresolved.with_visible_metadata(&VisibleMetadata {
+            location: unresolved.location().clone(),
+            size: None,
+            modified: None,
+            content_type: Some("image/png".into()),
+        });
+        let promoted_image = gtk::Image::new();
+        super::apply_thumbnail(&promoted_image, &resolved, true);
+        let context = glib::MainContext::default();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while promoted_image
+            .paintable()
+            .and_downcast::<gtk::gdk::Texture>()
+            .is_none()
+        {
+            assert!(
+                Instant::now() < deadline,
+                "resolved image did not receive a thumbnail"
+            );
+            context.iteration(false);
+        }
+        assert_eq!(
+            promoted_image
+                .paintable()
+                .and_downcast::<gtk::gdk::Texture>()
+                .map(|texture| (texture.width(), texture.height())),
+            Some((256, 256))
+        );
+        super::invalidate_thumbnails();
+    }
+
     #[test]
     fn thumbnail_lookup_checks_the_shared_home_cache_before_the_sandbox_cache() {
         let home = PathBuf::from("/home/tester");
@@ -4667,7 +4778,10 @@ fn item_image(item: &FileItem, thumbnails: bool) -> Image {
 }
 
 fn apply_thumbnail(image: &Image, item: &FileItem, thumbnails: bool) {
-    if !thumbnails {
+    // The initial streaming listing deliberately omits content types. Do not
+    // convert that temporary fallback into a URI-scoped negative cache entry:
+    // binding will run again after visible metadata promotes the row.
+    if !thumbnails || !item.content_type_resolved() {
         return;
     }
     if let Some(cached) = THUMBNAILS.with(|state| state.borrow_mut().cache.get(item.location())) {

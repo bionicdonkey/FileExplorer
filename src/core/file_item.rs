@@ -21,6 +21,7 @@ pub struct FileItem {
     size: u64,
     modified: SystemTime,
     content_type: String,
+    content_type_resolved: bool,
 }
 
 impl FileItem {
@@ -41,6 +42,7 @@ impl FileItem {
                 .content_type
                 .clone()
                 .unwrap_or_else(|| "application/octet-stream".into()),
+            content_type_resolved: entry.content_type.is_some(),
         }
     }
 
@@ -58,6 +60,9 @@ impl FileItem {
         if let Some(content_type) = &metadata.content_type {
             item.content_type = content_type.clone();
         }
+        // A completed visible-metadata request makes a missing type a stable
+        // fallback instead of an unresolved listing placeholder.
+        item.content_type_resolved = true;
         item
     }
     pub fn from_dir_entry(entry: &DirEntry) -> io::Result<Self> {
@@ -101,6 +106,7 @@ impl FileItem {
             size: metadata.len(),
             modified: metadata.modified().unwrap_or(UNIX_EPOCH),
             content_type,
+            content_type_resolved: true,
         }
     }
 
@@ -133,6 +139,7 @@ impl FileItem {
             .or_else(|_| Location::try_from_file(child))
             .unwrap_or_else(|_| Location::home());
         let content_type = gio_content_type(info);
+        let content_type_resolved = info.has_attribute("standard::content-type");
         let modified = gio_modified(info);
         Self {
             identity_key: location.uri().to_owned(),
@@ -146,6 +153,7 @@ impl FileItem {
             size: gio_size(info),
             modified,
             content_type,
+            content_type_resolved,
         }
     }
 
@@ -186,6 +194,12 @@ impl FileItem {
 
     pub fn content_type(&self) -> &str {
         &self.content_type
+    }
+
+    /// Whether the content type came from listing or visible metadata rather
+    /// than the safe placeholder used while its query is still pending.
+    pub fn content_type_resolved(&self) -> bool {
+        self.content_type_resolved
     }
 
     pub fn uri(&self) -> &str {
