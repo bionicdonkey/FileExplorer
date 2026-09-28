@@ -861,6 +861,10 @@ impl ExplorerWindow {
 
         Self { window }
     }
+    /// The GTK toplevel used by application lifecycle coordination.
+    pub fn window(&self) -> &ApplicationWindow {
+        &self.window
+    }
 
     pub fn present(&self) {
         self.window.present();

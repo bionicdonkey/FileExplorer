@@ -8,7 +8,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use gio::prelude::{CancellableExt, ObjectExt};
+use gio::prelude::{ApplicationExt, ApplicationExtManual, CancellableExt, ObjectExt};
+use gtk::prelude::GtkWindowExt;
 use zorin_explorer::{
     application::lifecycle::install_executor_shutdown,
     infrastructure::gio_executor::{CancellationSignal, GioExecutor},
@@ -161,4 +162,68 @@ fn application_shutdown_keeps_owner_context_running_until_mount_callback_release
     }
 
     assert_eq!(executor.active_request_count_for_tests(), 0);
+}
+
+#[gtk::test]
+fn window_close_drains_owner_mount_before_application_quits() {
+    let _serial = serial_test_guard();
+    let application = gtk::Application::builder()
+        .application_id("io.github.explorer.ExecutorPreQuitOwnerMountFixture")
+        .flags(gio::ApplicationFlags::NON_UNIQUE)
+        .build();
+    let executor = GioExecutor::for_application();
+    let (handoff_send, handoff_receive) = mpsc::sync_channel(1);
+    executor
+        .submit(CancellationSignal::new(), move |request| {
+            handoff_send.send(request.into_owner_handoff()).unwrap();
+        })
+        .unwrap();
+
+    let owner_cancellable = gio::Cancellable::new();
+    let owner_request = handoff_receive
+        .recv_timeout(Duration::from_secs(1))
+        .expect("owner mount lifecycle must retain the executor request")
+        .begin_owner_mount(&owner_cancellable);
+    let callback_released = Arc::new(AtomicBool::new(false));
+    let callback_request = Rc::new(RefCell::new(Some(owner_request)));
+    let callback_request_on_owner = callback_request.clone();
+    let callback_released_on_owner = callback_released.clone();
+    let callback_cancellable = owner_cancellable.clone();
+    glib::idle_add_local(move || {
+        if callback_cancellable.is_cancelled() {
+            callback_request_on_owner
+                .borrow_mut()
+                .take()
+                .expect("owner mount completion must release its lease once")
+                .complete();
+            callback_released_on_owner.store(true, Ordering::SeqCst);
+            glib::ControlFlow::Break
+        } else {
+            glib::ControlFlow::Continue
+        }
+    });
+
+    let shutdown = install_executor_shutdown(&application, executor.clone());
+    let shutdown_after_callback = Arc::new(AtomicBool::new(false));
+    application.connect_shutdown({
+        let callback_released = callback_released.clone();
+        let shutdown_after_callback = shutdown_after_callback.clone();
+        move |_| {
+            shutdown_after_callback
+                .store(callback_released.load(Ordering::SeqCst), Ordering::SeqCst)
+        }
+    });
+    application.connect_activate(move |application| {
+        let window = gtk::ApplicationWindow::new(application);
+        shutdown.defer_window_close(&window);
+        window.present();
+        window.close();
+    });
+
+    application.run_with_args::<&str>(&[]);
+
+    assert!(callback_released.load(Ordering::SeqCst));
+    assert!(shutdown_after_callback.load(Ordering::SeqCst));
+    assert_eq!(executor.active_request_count_for_tests(), 0);
+    assert!(executor.is_shutdown_for_tests());
 }

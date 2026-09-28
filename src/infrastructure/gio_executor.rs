@@ -337,9 +337,14 @@ impl GioExecutor {
         self.state.lifecycle.lock().unwrap().live.len()
     }
 
+    /// Reports that the executor thread has drained and joined.
+    pub fn shutdown_complete(&self) -> bool {
+        self.state.join_complete.load(Ordering::Acquire)
+    }
+
     #[doc(hidden)]
     pub fn is_shutdown_for_tests(&self) -> bool {
-        self.state.join_complete.load(Ordering::Acquire)
+        self.shutdown_complete()
     }
 
     /// Detaches and joins the shared executor only when no adapter still owns
