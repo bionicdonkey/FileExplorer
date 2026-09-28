@@ -27,6 +27,7 @@ pub struct GioExecutor {
 struct ExecutorState {
     main_loop: glib::MainLoop,
     lifecycle: Mutex<Lifecycle>,
+    join_complete: AtomicBool,
 }
 
 struct Lifecycle {
@@ -279,6 +280,7 @@ impl GioExecutor {
                     next_request: 0,
                     live: HashMap::new(),
                 }),
+                join_complete: AtomicBool::new(false),
             }),
             thread: Mutex::new(Some(thread)),
         }
@@ -337,7 +339,7 @@ impl GioExecutor {
 
     #[doc(hidden)]
     pub fn is_shutdown_for_tests(&self) -> bool {
-        self.thread.lock().unwrap().is_none()
+        self.state.join_complete.load(Ordering::Acquire)
     }
 
     /// Detaches and joins the shared executor only when no adapter still owns
@@ -363,14 +365,14 @@ impl GioExecutor {
         true
     }
 
-    /// Cancels live jobs, drains native completion callbacks, and joins the
-    /// private executor thread without switching work to the process-global
-    /// default context.
-    pub fn shutdown(&self) {
+    /// Immediately prevents new work and cancels every native and
+    /// owner-context request. The executor loop continues until each native
+    /// completion callback has released its request values.
+    fn begin_shutdown(&self) -> bool {
         let (cancellables, should_quit) = {
             let mut lifecycle = self.state.lifecycle.lock().unwrap();
             if lifecycle.closing {
-                return;
+                return false;
             }
             lifecycle.closing = true;
             (
@@ -386,11 +388,44 @@ impl GioExecutor {
             self.state.main_loop.quit();
         }
 
+        true
+    }
+
+    /// Joins only after the executor loop has drained every native request.
+    fn join_after_drain(&self) {
         if let Some(thread) = self.thread.lock().unwrap().take() {
             thread.join().expect("GIO executor thread must not panic");
         }
         Self::clear_shared(self);
         Self::clear_application_default(self);
+        self.state.join_complete.store(true, Ordering::Release);
+    }
+
+    /// Cancels live jobs, drains native completion callbacks, and joins the
+    /// private executor thread without switching work to the process-global
+    /// default context.
+    pub fn shutdown(&self) {
+        if self.begin_shutdown() {
+            self.join_after_drain();
+        }
+    }
+
+    /// Starts shutdown without blocking the caller's GLib owner context.
+    ///
+    /// This is required for application shutdown because an owner-context
+    /// mount callback may still hold the final request lease needed to stop
+    /// the executor loop. The join and final executor teardown run after that
+    /// callback has drained, on a helper thread.
+    pub fn shutdown_async(self: &Arc<Self>) {
+        if !self.begin_shutdown() {
+            return;
+        }
+
+        let executor = self.clone();
+        thread::Builder::new()
+            .name("gio-executor-shutdown".into())
+            .spawn(move || executor.join_after_drain())
+            .expect("GIO executor shutdown thread must start");
     }
 
     #[doc(hidden)]

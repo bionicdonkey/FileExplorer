@@ -1,9 +1,14 @@
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc, Mutex, OnceLock,
+use std::{
+    cell::RefCell,
+    rc::Rc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc, Mutex, OnceLock,
+    },
+    time::{Duration, Instant},
 };
 
-use gio::prelude::ObjectExt;
+use gio::prelude::{CancellableExt, ObjectExt};
 use zorin_explorer::{
     application::lifecycle::install_executor_shutdown,
     infrastructure::gio_executor::{CancellationSignal, GioExecutor},
@@ -89,7 +94,71 @@ fn application_shutdown_drains_its_owned_executor() {
     drop(adapter_executor);
     application.emit_by_name::<()>("shutdown", &[]);
 
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !completed.load(Ordering::SeqCst) || !executor.is_shutdown_for_tests() {
+        assert!(
+            Instant::now() < deadline,
+            "executor shutdown must drain before application teardown completes"
+        );
+        std::thread::yield_now();
+    }
+
     assert!(completed.load(Ordering::SeqCst));
     assert_eq!(executor.active_request_count_for_tests(), 0);
     assert!(executor.is_shutdown_for_tests());
+}
+
+#[test]
+fn application_shutdown_keeps_owner_context_running_until_mount_callback_releases_lease() {
+    let _serial = serial_test_guard();
+    let context = glib::MainContext::default();
+    let application = gio::Application::builder()
+        .application_id("io.github.explorer.ExecutorOwnerMountShutdownFixture")
+        .build();
+    let executor = GioExecutor::for_application();
+    let (handoff_send, handoff_receive) = mpsc::sync_channel(1);
+    executor
+        .submit(CancellationSignal::new(), move |request| {
+            handoff_send.send(request.into_owner_handoff()).unwrap();
+        })
+        .unwrap();
+
+    let owner_cancellable = gio::Cancellable::new();
+    let owner_request = handoff_receive
+        .recv_timeout(Duration::from_secs(1))
+        .expect("owner mount lifecycle must retain the executor request")
+        .begin_owner_mount(&owner_cancellable);
+    let callback_released = Arc::new(AtomicBool::new(false));
+    let callback_request = Rc::new(RefCell::new(Some(owner_request)));
+    let callback_request_on_owner = callback_request.clone();
+    let callback_released_on_owner = callback_released.clone();
+    let callback_cancellable = owner_cancellable.clone();
+    glib::idle_add_local(move || {
+        if callback_cancellable.is_cancelled() {
+            callback_request_on_owner
+                .borrow_mut()
+                .take()
+                .expect("owner mount callback must release its lease once")
+                .complete();
+            callback_released_on_owner.store(true, Ordering::SeqCst);
+            glib::ControlFlow::Break
+        } else {
+            glib::ControlFlow::Continue
+        }
+    });
+
+    install_executor_shutdown(&application, executor.clone());
+    application.emit_by_name::<()>("shutdown", &[]);
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !callback_released.load(Ordering::SeqCst) || !executor.is_shutdown_for_tests() {
+        assert!(
+            Instant::now() < deadline,
+            "shutdown must complete after owner callback release"
+        );
+        context.iteration(false);
+        std::thread::yield_now();
+    }
+
+    assert_eq!(executor.active_request_count_for_tests(), 0);
 }

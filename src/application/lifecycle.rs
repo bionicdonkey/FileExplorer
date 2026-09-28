@@ -12,5 +12,5 @@ pub fn install_executor_shutdown(
     executor: Arc<GioExecutor>,
 ) {
     GioExecutor::install_as_application_default(&executor);
-    application.connect_shutdown(move |_| executor.shutdown());
+    application.connect_shutdown(move |_| executor.shutdown_async());
 }
