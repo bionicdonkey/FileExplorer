@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use gio::prelude::{ApplicationExt, ApplicationExtManual, CancellableExt, ObjectExt};
+use gio::prelude::{ApplicationExt, ApplicationExtManual, CancellableExt};
 use gtk::prelude::GtkWindowExt;
 use zorin_explorer::{
     application::lifecycle::install_executor_shutdown,
@@ -55,11 +55,12 @@ fn application_default_is_shared_by_adapters_created_on_other_threads() {
     executor.shutdown_for_tests();
 }
 
-#[test]
+#[gtk::test]
 fn application_shutdown_drains_its_owned_executor() {
     let _serial = serial_test_guard();
-    let application = gio::Application::builder()
+    let application = gtk::Application::builder()
         .application_id("io.github.explorer.ExecutorLifecycleFixture")
+        .flags(gio::ApplicationFlags::NON_UNIQUE)
         .build();
     let executor = GioExecutor::for_application();
     let (started, started_receiver) = std::sync::mpsc::sync_channel(1);
@@ -89,11 +90,12 @@ fn application_shutdown_drains_its_owned_executor() {
         .recv_timeout(std::time::Duration::from_secs(1))
         .unwrap();
 
-    install_executor_shutdown(&application, executor.clone());
+    let shutdown = install_executor_shutdown(&application, executor.clone());
     let adapter_executor = GioExecutor::shared();
     assert!(Arc::ptr_eq(&adapter_executor, &executor));
     drop(adapter_executor);
-    application.emit_by_name::<()>("shutdown", &[]);
+    application.connect_activate(move |_| shutdown.quit());
+    application.run_with_args::<&str>(&[]);
 
     let deadline = Instant::now() + Duration::from_secs(3);
     while !completed.load(Ordering::SeqCst) || !executor.is_shutdown_for_tests() {
@@ -109,12 +111,13 @@ fn application_shutdown_drains_its_owned_executor() {
     assert!(executor.is_shutdown_for_tests());
 }
 
-#[test]
+#[gtk::test]
 fn application_shutdown_keeps_owner_context_running_until_mount_callback_releases_lease() {
     let _serial = serial_test_guard();
     let context = glib::MainContext::default();
-    let application = gio::Application::builder()
+    let application = gtk::Application::builder()
         .application_id("io.github.explorer.ExecutorOwnerMountShutdownFixture")
+        .flags(gio::ApplicationFlags::NON_UNIQUE)
         .build();
     let executor = GioExecutor::for_application();
     let (handoff_send, handoff_receive) = mpsc::sync_channel(1);
@@ -148,8 +151,9 @@ fn application_shutdown_keeps_owner_context_running_until_mount_callback_release
         }
     });
 
-    install_executor_shutdown(&application, executor.clone());
-    application.emit_by_name::<()>("shutdown", &[]);
+    let shutdown = install_executor_shutdown(&application, executor.clone());
+    application.connect_activate(move |_| shutdown.quit());
+    application.run_with_args::<&str>(&[]);
 
     let deadline = Instant::now() + Duration::from_secs(3);
     while !callback_released.load(Ordering::SeqCst) || !executor.is_shutdown_for_tests() {
@@ -165,7 +169,7 @@ fn application_shutdown_keeps_owner_context_running_until_mount_callback_release
 }
 
 #[gtk::test]
-fn window_close_drains_owner_mount_before_application_quits() {
+fn programmatic_quit_drains_owner_mount_before_application_quits() {
     let _serial = serial_test_guard();
     let application = gtk::Application::builder()
         .application_id("io.github.explorer.ExecutorPreQuitOwnerMountFixture")
@@ -215,9 +219,8 @@ fn window_close_drains_owner_mount_before_application_quits() {
     });
     application.connect_activate(move |application| {
         let window = gtk::ApplicationWindow::new(application);
-        shutdown.defer_window_close(&window);
         window.present();
-        window.close();
+        shutdown.quit();
     });
 
     application.run_with_args::<&str>(&[]);
@@ -226,4 +229,92 @@ fn window_close_drains_owner_mount_before_application_quits() {
     assert!(shutdown_after_callback.load(Ordering::SeqCst));
     assert_eq!(executor.active_request_count_for_tests(), 0);
     assert!(executor.is_shutdown_for_tests());
+}
+
+#[gtk::test]
+fn closing_one_window_waits_for_the_final_window_before_draining_owner_mount() {
+    let _serial = serial_test_guard();
+    let application = gtk::Application::builder()
+        .application_id("io.github.explorer.ExecutorMultiWindowPreQuitFixture")
+        .flags(gio::ApplicationFlags::NON_UNIQUE)
+        .build();
+    let executor = GioExecutor::for_application();
+    let (handoff_send, handoff_receive) = mpsc::sync_channel(1);
+    executor
+        .submit(CancellationSignal::new(), move |request| {
+            handoff_send.send(request.into_owner_handoff()).unwrap();
+        })
+        .unwrap();
+
+    let owner_cancellable = gio::Cancellable::new();
+    let owner_request = handoff_receive
+        .recv_timeout(Duration::from_secs(1))
+        .expect("owner mount lifecycle must retain the executor request")
+        .begin_owner_mount(&owner_cancellable);
+    let callback_released = Arc::new(AtomicBool::new(false));
+    let callback_request = Rc::new(RefCell::new(Some(owner_request)));
+    let callback_request_on_owner = callback_request.clone();
+    let callback_released_on_owner = callback_released.clone();
+    let callback_cancellable = owner_cancellable.clone();
+    glib::idle_add_local(move || {
+        if callback_cancellable.is_cancelled() {
+            callback_request_on_owner
+                .borrow_mut()
+                .take()
+                .expect("owner mount completion must release its lease once")
+                .complete();
+            callback_released_on_owner.store(true, Ordering::SeqCst);
+            glib::ControlFlow::Break
+        } else {
+            glib::ControlFlow::Continue
+        }
+    });
+
+    let _shutdown = install_executor_shutdown(&application, executor.clone());
+    let first_close_kept_executor_alive = Arc::new(AtomicBool::new(false));
+    let shutdown_after_callback = Arc::new(AtomicBool::new(false));
+    application.connect_shutdown({
+        let callback_released = callback_released.clone();
+        let shutdown_after_callback = shutdown_after_callback.clone();
+        move |_| {
+            shutdown_after_callback
+                .store(callback_released.load(Ordering::SeqCst), Ordering::SeqCst)
+        }
+    });
+    let first_close_kept_executor_alive_on_activate = first_close_kept_executor_alive.clone();
+    application.connect_activate(move |application| {
+        let first = gtk::ApplicationWindow::new(application);
+        let second = gtk::ApplicationWindow::new(application);
+        first.connect_close_request({
+            let owner_cancellable = owner_cancellable.clone();
+            let first_close_kept_executor_alive =
+                first_close_kept_executor_alive_on_activate.clone();
+            move |_| {
+                first_close_kept_executor_alive
+                    .store(!owner_cancellable.is_cancelled(), Ordering::SeqCst);
+                glib::Propagation::Proceed
+            }
+        });
+        first.present();
+        second.present();
+        first.close();
+        glib::idle_add_local_once(move || second.close());
+    });
+
+    application.run_with_args::<&str>(&[]);
+
+    let callback_released_before_shutdown = shutdown_after_callback.load(Ordering::SeqCst);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !executor.is_shutdown_for_tests() {
+        assert!(
+            Instant::now() < deadline,
+            "test cleanup must drain the executor"
+        );
+        glib::MainContext::default().iteration(false);
+        std::thread::yield_now();
+    }
+
+    assert!(first_close_kept_executor_alive.load(Ordering::SeqCst));
+    assert!(callback_released_before_shutdown);
+    assert_eq!(executor.active_request_count_for_tests(), 0);
 }
