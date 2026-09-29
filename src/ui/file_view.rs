@@ -4831,7 +4831,7 @@ mod tests {
     }
 
     #[gtk::test]
-    fn flowbox_thumbnail_metadata_callback_rebinds_after_reload_without_painting_stale_tile() {
+    fn flowbox_late_successful_metadata_after_reload_does_not_paint_a_stale_tile() {
         use crate::core::contracts::{CapabilitySnapshot, EntryKind, EntrySnapshot};
         use crate::infrastructure::mock_provider::{MockConfig, MockProvider};
         use gio::prelude::CancellableExt;
@@ -4861,6 +4861,7 @@ mod tests {
         let context = glib::MainContext::default();
         let provider = std::rc::Rc::new(MockProvider::new(context.clone(), MockConfig::default()));
         provider.set_directory(root.clone(), vec![entry], CapabilitySnapshot::default());
+        provider.set_visible_metadata_results_after_cancellation(true);
         let view = FileView::new_with_repository(root, provider.clone());
         provider.advance(1);
         while context.pending() {
@@ -4886,6 +4887,38 @@ mod tests {
 
         view.reload();
         assert!(cancellations[0].is_cancelled());
+        assert!(
+            view.metadata_target
+                .flowbox_thumbnail_waiters
+                .borrow()
+                .is_empty(),
+            "reload must release stale FlowBox thumbnail waiters"
+        );
+        assert!(
+            view.metadata_target.requests.borrow().is_empty(),
+            "reload must release the stale visible-metadata request target"
+        );
+
+        provider.advance(1);
+        while context.pending() {
+            context.iteration(false);
+        }
+        assert!(
+            stale_image
+                .paintable()
+                .and_downcast::<gtk::gdk::Texture>()
+                .is_none(),
+            "a late successful callback for a cancelled FlowBox tile must not paint it"
+        );
+        assert!(view.visible_metadata.borrow_mut().get(&location).is_none());
+        assert_eq!(view.pending_visible_metadata.borrow().len(), 0);
+        assert_eq!(provider.active_visible_metadata_requests(), 0);
+        assert!(view.metadata_target.requests.borrow().is_empty());
+        assert!(view
+            .metadata_target
+            .flowbox_thumbnail_waiters
+            .borrow()
+            .is_empty());
 
         let rebound_image = gtk::Image::new();
         view.request_flowbox_thumbnail_metadata(&rebound_image, &unresolved, true);
@@ -4903,6 +4936,14 @@ mod tests {
             Some(super::VisibleMetadataCacheEntry::Resolved(metadata))
                 if metadata.content_type.as_deref() == Some("image/png")
         ));
+        assert!(view.metadata_target.requests.borrow().is_empty());
+        assert!(
+            view.metadata_target
+                .flowbox_thumbnail_waiters
+                .borrow()
+                .is_empty(),
+            "the current FlowBox completion must release its waiter"
+        );
         let deadline = Instant::now() + Duration::from_secs(3);
         while rebound_image
             .paintable()
@@ -4920,7 +4961,7 @@ mod tests {
                 .paintable()
                 .and_downcast::<gtk::gdk::Texture>()
                 .is_none(),
-            "a cancelled FlowBox callback must not paint its detached tile"
+            "a late successful FlowBox callback must not paint its detached tile"
         );
         view.close();
         super::invalidate_thumbnails();
