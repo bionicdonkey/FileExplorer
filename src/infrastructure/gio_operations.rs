@@ -2,7 +2,7 @@
 //! on the requesting context. GIO owns move semantics, including cross-filesystem fallback.
 use crate::{
     core::{contracts::*, ports::*, Location},
-    infrastructure::gio_executor::{CancellationSignal, GioExecutor},
+    infrastructure::gio_executor::{CancellationSignal, GioExecutor, OwnerContextGuard},
 };
 use futures_util::StreamExt;
 use gio::prelude::*;
@@ -14,6 +14,9 @@ pub struct GioOperations {
     executor: Arc<GioExecutor>,
     uri_operations: bool,
     elevated: Arc<std::sync::Mutex<std::collections::HashSet<OperationId>>>,
+    // Dropping the last handle waits for the executor to release every
+    // reference into `context`, so the owner performs its own final unref.
+    owner: OwnerContextGuard,
 }
 
 /// Pure request data that may cross from the caller to the executor.
@@ -322,11 +325,24 @@ impl GioOperations {
     }
     pub fn with_executor(context: glib::MainContext, executor: Arc<GioExecutor>) -> Self {
         Self {
+            owner: OwnerContextGuard::new(context.clone()),
             context,
             executor,
             uri_operations: false,
             elevated: Default::default(),
         }
+    }
+
+    /// Blocks until the executor holds no reference into this adapter's owner
+    /// context. Dropping the adapter does this too; call it explicitly when the
+    /// owner context outlives the adapter handles.
+    pub fn drain_owner_requests(&self) {
+        self.owner.drain();
+    }
+
+    #[doc(hidden)]
+    pub fn outstanding_owner_requests_for_tests(&self) -> usize {
+        self.owner.outstanding()
     }
     /// Production GIO/GVfs boundary. Unsupported actions are determined from
     /// provider metadata and GIO outcomes, not from the URI's scheme.
@@ -427,6 +443,7 @@ impl GioOperations {
         let failure_location = request.location.clone();
         let (send, mut receive) = futures_channel::mpsc::unbounded::<RequestOutcomeData>();
         let failure_send = send.clone();
+        let bridge = self.owner.bridge(send);
 
         self.context.spawn_local(async move {
             // Retain the request-side native cancellable on its owner context
@@ -467,13 +484,13 @@ impl GioOperations {
                     }
                 };
 
-                let mut completion = Some((native_request, outcome));
+                let mut completion = Some((native_request, outcome, bridge));
                 let source = glib::idle_source_new(None, glib::Priority::DEFAULT, move || {
-                    let (native_request, outcome) = completion
+                    let (native_request, outcome, bridge) = completion
                         .take()
                         .expect("executor completion source runs once");
                     native_request.complete();
-                    let _ = send.unbounded_send(outcome);
+                    bridge.send(outcome);
                     glib::ControlFlow::Break
                 });
                 source.attach(Some(&glib::MainContext::ref_thread_default()));
@@ -495,6 +512,7 @@ impl GioOperations {
     ) {
         let (send, mut receive) = futures_channel::mpsc::unbounded::<OperationEventData>();
         let failure_send = send.clone();
+        let bridge = self.owner.bridge(send);
         let failure_sources = request.sources.clone();
         let failure_destination = request.destination.clone();
         let failure_id = request.id;
@@ -535,7 +553,7 @@ impl GioOperations {
                     ) {
                         terminal = Some(event);
                     } else {
-                        let _ = send.unbounded_send(event);
+                        bridge.send(event);
                     }
                 };
                 if elevated {
@@ -545,14 +563,14 @@ impl GioOperations {
                     execute_inner_mode(request, decision, uri_operations, &mut emit);
                 }
 
-                let mut completion = Some((native_request, terminal));
+                let mut completion = Some((native_request, terminal, bridge));
                 let source = glib::idle_source_new(None, glib::Priority::DEFAULT, move || {
-                    let (native_request, terminal) = completion
+                    let (native_request, terminal, bridge) = completion
                         .take()
                         .expect("executor completion source runs once");
                     native_request.complete();
                     if let Some(event) = terminal {
-                        let _ = send.unbounded_send(event);
+                        bridge.send(event);
                     }
                     glib::ControlFlow::Break
                 });

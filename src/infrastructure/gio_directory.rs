@@ -3,7 +3,8 @@
 use crate::{
     core::{contracts::*, ports::*, FileItem, Location, ResolvedLocation},
     infrastructure::gio_executor::{
-        CancellationSignal, GioExecutor, GioRequest, OwnerMountHandoff, OwnerMountRequest,
+        CancellationSignal, GioExecutor, GioRequest, OwnerBridge, OwnerContextGuard,
+        OwnerMountHandoff, OwnerMountRequest,
     },
 };
 use futures_util::StreamExt;
@@ -15,6 +16,9 @@ pub struct GioDirectoryRepository {
     context: glib::MainContext,
     executor: Arc<GioExecutor>,
     mount_operation: Rc<RefCell<Option<Rc<dyn Fn() -> gio::MountOperation>>>>,
+    // Dropping the last handle waits for the executor to release every
+    // reference into `context`, so the owner performs its own final unref.
+    owner: OwnerContextGuard,
 }
 
 /// The caller owns `Location` and its `gio::File`; the executor receives only
@@ -250,10 +254,23 @@ impl GioDirectoryRepository {
 
     pub fn with_executor(context: glib::MainContext, executor: Arc<GioExecutor>) -> Self {
         Self {
+            owner: OwnerContextGuard::new(context.clone()),
             context,
             executor,
             mount_operation: Rc::new(RefCell::new(None)),
         }
+    }
+
+    /// Blocks until the executor holds no reference into this adapter's owner
+    /// context. Dropping the last handle does this too; call it explicitly when
+    /// the owner context outlives the adapter handles.
+    pub fn drain_owner_requests(&self) {
+        self.owner.drain();
+    }
+
+    #[doc(hidden)]
+    pub fn outstanding_owner_requests_for_tests(&self) -> usize {
+        self.owner.outstanding()
     }
 
     pub fn set_mount_operation(&self, factory: impl Fn() -> gio::MountOperation + 'static) {
@@ -273,6 +290,7 @@ impl GioDirectoryRepository {
         let context = self.context.clone();
         let (send, mut receive) = futures_channel::mpsc::unbounded();
         let failure_send = send.clone();
+        let bridge = self.owner.bridge(send);
         let completion_cancellation = cancellation.clone();
 
         self.context.spawn_local(async move {
@@ -317,7 +335,7 @@ impl GioDirectoryRepository {
         if self
             .executor
             .submit(cancellation, move |native_request| {
-                start_list(native_request, data, mount_retry_enabled, send);
+                start_list(native_request, data, mount_retry_enabled, bridge);
             })
             .is_err()
         {
@@ -363,6 +381,7 @@ impl DirectoryRepository for GioDirectoryRepository {
         let failure_location = request.locations.first().cloned();
         let (send, mut receive) = futures_channel::mpsc::unbounded();
         let failure_send = send.clone();
+        let bridge = self.owner.bridge(send);
 
         self.context.spawn_local(async move {
             let _owner_cancellable = owner_cancellable;
@@ -379,7 +398,7 @@ impl DirectoryRepository for GioDirectoryRepository {
             .submit(cancellation, move |native_request| {
                 let outcome = inspect_metadata(&data, &native_request);
                 native_request.complete();
-                let _ = send.unbounded_send(outcome);
+                bridge.send(outcome);
             })
             .is_err()
         {
@@ -589,7 +608,7 @@ fn start_list(
     native_request: GioRequest,
     data: DirectoryRequestData,
     mount_retry_enabled: bool,
-    send: futures_channel::mpsc::UnboundedSender<DirectoryOutcomeData>,
+    bridge: OwnerBridge<DirectoryOutcomeData>,
 ) {
     let native = data
         .clone()
@@ -609,13 +628,13 @@ fn start_list(
     if mount_required {
         drop(native);
         let handoff = native_request.into_owner_handoff();
-        let _ = send.unbounded_send(DirectoryOutcomeData::MountRequired { mountable, handoff });
+        bridge.send(DirectoryOutcomeData::MountRequired { mountable, handoff });
         return;
     }
     let outcome = terminal_directory_outcome(&native_request, result);
     drop(native);
     native_request.complete();
-    let _ = send.unbounded_send(outcome);
+    bridge.send(outcome);
 }
 
 /// GTK's `MountOperation` is thread-affine. Create, use, and release it on the
@@ -985,7 +1004,9 @@ mod tests {
         let context = glib::MainContext::default();
         let fixture = tempfile::tempdir().unwrap();
         let location = Location::from_local_path(fixture.path());
-        let executor = GioExecutor::isolated_for_tests();
+        // A single worker is what makes the gate below occupy the whole
+        // executor, so the retry stays queued and live until shutdown cancels it.
+        let executor = GioExecutor::isolated_with_workers_for_tests(1);
         let release_gate = Arc::new(AtomicBool::new(false));
         let (started, started_receiver) = mpsc::sync_channel(1);
         executor

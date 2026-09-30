@@ -246,10 +246,12 @@ fn tracker_fallback_waits_for_executor_context_and_keeps_unavailable_explicit() 
     };
 
     // This gate catches a fallback that escapes onto gio::spawn_blocking: it
-    // would complete despite the dedicated executor context being occupied.
+    // would complete despite the executor being fully occupied. A single worker
+    // is what makes "occupied" total, so the gate proves ownership rather than
+    // racing the rest of the pool.
     let context = glib::MainContext::new();
     let _guard = context.acquire().unwrap();
-    let executor = GioExecutor::isolated_for_tests();
+    let executor = GioExecutor::isolated_with_workers_for_tests(1);
     let release_gate = Arc::new(AtomicBool::new(false));
     let (started, started_receiver) = mpsc::sync_channel(1);
     executor
@@ -607,13 +609,24 @@ fn directory_cancellation_retains_executor_request_until_terminal_dto_is_release
 
     let context = glib::MainContext::new();
     let _guard = context.acquire().unwrap();
-    let executor = GioExecutor::isolated_for_tests();
+    // One worker, occupied by the gate below, is what makes the pre-cancellation
+    // request count deterministic: the listing cannot start, let alone finish,
+    // before this test has observed that the executor registered it.
+    let executor = GioExecutor::isolated_with_workers_for_tests(1);
     let release_gate = Arc::new(AtomicBool::new(false));
+    let start_listing = Arc::new(AtomicBool::new(false));
     let (started, started_receiver) = mpsc::sync_channel(1);
     executor
         .submit(CancellationSignal::new(), {
             let release_gate = release_gate.clone();
+            let start_listing = start_listing.clone();
             move |request| {
+                started.send(()).unwrap();
+                // Hold the only worker until the listing has been registered and
+                // cancelled, then keep holding the request itself.
+                while !start_listing.load(Ordering::SeqCst) {
+                    std::thread::yield_now();
+                }
                 let mut request = Some(request);
                 let source = glib::timeout_source_new(
                     Duration::from_millis(1),
@@ -631,13 +644,12 @@ fn directory_cancellation_retains_executor_request_until_terminal_dto_is_release
                     },
                 );
                 source.attach(Some(&glib::MainContext::ref_thread_default()));
-                started.send(()).unwrap();
             }
         })
         .unwrap();
     started_receiver
         .recv_timeout(Duration::from_secs(1))
-        .unwrap();
+        .expect("the gate must occupy the only worker before the listing is queued");
 
     let directory = tempfile::tempdir().unwrap();
     let cancelled = gio::Cancellable::new();
@@ -666,7 +678,12 @@ fn directory_cancellation_retains_executor_request_until_terminal_dto_is_release
         }),
     );
     cancelled.cancel();
-    assert_eq!(executor.active_request_count_for_tests(), 2);
+    assert_eq!(
+        executor.active_request_count_for_tests(),
+        2,
+        "the cancelled listing must be registered alongside the held gate request"
+    );
+    start_listing.store(true, Ordering::SeqCst);
 
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while received.borrow().is_none() {
@@ -712,7 +729,9 @@ fn executor_shutdown_cancels_parallel_owner_requests_without_stale_ui_callbacks(
 
     const REQUESTS_PER_CLASS: u64 = 16;
 
-    let executor = GioExecutor::isolated_for_tests();
+    // A single worker is what makes the gate below occupy the whole executor, so
+    // every request stays queued and live until shutdown cancels it.
+    let executor = GioExecutor::isolated_with_workers_for_tests(1);
     let release_gate = Arc::new(AtomicBool::new(false));
     let (started, started_receiver) = mpsc::sync_channel(1);
     executor
@@ -738,6 +757,11 @@ fn executor_shutdown_cancels_parallel_owner_requests_without_stale_ui_callbacks(
     let directory = Location::from_local_path(fixture.path());
     let stale_ui_mutations = Arc::new(AtomicUsize::new(0));
     let mut owner_cancellables = Vec::new();
+    // An owner may only release its MainContext once the executor has dropped
+    // every bridge into it, so these owners stay alive until shutdown has run.
+    // `local_copy_move_conflict_and_delete_preserve_actual_effects_after_owner_teardown`
+    // covers the teardown-while-in-flight path that enforces that contract.
+    let mut owners: Vec<Box<dyn std::any::Any>> = Vec::new();
 
     {
         let context = glib::MainContext::new();
@@ -762,6 +786,7 @@ fn executor_shutdown_cancels_parallel_owner_requests_without_stale_ui_callbacks(
             );
             owner_cancellables.push(cancellable);
         }
+        owners.push(Box::new(operations));
     }
 
     {
@@ -787,6 +812,7 @@ fn executor_shutdown_cancels_parallel_owner_requests_without_stale_ui_callbacks(
             );
             owner_cancellables.push(cancellable);
         }
+        owners.push(Box::new(repository));
     }
 
     {
@@ -808,6 +834,7 @@ fn executor_shutdown_cancels_parallel_owner_requests_without_stale_ui_callbacks(
             );
             owner_cancellables.push(cancellable);
         }
+        owners.push(Box::new(repository));
     }
 
     {
@@ -831,6 +858,7 @@ fn executor_shutdown_cancels_parallel_owner_requests_without_stale_ui_callbacks(
             );
             owner_cancellables.push(cancellable);
         }
+        owners.push(Box::new(repository));
     }
 
     {
@@ -852,6 +880,7 @@ fn executor_shutdown_cancels_parallel_owner_requests_without_stale_ui_callbacks(
             );
             owner_cancellables.push(cancellable);
         }
+        owners.push(Box::new(operations));
     }
 
     {
@@ -877,6 +906,7 @@ fn executor_shutdown_cancels_parallel_owner_requests_without_stale_ui_callbacks(
             );
             owner_cancellables.push(cancellable);
         }
+        owners.push(Box::new(repository));
     }
 
     assert_eq!(
@@ -891,15 +921,98 @@ fn executor_shutdown_cancels_parallel_owner_requests_without_stale_ui_callbacks(
     executor.shutdown_for_tests();
 
     assert_eq!(executor.active_request_count_for_tests(), 0);
+    // Now the owners close. Their drains are already satisfied, and no queued
+    // callback may run against the state they are tearing down.
+    drop(owners);
     assert_eq!(
         stale_ui_mutations.load(Ordering::SeqCst),
         0,
-        "callbacks queued for closed owner contexts must not mutate stale UI state"
+        "callbacks queued for closing owner contexts must not mutate stale UI state"
     );
     assert!(
         source.exists(),
         "a cancelled operation must not mutate its source after owner teardown"
     );
+}
+
+#[test]
+fn owner_teardown_waits_for_executor_bridges_before_releasing_its_context() {
+    use std::{
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            mpsc, Arc,
+        },
+        time::Duration,
+    };
+    use zorin_explorer::{
+        core::ports::DirectoryRepository,
+        infrastructure::{
+            gio_directory::GioDirectoryRepository,
+            gio_executor::{CancellationSignal, GioExecutor},
+        },
+    };
+
+    // A DTO sender held by the executor carries a GLib waker for a source owned
+    // by the requesting context, and both sending and dropping it unref that
+    // source from an executor worker. Releasing the owner context first is
+    // therefore a use-after-free, so owner teardown has to wait.
+    let executor = GioExecutor::isolated_with_workers_for_tests(1);
+    let release_gate = Arc::new(AtomicBool::new(false));
+    let (started, started_receiver) = mpsc::sync_channel(1);
+    executor
+        .submit(CancellationSignal::new(), {
+            let release_gate = release_gate.clone();
+            move |request| {
+                started.send(()).unwrap();
+                while !release_gate.load(Ordering::SeqCst) {
+                    std::thread::yield_now();
+                }
+                request.complete();
+            }
+        })
+        .unwrap();
+    started_receiver
+        .recv_timeout(Duration::from_secs(1))
+        .expect("the gate must occupy the executor before the owner submits");
+
+    let fixture = tempfile::tempdir().unwrap();
+    let location = Location::from_local_path(fixture.path());
+    let (torn_down, teardown_receiver) = mpsc::sync_channel(1);
+    let executor_for_owner = executor.clone();
+    let owner = std::thread::spawn(move || {
+        let context = glib::MainContext::new();
+        let _guard = context.acquire().unwrap();
+        let adapter = GioDirectoryRepository::with_executor(context.clone(), executor_for_owner);
+        adapter.list(
+            DirectoryRequest {
+                id: RequestId(77),
+                location,
+                page: PageRequest {
+                    offset: 0,
+                    limit: usize::MAX,
+                },
+                cancellable: gio::Cancellable::new(),
+            },
+            Box::new(|_| {}),
+        );
+        assert_eq!(adapter.outstanding_owner_requests_for_tests(), 1);
+        drop(adapter);
+        torn_down
+            .send(())
+            .expect("teardown observer must outlive the owner");
+    });
+
+    assert_eq!(
+        teardown_receiver.recv_timeout(Duration::from_millis(250)),
+        Err(mpsc::RecvTimeoutError::Timeout),
+        "owner teardown must wait while the executor still holds a bridge into its context"
+    );
+    release_gate.store(true, Ordering::SeqCst);
+    teardown_receiver
+        .recv_timeout(Duration::from_secs(3))
+        .expect("owner teardown must finish once the executor releases its bridge");
+    owner.join().expect("owner thread must not panic");
+    executor.shutdown_for_tests();
 }
 
 fn run(

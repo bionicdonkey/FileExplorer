@@ -3,7 +3,9 @@
 //! unavailable. Filename fallback is local, metadata-only and deterministic.
 use crate::{
     core::{contracts::*, ports::*, FileItem, Location},
-    infrastructure::gio_executor::{CancellationSignal, GioExecutor, GioRequest},
+    infrastructure::gio_executor::{
+        CancellationSignal, GioExecutor, GioRequest, OwnerBridge, OwnerContextGuard,
+    },
 };
 use futures_util::StreamExt;
 use gio::prelude::*;
@@ -16,6 +18,9 @@ use std::{
 pub struct TrackerSearchRepository {
     context: glib::MainContext,
     executor: Arc<GioExecutor>,
+    // Dropping the last handle waits for the executor to release every
+    // reference into `context`, so the owner performs its own final unref.
+    owner: OwnerContextGuard,
 }
 
 /// Search request data contains only owned values, so no caller-context GIO
@@ -302,7 +307,23 @@ impl TrackerSearchRepository {
     }
 
     pub fn with_executor(context: glib::MainContext, executor: Arc<GioExecutor>) -> Self {
-        Self { context, executor }
+        Self {
+            owner: OwnerContextGuard::new(context.clone()),
+            context,
+            executor,
+        }
+    }
+
+    /// Blocks until the executor holds no reference into this adapter's owner
+    /// context. Dropping the last handle does this too; call it explicitly when
+    /// the owner context outlives the adapter handles.
+    pub fn drain_owner_requests(&self) {
+        self.owner.drain();
+    }
+
+    #[doc(hidden)]
+    pub fn outstanding_owner_requests_for_tests(&self) -> usize {
+        self.owner.outstanding()
     }
 }
 
@@ -315,6 +336,7 @@ impl SearchRepository for TrackerSearchRepository {
         let owner_cancellable = request.cancellable.clone();
         let (send, mut receive) = futures_channel::mpsc::unbounded::<SearchOutcomeData>();
         let failure_send = send.clone();
+        let bridge = self.owner.bridge(send);
 
         self.context.spawn_local(async move {
             // The caller owns this cancellable; its cancellation signal is all
@@ -331,7 +353,7 @@ impl SearchRepository for TrackerSearchRepository {
         if self
             .executor
             .submit(cancellation, move |native_request| {
-                start_fallback(native_request, data, send);
+                start_fallback(native_request, data, bridge);
             })
             .is_err()
         {
@@ -343,7 +365,7 @@ impl SearchRepository for TrackerSearchRepository {
 fn start_fallback(
     native_request: GioRequest,
     data: SearchRequestData,
-    send: futures_channel::mpsc::UnboundedSender<SearchOutcomeData>,
+    bridge: OwnerBridge<SearchOutcomeData>,
 ) {
     let request = data.into_native(native_request.cancellable().clone());
     let mut outcome = fallback(&request);
@@ -353,7 +375,7 @@ fn start_fallback(
     let outcome = SearchOutcomeData::from(outcome);
     drop(request);
     native_request.complete();
-    let _ = send.unbounded_send(outcome);
+    bridge.send(outcome);
 }
 
 fn cancelled_outcome(request: &SearchRequest, outcome: SearchOutcome) -> SearchOutcome {
