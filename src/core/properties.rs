@@ -19,16 +19,28 @@ pub struct PermissionBits {
 impl PermissionBits {
     pub fn from_mode(mode: u32) -> Self {
         Self {
-            owner_read: mode & 0o400 != 0, owner_write: mode & 0o200 != 0, owner_execute: mode & 0o100 != 0,
-            group_read: mode & 0o040 != 0, group_write: mode & 0o020 != 0, group_execute: mode & 0o010 != 0,
-            other_read: mode & 0o004 != 0, other_write: mode & 0o002 != 0, other_execute: mode & 0o001 != 0,
+            owner_read: mode & 0o400 != 0,
+            owner_write: mode & 0o200 != 0,
+            owner_execute: mode & 0o100 != 0,
+            group_read: mode & 0o040 != 0,
+            group_write: mode & 0o020 != 0,
+            group_execute: mode & 0o010 != 0,
+            other_read: mode & 0o004 != 0,
+            other_write: mode & 0o002 != 0,
+            other_execute: mode & 0o001 != 0,
         }
     }
 
     pub fn to_mode(self) -> u32 {
-        (self.owner_read as u32 * 0o400) | (self.owner_write as u32 * 0o200) | (self.owner_execute as u32 * 0o100)
-            | (self.group_read as u32 * 0o040) | (self.group_write as u32 * 0o020) | (self.group_execute as u32 * 0o010)
-            | (self.other_read as u32 * 0o004) | (self.other_write as u32 * 0o002) | (self.other_execute as u32 * 0o001)
+        (self.owner_read as u32 * 0o400)
+            | (self.owner_write as u32 * 0o200)
+            | (self.owner_execute as u32 * 0o100)
+            | (self.group_read as u32 * 0o040)
+            | (self.group_write as u32 * 0o020)
+            | (self.group_execute as u32 * 0o010)
+            | (self.other_read as u32 * 0o004)
+            | (self.other_write as u32 * 0o002)
+            | (self.other_execute as u32 * 0o001)
     }
 }
 
@@ -67,10 +79,19 @@ impl PropertyDetails {
         let (owner, group) = ("Unavailable".into(), "Unavailable".into());
         Ok(Self {
             path: path.to_path_buf(),
-            name: path.file_name().and_then(|name| name.to_str()).unwrap_or("/").to_owned(),
-            is_dir: metadata.is_dir(), content_type: content_type.to_string(), size: metadata.len(),
-            created: metadata.created().ok(), modified: metadata.modified().ok(), accessed: metadata.accessed().ok(),
-            owner, group,
+            name: path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("/")
+                .to_owned(),
+            is_dir: metadata.is_dir(),
+            content_type: content_type.to_string(),
+            size: metadata.len(),
+            created: metadata.created().ok(),
+            modified: metadata.modified().ok(),
+            accessed: metadata.accessed().ok(),
+            owner,
+            group,
             permissions: PermissionBits::from_mode(mode),
         })
     }
@@ -78,7 +99,11 @@ impl PropertyDetails {
 
 #[cfg(unix)]
 fn account_name(database: &str, id: u32) -> String {
-    std::process::Command::new("getent").arg(database).arg(id.to_string()).output().ok()
+    std::process::Command::new("getent")
+        .arg(database)
+        .arg(id.to_string())
+        .output()
+        .ok()
         .and_then(|output| String::from_utf8(output.stdout).ok())
         .and_then(|line| line.split(':').next().map(str::to_owned))
         .filter(|name| !name.is_empty())

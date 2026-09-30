@@ -1800,8 +1800,16 @@ fn slice5_local_ten_thousand_file_navigation_completes_through_incremental_sort_
             break;
         }
         if std::time::Instant::now() >= first_frame_deadline {
-            let entries = view.tab_state().borrow().directory.as_ref().map_or(0, |snapshot| snapshot.entries.len());
-            let model_items = view.column_view().and_then(|list| list.model()).map_or(0, |model| model.n_items());
+            let entries = view
+                .tab_state()
+                .borrow()
+                .directory
+                .as_ref()
+                .map_or(0, |snapshot| snapshot.entries.len());
+            let model_items = view
+                .column_view()
+                .and_then(|list| list.model())
+                .map_or(0, |model| model.n_items());
             panic!("Hybrid first frame stalled: entries={entries}, model_items={model_items}, pending={}", view.has_pending_navigation());
         }
         context.iteration(false);
@@ -1810,8 +1818,16 @@ fn slice5_local_ten_thousand_file_navigation_completes_through_incremental_sort_
     let first_navigation_deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     while view.has_pending_navigation() {
         if std::time::Instant::now() >= first_navigation_deadline {
-            let entries = view.tab_state().borrow().directory.as_ref().map_or(0, |snapshot| snapshot.entries.len());
-            let model_items = view.column_view().and_then(|list| list.model()).map_or(0, |model| model.n_items());
+            let entries = view
+                .tab_state()
+                .borrow()
+                .directory
+                .as_ref()
+                .map_or(0, |snapshot| snapshot.entries.len());
+            let model_items = view
+                .column_view()
+                .and_then(|list| list.model())
+                .map_or(0, |model| model.n_items());
             panic!("Hybrid first navigation stalled: entries={entries}, model_items={model_items}");
         }
         context.iteration(false);
@@ -1830,15 +1846,24 @@ fn slice5_local_ten_thousand_file_navigation_completes_through_incremental_sort_
     let second_navigation_deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     while view.has_pending_navigation() {
         if std::time::Instant::now() >= second_navigation_deadline {
-            let entries = view.tab_state().borrow().directory.as_ref().map_or(0, |snapshot| snapshot.entries.len());
-            let model_items = view.column_view().and_then(|list| list.model()).map_or(0, |model| model.n_items());
-            panic!("Hybrid second navigation stalled: entries={entries}, model_items={model_items}");
+            let entries = view
+                .tab_state()
+                .borrow()
+                .directory
+                .as_ref()
+                .map_or(0, |snapshot| snapshot.entries.len());
+            let model_items = view
+                .column_view()
+                .and_then(|list| list.model())
+                .map_or(0, |model| model.n_items());
+            panic!(
+                "Hybrid second navigation stalled: entries={entries}, model_items={model_items}"
+            );
         }
         context.iteration(false);
     }
     scale_pump_until(|| {
-        view
-            .column_view()
+        view.column_view()
             .and_then(|column| column.model())
             .is_some_and(|model| model.n_items() == 10_000)
     });

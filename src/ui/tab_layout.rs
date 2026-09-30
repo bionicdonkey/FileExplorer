@@ -15,7 +15,10 @@ pub struct TabLayoutInput {
 
 impl TabLayoutInput {
     pub fn new(page_count: i32, window_width: i32) -> Self {
-        Self { page_count, window_width }
+        Self {
+            page_count,
+            window_width,
+        }
     }
 }
 

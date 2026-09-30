@@ -905,8 +905,8 @@ mod tests {
     use gtk::prelude::*;
 
     use crate::core::{
-        contracts::{Capability, CapabilitySnapshot, EntryKind, EntrySnapshot}, Location,
-        SidebarModel, SidebarPreferences,
+        contracts::{Capability, CapabilitySnapshot, EntryKind, EntrySnapshot},
+        Location, SidebarModel, SidebarPreferences,
     };
     use crate::infrastructure::mock_provider::{MockConfig, MockProvider};
 
@@ -1078,21 +1078,26 @@ mod tests {
         sidebar_descendants(sidebar.upcast_ref())
             .into_iter()
             .find_map(|widget| {
-                widget.downcast::<gtk::ToggleButton>().ok().filter(|button| {
-                    button.tooltip_text().as_deref()
-                        == Some(&format!("Expand or collapse {name}"))
-                })
+                widget
+                    .downcast::<gtk::ToggleButton>()
+                    .ok()
+                    .filter(|button| {
+                        button.tooltip_text().as_deref()
+                            == Some(&format!("Expand or collapse {name}"))
+                    })
             })
             .unwrap_or_else(|| panic!("missing expander for {name}"))
     }
 
     fn contains_sidebar_label(sidebar: &gtk::ScrolledWindow, label: &str) -> bool {
-        sidebar_descendants(sidebar.upcast_ref()).into_iter().any(|widget| {
-            widget
-                .downcast::<gtk::Label>()
-                .ok()
-                .is_some_and(|candidate| candidate.label() == label)
-        })
+        sidebar_descendants(sidebar.upcast_ref())
+            .into_iter()
+            .any(|widget| {
+                widget
+                    .downcast::<gtk::Label>()
+                    .ok()
+                    .is_some_and(|candidate| candidate.label() == label)
+            })
     }
 
     fn sidebar_descendants(widget: &gtk::Widget) -> Vec<gtk::Widget> {

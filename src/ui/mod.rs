@@ -1,12 +1,12 @@
+pub mod accessibility;
 pub mod context_menu;
 pub mod file_view;
 pub mod folder_picker;
 pub mod header;
-pub mod properties_dialog;
 pub mod operations_page;
 pub mod preferences_page;
+pub mod properties_dialog;
 pub mod sidebar;
 pub mod tab_layout;
 pub mod tabs;
 pub mod window;
-pub mod accessibility;

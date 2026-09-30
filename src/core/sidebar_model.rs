@@ -8,7 +8,8 @@ use gio::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::core::{
-    contracts::{DirectorySnapshot, EntryKind}, Location, RecoverableStateNotice,
+    contracts::{DirectorySnapshot, EntryKind},
+    Location, RecoverableStateNotice,
 };
 
 fn default_expanded_section() -> String {
@@ -430,12 +431,14 @@ impl SidebarModel {
             .entries
             .iter()
             .filter(|entry| entry.kind == EntryKind::Directory)
-            .map(|entry| SidebarNode::remote(
-                entry.location.clone(),
-                entry.display_name.clone(),
-                "folder-symbolic",
-                true,
-            ))
+            .map(|entry| {
+                SidebarNode::remote(
+                    entry.location.clone(),
+                    entry.display_name.clone(),
+                    "folder-symbolic",
+                    true,
+                )
+            })
             .collect::<Vec<_>>();
         children.sort_by(|left, right| left.location.label.cmp(&right.location.label));
         children
@@ -574,7 +577,6 @@ impl SidebarModel {
             })
             .collect()
     }
-
 }
 
 fn normalized_path(path: PathBuf) -> PathBuf {
@@ -866,5 +868,4 @@ mod tests {
             serde_json::json!(["google-drive://account/root"])
         );
     }
-
 }
