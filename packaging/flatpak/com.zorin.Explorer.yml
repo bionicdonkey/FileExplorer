@@ -27,3 +27,13 @@ modules:
     sources:
       - type: dir
         path: ../..
+        # Directory sources are copied wholesale into the build sandbox, so the
+        # local build trees have to be excluded or every build copies gigabytes
+        # of cargo and flatpak-builder output into itself.
+        skip:
+          - target
+          - build
+          - dist
+          - .flatpak-builder
+          - .git
+          - .worktrees

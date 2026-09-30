@@ -1,0 +1,72 @@
+name: Flatpak
+
+# A release Flatpak bundle for every commit that lands on main, plus a manual
+# trigger for testing the pipeline itself.
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    container:
+      # Ships flatpak-builder and the GNOME runtime. Keep this tag in step with
+      # `runtime-version` in packaging/flatpak/com.zorin.Explorer.yml.
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-47
+      # flatpak-builder sandboxes each module with bubblewrap, which needs to
+      # create user namespaces. A stock container cannot, so the build fails at
+      # the first module without this.
+      options: --privileged
+    steps:
+      - name: Check out the commit
+        uses: actions/checkout@v4
+
+      - name: Install the runtime, SDK and Rust extension the manifest asks for
+        run: |
+          flatpak remote-add --if-not-exists --user \
+            flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user --noninteractive --or-update flathub \
+            org.gnome.Platform//47 \
+            org.gnome.Sdk//47 \
+            org.freedesktop.Sdk.Extension.rust-stable//24.08
+
+      - name: Read the crate version
+        id: crate
+        run: |
+          version="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "Building ZorinExplorer ${version}"
+
+      - name: Build the Flatpak
+        # State and build trees live outside the checkout: the manifest's source
+        # is the checkout directory itself, so anything written inside it would
+        # be copied into the next build.
+        #
+        # --disable-rofiles-fuse because /dev/fuse is not dependably available
+        # to a CI container; it only costs a slower copy of the build tree.
+        run: |
+          flatpak-builder \
+            --force-clean \
+            --disable-rofiles-fuse \
+            --state-dir=/tmp/flatpak-ci/state \
+            --repo=/tmp/flatpak-ci/repo \
+            /tmp/flatpak-ci/build \
+            packaging/flatpak/com.zorin.Explorer.yml
+
+      - name: Export a single-file bundle
+        run: |
+          flatpak build-bundle \
+            /tmp/flatpak-ci/repo \
+            "ZorinExplorer-${{ steps.crate.outputs.version }}.flatpak" \
+            com.zorin.Explorer master
+          ls -l ZorinExplorer-*.flatpak
+
+      - name: Upload the bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: ZorinExplorer-${{ steps.crate.outputs.version }}-flatpak
+          path: ZorinExplorer-*.flatpak
+          if-no-files-found: error
+          retention-days: 30
