@@ -1,5 +1,7 @@
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::{env, fmt};
 
 use gio::prelude::*;
@@ -70,6 +72,7 @@ impl Location {
     /// Creates a location from validated URI input.
     pub fn from_uri(uri: &str) -> Result<Self, LocationError> {
         let canonical_uri = canonicalize_uri(uri)?;
+        pin_remote_mount(&canonical_uri);
         Ok(Self {
             file: gio::File::for_uri(&canonical_uri),
             canonical_uri,
@@ -91,6 +94,7 @@ impl Location {
     /// cannot panic the process or enter persistent state.
     pub fn try_from_file(file: gio::File) -> Result<Self, LocationError> {
         let canonical_uri = canonicalize_uri(file.uri().as_str())?;
+        pin_remote_mount(&canonical_uri);
         Ok(Self {
             canonical_uri,
             file,
@@ -146,6 +150,56 @@ impl Location {
             None => format!("{}:…", parsed.scheme()),
         }
     }
+}
+
+/// Retains one `gio::File` per non-local mount for the process lifetime.
+///
+/// gvfs (1.54.4) frees a `GMountSpec` once its refcount reaches zero, but a
+/// concurrent lookup can still resurrect that spec from the library's global
+/// `unique_hash` first. Constructing a non-`file:` `GFile` while another thread
+/// finalizes one for the same mount is therefore a use-after-free, which shows
+/// up as `SIGSEGV` or heap corruption inside `g_mount_spec_unref`. Serializing
+/// only construction does not help: both ends of the race have to be excluded.
+///
+/// Holding one file per mount keeps that refcount above zero, so no spec is
+/// ever finalized and nothing is left for a construction to race. Every path
+/// under a mount shares its spec, so one retained file covers the whole mount.
+/// The cost is one small object per distinct non-local mount reached in a
+/// session. Remove this once the host gvfs carries the upstream fix.
+fn pin_remote_mount(canonical_uri: &str) {
+    let Some(mount) = remote_mount_key(canonical_uri) else {
+        return;
+    };
+    let mut pinned = PINNED_REMOTE_MOUNTS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    pinned
+        .entry(mount)
+        .or_insert_with(|| gio::File::for_uri(canonical_uri));
+}
+
+static PINNED_REMOTE_MOUNTS: OnceLock<Mutex<HashMap<String, gio::File>>> = OnceLock::new();
+
+/// The mount a canonical URI belongs to, or `None` for local paths.
+///
+/// A gvfs mount spec never distinguishes paths below its mount point, so
+/// scheme, host and the first path segment are never finer than the real spec.
+/// Being coarser would under-pin; being finer only pins a few extra files.
+fn remote_mount_key(canonical_uri: &str) -> Option<String> {
+    if canonical_uri.starts_with("file:") {
+        return None;
+    }
+    let parsed = glib::Uri::parse(canonical_uri, glib::UriFlags::ENCODED).ok()?;
+    let scheme = parsed.scheme();
+    let host = parsed.host().unwrap_or_default();
+    let mount = parsed
+        .path()
+        .split('/')
+        .find(|segment| !segment.is_empty())
+        .unwrap_or_default()
+        .to_owned();
+    Some(format!("{scheme}://{host}/{mount}"))
 }
 
 fn canonicalize_uri(input: &str) -> Result<String, LocationError> {

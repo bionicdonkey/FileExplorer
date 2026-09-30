@@ -100,3 +100,24 @@ fn legacy_local_path_importer_is_idempotent() {
     assert_eq!(first, second);
     assert_eq!(first[0].uri(), "file:///tmp/one");
 }
+
+#[test]
+fn parallel_non_local_locations_survive_repeated_construction_and_teardown() {
+    // gvfs can resurrect a freed `GMountSpec` from its global `unique_hash`, so
+    // building a non-local `Location` while another thread drops one for the
+    // same mount corrupted the heap. Without the retained mount this aborts or
+    // segfaults the whole binary within a few thousand cycles.
+    let mut threads = Vec::new();
+    for index in 0..8 {
+        threads.push(std::thread::spawn(move || {
+            for cycle in 0..8_000 {
+                let location =
+                    Location::from_uri(&format!("smb://parallel/share/{index}/{cycle}")).unwrap();
+                assert!(location.local_path().is_none());
+            }
+        }));
+    }
+    for thread in threads {
+        thread.join().expect("no worker may corrupt native memory");
+    }
+}
