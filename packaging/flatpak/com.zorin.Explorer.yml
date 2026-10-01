@@ -1,8 +1,9 @@
 app-id: com.zorin.Explorer
 runtime: org.gnome.Platform
-runtime-version: '47'
+runtime-version: '50'
 sdk: org.gnome.Sdk
 sdk-extensions:
+  # Must match the runtime's freedesktop base: GNOME 50 is built on 25.08.
   - org.freedesktop.Sdk.Extension.rust-stable
 command: zorin-explorer
 build-options:

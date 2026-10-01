@@ -106,8 +106,8 @@ cargo build --release
 ### Flatpak
 
 ```bash
-flatpak install flathub org.gnome.Platform//47 org.gnome.Sdk//47 \
-                        org.freedesktop.Sdk.Extension.rust-stable//24.08
+flatpak install flathub org.gnome.Platform//50 org.gnome.Sdk//50 \
+                        org.freedesktop.Sdk.Extension.rust-stable//25.08
 
 flatpak-builder --force-clean \
     --state-dir=/tmp/ze-state --repo=/tmp/ze-repo /tmp/ze-build \
@@ -120,9 +120,16 @@ flatpak install --user ZorinExplorer-0.1.0.flatpak
 Keep the build and state directories outside the checkout. The manifest's source is the checkout
 itself, so anything written inside it gets copied into the next build.
 
+The Rust extension version tracks the runtime's freedesktop base, so it moves with
+`runtime-version` in the manifest: GNOME 50 is built on 25.08. The CI workflow pins the same three
+versions and has to be updated alongside it.
+
 Every push to `main` builds the same bundle in CI — see `.gitea/workflows/flatpak.yml` — and
-attaches it as a run artifact. The workflow's runtime versions and its container image tag have to
-move together with `runtime-version` in the manifest.
+attaches it as a run artifact. That job runs directly on the runner host rather than in a container,
+because flatpak-builder sandboxes each module with bubblewrap and act_runner's containers cannot
+create the user namespace that needs. It therefore expects a host-mode runner label named `flatpak`,
+with `flatpak`, `flatpak-builder` and `node` available on that host; until the label exists the job
+sits queued instead of failing.
 
 ## Testing
 

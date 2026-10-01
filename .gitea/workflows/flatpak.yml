@@ -10,27 +10,43 @@ on:
 
 jobs:
   bundle:
-    runs-on: ubuntu-latest
-    container:
-      # Ships flatpak-builder and the GNOME runtime. Keep this tag in step with
-      # `runtime-version` in packaging/flatpak/com.zorin.Explorer.yml.
-      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-47
-      # flatpak-builder sandboxes each module with bubblewrap, which needs to
-      # create user namespaces. A stock container cannot, so the build fails at
-      # the first module without this.
-      options: --privileged
+    # Runs directly on the runner host, not in a container. flatpak-builder
+    # sandboxes every module with bubblewrap, which needs to create a user
+    # namespace; act_runner's Docker containers cannot, so a containerised job
+    # fails at the first module with:
+    #
+    #   bwrap: No permissions to creating new namespace
+    #
+    # The host also keeps its flatpak installation between runs, which turns the
+    # runtime install below into a no-op after the first build instead of a
+    # ten-minute download every time.
+    #
+    # This needs a host-mode label on the runner, for example in act_runner's
+    # config.yaml:
+    #
+    #   runner:
+    #     labels:
+    #       - "flatpak:host"
+    #
+    # and `flatpak`, `flatpak-builder` and `node` present on that host. Until
+    # the label exists the job stays queued rather than failing, so check the
+    # runner's labels if a run never starts.
+    runs-on: flatpak
     steps:
       - name: Check out the commit
         uses: actions/checkout@v4
 
       - name: Install the runtime, SDK and Rust extension the manifest asks for
+        # Idempotent, and a no-op once the host has them. The Rust extension
+        # version tracks the runtime's freedesktop base, so it moves with
+        # `runtime-version` in the manifest: GNOME 50 is built on 25.08.
         run: |
           flatpak remote-add --if-not-exists --user \
             flathub https://dl.flathub.org/repo/flathub.flatpakrepo
           flatpak install --user --noninteractive --or-update flathub \
-            org.gnome.Platform//47 \
-            org.gnome.Sdk//47 \
-            org.freedesktop.Sdk.Extension.rust-stable//24.08
+            org.gnome.Platform//50 \
+            org.gnome.Sdk//50 \
+            org.freedesktop.Sdk.Extension.rust-stable//25.08
 
       - name: Read the crate version
         id: crate
@@ -40,25 +56,26 @@ jobs:
           echo "Building ZorinExplorer ${version}"
 
       - name: Build the Flatpak
-        # State and build trees live outside the checkout: the manifest's source
-        # is the checkout directory itself, so anything written inside it would
-        # be copied into the next build.
+        # State and build trees live outside the checkout, under a run-scoped
+        # directory: the manifest's source is the checkout itself, so anything
+        # written inside it would be copied into the next build, and concurrent
+        # runs on one host must not share a build tree.
         #
-        # --disable-rofiles-fuse because /dev/fuse is not dependably available
-        # to a CI container; it only costs a slower copy of the build tree.
+        # --disable-rofiles-fuse because /dev/fuse is not dependably available;
+        # it only costs a slower copy of the build tree.
         run: |
           flatpak-builder \
             --force-clean \
             --disable-rofiles-fuse \
-            --state-dir=/tmp/flatpak-ci/state \
-            --repo=/tmp/flatpak-ci/repo \
-            /tmp/flatpak-ci/build \
+            --state-dir="/tmp/flatpak-ci-${{ github.run_id }}/state" \
+            --repo="/tmp/flatpak-ci-${{ github.run_id }}/repo" \
+            "/tmp/flatpak-ci-${{ github.run_id }}/build" \
             packaging/flatpak/com.zorin.Explorer.yml
 
       - name: Export a single-file bundle
         run: |
           flatpak build-bundle \
-            /tmp/flatpak-ci/repo \
+            "/tmp/flatpak-ci-${{ github.run_id }}/repo" \
             "ZorinExplorer-${{ steps.crate.outputs.version }}.flatpak" \
             com.zorin.Explorer master
           ls -l ZorinExplorer-*.flatpak
@@ -70,3 +87,8 @@ jobs:
           path: ZorinExplorer-*.flatpak
           if-no-files-found: error
           retention-days: 30
+
+      - name: Remove the build trees
+        # The host is not disposable, so this runs even when the build failed.
+        if: always()
+        run: rm -rf "/tmp/flatpak-ci-${{ github.run_id }}"
