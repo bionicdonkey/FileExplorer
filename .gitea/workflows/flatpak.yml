@@ -120,7 +120,16 @@ jobs:
           ls -l ZorinExplorer-*.flatpak
 
       - name: Upload the bundle
-        uses: actions/upload-artifact@v4
+        # v3, not v4. Gitea presents itself as a GitHub Enterprise server, and
+        # upload-artifact@v4 refuses those outright, client-side, before it looks
+        # at anything the server can do:
+        #
+        #   GHESNotSupportedError: @actions/artifact v2.0.0+, upload-artifact@v4+
+        #   and download-artifact@v4+ are not currently supported on GHES.
+        #
+        # So no amount of Gitea-side support makes v4 work here. v3 is deprecated
+        # on github.com but is the version Gitea's artifact API implements.
+        uses: actions/upload-artifact@v3
         with:
           name: ZorinExplorer-${{ steps.crate.outputs.version }}-flatpak
           path: ZorinExplorer-*.flatpak

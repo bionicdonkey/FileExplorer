@@ -142,7 +142,8 @@ bubblewrap, which has to create a user namespace and mount a fresh procfs inside
   daemon driven through the API.
 
 The job is therefore pinned to the `flatpak` label rather than `ubuntu-latest`, so it only runs on
-the one runner configured that way. The workflow's first step reports the sysctl, the effective
+the one runner configured that way. The bundle is uploaded with `actions/upload-artifact@v3`, not
+v4: v4 refuses any GitHub Enterprise-style server client-side, which is how Gitea presents itself. The workflow's first step reports the sysctl, the effective
 capabilities and the seccomp mode, so a failing run says which requirement is missing.
 
 Running the job in host mode instead does not help when act_runner is itself containerised: the
