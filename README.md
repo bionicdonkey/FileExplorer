@@ -125,11 +125,19 @@ The Rust extension version tracks the runtime's freedesktop base, so it moves wi
 versions and has to be updated alongside it.
 
 Every push to `main` builds the same bundle in CI — see `.gitea/workflows/flatpak.yml` — and
-attaches it as a run artifact. That job runs directly on the runner host rather than in a container,
-because flatpak-builder sandboxes each module with bubblewrap and act_runner's containers cannot
-create the user namespace that needs. It therefore expects a host-mode runner label named `flatpak`,
-with `flatpak`, `flatpak-builder` and `node` available on that host; until the label exists the job
-sits queued instead of failing.
+attaches it as a run artifact.
+
+That job needs one thing from its runner. flatpak-builder sandboxes each module with bubblewrap,
+which has to create a user namespace, and Docker's default apparmor profile enforces
+`kernel.apparmor_restrict_unprivileged_userns`. Where that is set to 1 — the default on Ubuntu 24.04
+and later — the build dies at the first module with `bwrap: No permissions to creating new
+namespace`. Either the runner must allow `--security-opt apparmor=unconfined` for job containers
+(act_runner's own `config.yaml` is authoritative; options in the workflow may be ignored), or the
+host must set that sysctl to 0. The workflow's first step reports which knobs are in force, so a
+failing run says why.
+
+Running the job in host mode instead does not help when act_runner is itself containerised: the
+"host" is then the runner's own image, which carries none of the toolchain.
 
 ## Testing
 

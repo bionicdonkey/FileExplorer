@@ -10,28 +10,30 @@ on:
 
 jobs:
   bundle:
-    # Runs directly on the runner host, not in a container. flatpak-builder
-    # sandboxes every module with bubblewrap, which needs to create a user
-    # namespace; act_runner's Docker containers cannot, so a containerised job
-    # fails at the first module with:
-    #
-    #   bwrap: No permissions to creating new namespace
-    #
-    # The host also keeps its flatpak installation between runs, which turns the
-    # runtime install below into a no-op after the first build instead of a
-    # ten-minute download every time.
-    #
-    # This needs a host-mode label on the runner, for example in act_runner's
-    # config.yaml:
-    #
-    #   runner:
-    #     labels:
-    #       - "flatpak:host"
-    #
-    # and `flatpak`, `flatpak-builder` and `node` present on that host. Until
-    # the label exists the job stays queued rather than failing, so check the
-    # runner's labels if a run never starts.
-    runs-on: flatpak
+    # Docker mode, not host mode. A `:host` label on this runner would run the
+    # job inside the act_runner container itself, which is a bare Alpine image
+    # with no flatpak, flatpak-builder, bwrap, cargo or node.
+    runs-on: ubuntu-latest
+    container:
+      # Preinstalls the GNOME runtime and SDK, so the install step below is
+      # close to a no-op. Keep this tag in step with `runtime-version` in
+      # packaging/flatpak/com.zorin.Explorer.yml.
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-50
+      # flatpak-builder sandboxes every module with bubblewrap, which needs to
+      # create a user namespace. Docker's default apparmor profile enforces
+      # `kernel.apparmor_restrict_unprivileged_userns`, so without this the
+      # build dies at the first module with:
+      #
+      #   bwrap: No permissions to creating new namespace
+      #
+      # act_runner may ignore options set here: its own config.yaml is
+      # authoritative, so the same relaxation has to be allowed there, or the
+      # host has to set kernel.apparmor_restrict_unprivileged_userns=0. The
+      # environment report below tells you which knobs are in force.
+      options: >-
+        --security-opt apparmor=unconfined
+        --security-opt seccomp=unconfined
+        --device /dev/fuse
     steps:
       - name: Report the build environment
         # A shell step needs no node, so this runs before the JS actions and
