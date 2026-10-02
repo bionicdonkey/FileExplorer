@@ -33,6 +33,7 @@ jobs:
       options: >-
         --security-opt apparmor=unconfined
         --security-opt seccomp=unconfined
+        --cap-add SYS_ADMIN
         --device /dev/fuse
     steps:
       - name: Report the build environment
@@ -53,6 +54,10 @@ jobs:
           for knob in kernel.unprivileged_userns_clone kernel.apparmor_restrict_unprivileged_userns; do
             echo "  $knob = $(sysctl -n "$knob" 2>/dev/null || echo 'not present')"
           done
+          echo "effective caps:    $(grep -E '^CapEff' /proc/self/status | awk '{print $2}')"
+          echo "  SYS_ADMIN held:  $( capsh --decode="0x$(grep -E '^CapEff' /proc/self/status | awk '{print $2}')" 2>/dev/null | grep -q sys_admin && echo yes || echo 'no (or capsh missing)' )"
+          echo "seccomp mode:      $(grep -E '^Seccomp:' /proc/self/status | awk '{print $2}') (0=disabled 2=filtered)"
+          echo "apparmor profile:  $(cat /proc/self/attr/current 2>/dev/null || echo unavailable)"
           echo "disk free on /:    $(df -h / | awk 'NR==2 {print $4}')"
           echo "disk free on /tmp: $(df -h /tmp | awk 'NR==2 {print $4}')"
           echo "home: ${HOME:-unset}"
