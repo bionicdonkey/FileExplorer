@@ -33,6 +33,28 @@ jobs:
     # runner's labels if a run never starts.
     runs-on: flatpak
     steps:
+      - name: Report the build environment
+        # A shell step needs no node, so this runs before the JS actions and
+        # says what the job actually executes in. Keep it first: when a run
+        # fails in checkout, this is the only output that explains why.
+        run: |
+          echo "user:        $(id -un) (uid $(id -u))"
+          echo "host:        $(uname -srm)  $(. /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-unknown}")"
+          echo "PATH:        $PATH"
+          echo "containerised: $( [ -f /.dockerenv ] && echo 'yes (/.dockerenv present)' || echo 'no /.dockerenv' )"
+          [ -r /proc/1/cgroup ] && echo "pid1 cgroup: $(head -1 /proc/1/cgroup)" || true
+          for tool in node nodejs flatpak flatpak-builder bwrap git cargo; do
+            printf '%-16s %s\n' "$tool:" "$(command -v "$tool" || echo MISSING)"
+          done
+          echo "node version: $(node --version 2>&1 || true)"
+          echo "unprivileged userns:"
+          for knob in kernel.unprivileged_userns_clone kernel.apparmor_restrict_unprivileged_userns; do
+            echo "  $knob = $(sysctl -n "$knob" 2>/dev/null || echo 'not present')"
+          done
+          echo "disk free on /:    $(df -h / | awk 'NR==2 {print $4}')"
+          echo "disk free on /tmp: $(df -h /tmp | awk 'NR==2 {print $4}')"
+          echo "home: ${HOME:-unset}"
+
       - name: Check out the commit
         uses: actions/checkout@v4
 
