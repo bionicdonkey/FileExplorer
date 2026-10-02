@@ -19,22 +19,28 @@ jobs:
       # close to a no-op. Keep this tag in step with `runtime-version` in
       # packaging/flatpak/com.zorin.Explorer.yml.
       image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-50
-      # flatpak-builder sandboxes every module with bubblewrap, which needs to
-      # create a user namespace. Docker's default apparmor profile enforces
-      # `kernel.apparmor_restrict_unprivileged_userns`, so without this the
-      # build dies at the first module with:
+      # flatpak-builder sandboxes every module with bubblewrap, which has to
+      # create a user namespace and mount a fresh procfs inside it. All three
+      # options are required and were each shown to be necessary; dropping any
+      # one reproduces a failure:
       #
-      #   bwrap: No permissions to creating new namespace
+      #   (none)                   bwrap: No permissions to create a new namespace
+      #   without systempaths      bwrap: Can't mount proc on /newroot/proc
       #
-      # act_runner may ignore options set here: its own config.yaml is
-      # authoritative, so the same relaxation has to be allowed there, or the
-      # host has to set kernel.apparmor_restrict_unprivileged_userns=0. The
-      # environment report below tells you which knobs are in force.
+      # `systempaths=unconfined` is the one that matters least obviously: Docker
+      # masks parts of /proc, and the kernel refuses to mount a fresh procfs in
+      # a nested namespace when that would unmask them. CAP_SYS_ADMIN is *not*
+      # needed once seccomp is unconfined.
+      #
+      # act_runner honours --security-opt (it refuses only --privileged), so
+      # this needs nothing in its config.yaml. The host does still need
+      # kernel.apparmor_restrict_unprivileged_userns=0; the environment report
+      # below prints that, the effective capabilities and the seccomp mode, so a
+      # failing run says which one is missing.
       options: >-
-        --security-opt apparmor=unconfined
+        --security-opt systempaths=unconfined
         --security-opt seccomp=unconfined
-        --cap-add SYS_ADMIN
-        --device /dev/fuse
+        --security-opt apparmor=unconfined
     steps:
       - name: Report the build environment
         # A shell step needs no node, so this runs before the JS actions and
@@ -65,16 +71,23 @@ jobs:
       - name: Check out the commit
         uses: actions/checkout@v4
 
-      - name: Install the runtime, SDK and Rust extension the manifest asks for
-        # Idempotent, and a no-op once the host has them. The Rust extension
-        # version tracks the runtime's freedesktop base, so it moves with
-        # `runtime-version` in the manifest: GNOME 50 is built on 25.08.
+      - name: Install the Rust SDK extension
+        # The image already carries the runtime and SDK in the system
+        # installation, so only the Rust extension is missing. Installing into
+        # --user instead would re-download both (ten minutes); asking to update
+        # the preinstalled ones fails with `Invalid cross-device link`, because
+        # ostree cannot hardlink across the image's layers. So: assert what the
+        # image is expected to provide, then add only what it lacks.
+        #
+        # The extension version tracks the runtime's freedesktop base rather
+        # than its GNOME version, so it moves with `runtime-version` in the
+        # manifest: GNOME 50 is built on 25.08.
         run: |
-          flatpak remote-add --if-not-exists --user \
+          flatpak remote-add --if-not-exists --system \
             flathub https://dl.flathub.org/repo/flathub.flatpakrepo
-          flatpak install --user --noninteractive --or-update flathub \
-            org.gnome.Platform//50 \
-            org.gnome.Sdk//50 \
+          flatpak info org.gnome.Platform//50 > /dev/null
+          flatpak info org.gnome.Sdk//50 > /dev/null
+          flatpak install --system --noninteractive --or-update flathub \
             org.freedesktop.Sdk.Extension.rust-stable//25.08
 
       - name: Read the crate version

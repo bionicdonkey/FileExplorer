@@ -127,17 +127,22 @@ versions and has to be updated alongside it.
 Every push to `main` builds the same bundle in CI — see `.gitea/workflows/flatpak.yml` — and
 attaches it as a run artifact.
 
-That job needs one thing from its runner. flatpak-builder sandboxes each module with bubblewrap,
-which has to create a user namespace, and Docker's default apparmor profile enforces
-`kernel.apparmor_restrict_unprivileged_userns`. Where that is set to 1 — the default on Ubuntu 24.04
-and later — the build dies at the first module with `bwrap: No permissions to creating new
-namespace`. Either the runner must allow `--security-opt apparmor=unconfined` for job containers
-(act_runner's own `config.yaml` is authoritative; options in the workflow may be ignored), or the
-host must set that sysctl to 0. The workflow's first step reports which knobs are in force, so a
-failing run says why.
+That job needs two things from its runner, because flatpak-builder sandboxes each module with
+bubblewrap, which has to create a user namespace and mount a fresh procfs inside it:
 
-Running the job in host mode instead does not help when act_runner is itself containerised: the
-"host" is then the runner's own image, which carries none of the toolchain.
+- `kernel.apparmor_restrict_unprivileged_userns=0` on the runner host. It defaults to 1 on
+  Ubuntu 24.04 and later, and at 1 the build fails with `bwrap: No permissions to create a new
+  namespace`.
+- The three `--security-opt` flags the workflow sets on its container. act_runner honours these (it
+  refuses only `--privileged`), so nothing is needed in its `config.yaml`. `systempaths=unconfined`
+  is the least obvious of them: Docker masks parts of `/proc`, and the kernel refuses to mount a
+  fresh procfs in a nested namespace when that would unmask them, which shows up as `bwrap: Can't
+  mount proc on /newroot/proc`.
+
+The workflow's first step reports the sysctls, effective capabilities and seccomp mode, so a failing
+run says which of these is missing. Running the job in host mode instead does not help when
+act_runner is itself containerised: the "host" is then the runner's own image, which carries none of
+the toolchain.
 
 ## Testing
 
