@@ -133,16 +133,20 @@ bubblewrap, which has to create a user namespace and mount a fresh procfs inside
 - `kernel.apparmor_restrict_unprivileged_userns=0` on the runner host. It defaults to 1 on
   Ubuntu 24.04 and later, and at 1 the build fails with `bwrap: No permissions to create a new
   namespace`.
-- The three `--security-opt` flags the workflow sets on its container. act_runner honours these (it
-  refuses only `--privileged`), so nothing is needed in its `config.yaml`. `systempaths=unconfined`
-  is the least obvious of them: Docker masks parts of `/proc`, and the kernel refuses to mount a
-  fresh procfs in a nested namespace when that would unmask them, which shows up as `bwrap: Can't
-  mount proc on /newroot/proc`.
+- `container.privileged: true` in that runner's act_runner config. Docker masks 12 paths under
+  `/proc` and makes 5 read-only, and the kernel refuses to mount a fresh procfs in a nested
+  namespace when that would unmask them: `bwrap: Can't mount proc on /newroot/proc`. Privileged
+  mode is the only way to clear those masks through act_runner —
+  `--security-opt systempaths=unconfined` is translated by the Docker CLI into empty
+  `MaskedPaths`/`ReadonlyPaths` rather than being sent as a security option, so it never reaches a
+  daemon driven through the API.
 
-The workflow's first step reports the sysctls, effective capabilities and seccomp mode, so a failing
-run says which of these is missing. Running the job in host mode instead does not help when
-act_runner is itself containerised: the "host" is then the runner's own image, which carries none of
-the toolchain.
+The job is therefore pinned to the `flatpak` label rather than `ubuntu-latest`, so it only runs on
+the one runner configured that way. The workflow's first step reports the sysctl, the effective
+capabilities and the seccomp mode, so a failing run says which requirement is missing.
+
+Running the job in host mode instead does not help when act_runner is itself containerised: the
+"host" is then the runner's own image, which carries none of the toolchain.
 
 ## Testing
 

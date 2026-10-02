@@ -10,37 +10,34 @@ on:
 
 jobs:
   bundle:
-    # Docker mode, not host mode. A `:host` label on this runner would run the
-    # job inside the act_runner container itself, which is a bare Alpine image
-    # with no flatpak, flatpak-builder, bwrap, cargo or node.
-    runs-on: ubuntu-latest
+    # Pinned to the `flatpak` label, which only the Ivy runner advertises, because
+    # this job needs `container.privileged` in that runner's act_runner config.
+    # Docker masks 12 paths under /proc and makes 5 read-only, and bubblewrap --
+    # which flatpak-builder uses to sandbox every module -- cannot mount a fresh
+    # procfs inside its namespace while that masking is in place:
+    #
+    #   bwrap: Can't mount proc on /newroot/proc: Operation not permitted
+    #
+    # Privileged mode is the only way to clear those masks through act_runner.
+    # `--security-opt systempaths=unconfined` is the obvious narrow fix and works
+    # with `docker run`, but the Docker CLI translates it into empty
+    # MaskedPaths/ReadonlyPaths rather than sending a security option, so it never
+    # reaches a daemon driven through the API. Hence no container options here.
+    #
+    # The runner host also needs kernel.apparmor_restrict_unprivileged_userns=0,
+    # which defaults to 1 on Ubuntu 24.04 and later; at 1, bwrap cannot create the
+    # namespace at all. The environment report below prints that sysctl, the
+    # effective capabilities and the seccomp mode, so a failing run says which
+    # requirement is missing.
+    #
+    # A host-mode label would not help: when act_runner itself runs in a container,
+    # "host" is its own image, a bare Alpine with no flatpak, bwrap, cargo or node.
+    runs-on: flatpak
     container:
-      # Preinstalls the GNOME runtime and SDK, so the install step below is
-      # close to a no-op. Keep this tag in step with `runtime-version` in
+      # Preinstalls the GNOME runtime and SDK, so the install step below only has
+      # to add the Rust extension. Keep this tag in step with `runtime-version` in
       # packaging/flatpak/com.zorin.Explorer.yml.
       image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-50
-      # flatpak-builder sandboxes every module with bubblewrap, which has to
-      # create a user namespace and mount a fresh procfs inside it. All three
-      # options are required and were each shown to be necessary; dropping any
-      # one reproduces a failure:
-      #
-      #   (none)                   bwrap: No permissions to create a new namespace
-      #   without systempaths      bwrap: Can't mount proc on /newroot/proc
-      #
-      # `systempaths=unconfined` is the one that matters least obviously: Docker
-      # masks parts of /proc, and the kernel refuses to mount a fresh procfs in
-      # a nested namespace when that would unmask them. CAP_SYS_ADMIN is *not*
-      # needed once seccomp is unconfined.
-      #
-      # act_runner honours --security-opt (it refuses only --privileged), so
-      # this needs nothing in its config.yaml. The host does still need
-      # kernel.apparmor_restrict_unprivileged_userns=0; the environment report
-      # below prints that, the effective capabilities and the seccomp mode, so a
-      # failing run says which one is missing.
-      options: >-
-        --security-opt systempaths=unconfined
-        --security-opt seccomp=unconfined
-        --security-opt apparmor=unconfined
     steps:
       - name: Report the build environment
         # A shell step needs no node, so this runs before the JS actions and
