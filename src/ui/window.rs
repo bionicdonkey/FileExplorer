@@ -387,16 +387,22 @@ impl ExplorerWindow {
                 .unwrap_or(initial),
         );
         let mounted_tabs = Rc::downgrade(&tabs_data);
-        gio::VolumeMonitor::get().connect_mount_removed(move |_, mount| {
-            if let (Some(data), Ok(root)) = (
-                mounted_tabs.upgrade(),
-                Location::try_from_file(mount.root()),
-            ) {
-                for tab in data.borrow().iter() {
-                    tab.view.mark_unavailable(&root);
+        // The sidebar's retained monitor, not a fresh `VolumeMonitor::get()`:
+        // GIO finalizes the monitor when the last reference drops, so a handler
+        // connected to a temporary never fires and tabs were never marked
+        // unavailable when their mount went away.
+        sidebar
+            .volume_monitor()
+            .connect_mount_removed(move |_, mount| {
+                if let (Some(data), Ok(root)) = (
+                    mounted_tabs.upgrade(),
+                    Location::try_from_file(mount.root()),
+                ) {
+                    for tab in data.borrow().iter() {
+                        tab.view.mark_unavailable(&root);
+                    }
                 }
-            }
-        });
+            });
         sidebar.set_operation_manager(operations.clone());
         *sidebar_holder.borrow_mut() = Some(sidebar.clone());
 

@@ -54,6 +54,12 @@ pub struct Sidebar {
     operation_summary: Rc<RefCell<Option<String>>>,
     pending_focus: Rc<RefCell<Option<PendingFocus>>>,
     next_focus_token: Rc<Cell<u64>>,
+    // GIO finalizes the volume monitor when its last reference drops, and
+    // `VolumeMonitor::get()` hands out a reference rather than keeping one. A
+    // handler connected to a temporary therefore stops receiving signals the
+    // moment that statement ends, which is why hot-plugged devices never
+    // appeared. Holding it here is what keeps the subscriptions alive.
+    volume_monitor: gio::VolumeMonitor,
 }
 
 impl Sidebar {
@@ -98,11 +104,13 @@ impl Sidebar {
             operation_summary: Rc::new(RefCell::new(None)),
             pending_focus: Rc::new(RefCell::new(None)),
             next_focus_token: Rc::new(Cell::new(1)),
+            volume_monitor: gio::VolumeMonitor::get(),
         };
         sidebar.refresh();
 
+        let monitor = sidebar.volume_monitor.clone();
         let refresh_on_mount = sidebar.clone();
-        gio::VolumeMonitor::get().connect_mount_added(move |_, mount| {
+        monitor.connect_mount_added(move |_, mount| {
             crate::ui::accessibility::AccessibleStatus::announce_for(
                 &refresh_on_mount.widget,
                 &format!("Connected {}", mount.name()),
@@ -111,7 +119,7 @@ impl Sidebar {
             refresh_on_mount.refresh();
         });
         let refresh_on_unmount = sidebar.clone();
-        gio::VolumeMonitor::get().connect_mount_removed(move |_, mount| {
+        monitor.connect_mount_removed(move |_, mount| {
             crate::ui::accessibility::AccessibleStatus::announce_for(
                 &refresh_on_unmount.widget,
                 &format!("Disconnected {}", mount.name()),
@@ -119,11 +127,41 @@ impl Sidebar {
             );
             refresh_on_unmount.refresh();
         });
+
+        // Plugging a device in emits drive-connected and volume-added; a mount
+        // signal only follows if something auto-mounts it. Listening for mounts
+        // alone means a device that is present but not mounted never prompts a
+        // refresh, so it stays invisible even once the listing below can show it.
+        let refresh_on_volume = sidebar.clone();
+        monitor.connect_volume_added(move |_, _| refresh_on_volume.refresh());
+        let refresh_on_volume_removed = sidebar.clone();
+        monitor.connect_volume_removed(move |_, _| refresh_on_volume_removed.refresh());
+        let refresh_on_drive = sidebar.clone();
+        monitor.connect_drive_connected(move |_, _| refresh_on_drive.refresh());
+        let refresh_on_drive_removed = sidebar.clone();
+        monitor.connect_drive_disconnected(move |_, _| refresh_on_drive_removed.refresh());
+
+        // Every handler above holds a `Sidebar`, and the sidebar holds the
+        // monitor, so the two keep each other alive for the process. That is a
+        // leak per window, but not a new one: `set_operation_manager` already
+        // parks a `Sidebar` in a 250ms timeout that never returns `Break`.
+        // Disconnecting on teardown was tried and removed: GTK emits `destroy`
+        // only once a widget's last reference goes, which this cycle prevents,
+        // and `root` is not notified when the window is destroyed. Doing it
+        // properly means an explicit teardown on the window close path, which is
+        // its own change.
         sidebar
     }
 
     pub fn model(&self) -> Rc<RefCell<SidebarModel>> {
         self.model.clone()
+    }
+
+    /// The retained volume monitor, for other components that need device
+    /// signals. Connecting to a fresh `VolumeMonitor::get()` instead leaves the
+    /// handler on an object GIO finalizes as soon as that reference drops.
+    pub fn volume_monitor(&self) -> &gio::VolumeMonitor {
+        &self.volume_monitor
     }
 
     pub fn refresh(&self) {
@@ -1029,6 +1067,31 @@ mod tests {
             !contains_sidebar_label(&sidebar.widget, "Projects"),
             "a provider may complete after cancellation, but that old result must be ignored"
         );
+    }
+
+    #[gtk::test]
+    fn sidebar_retains_the_volume_monitor_so_device_signals_keep_firing() {
+        // GIO finalizes the volume monitor when its last reference drops, and
+        // `VolumeMonitor::get()` hands out a reference rather than keeping one.
+        // Connecting to a temporary therefore leaves the handler on a dead
+        // object, which is why hot-plugged devices never refreshed the sidebar.
+        let model = Rc::new(RefCell::new(SidebarModel::new(
+            SidebarPreferences::in_memory(),
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+        )));
+        let window = gtk::Window::new();
+        let sidebar = super::Sidebar::new(model, &window, |_| {});
+        window.set_child(Some(&sidebar.widget));
+
+        // Our own reference goes out of scope at the end of this statement, so
+        // the monitor survives only if the sidebar is holding one.
+        let monitor = glib::object::ObjectExt::downgrade(&gio::VolumeMonitor::get());
+        assert!(
+            monitor.upgrade().is_some(),
+            "sidebar must retain the volume monitor, or its device signals stop firing"
+        );
+
+        drop(sidebar);
     }
 
     fn remote_sidebar(remote: Location, provider: Rc<MockProvider>) -> super::Sidebar {
