@@ -125,7 +125,18 @@ The Rust extension version tracks the runtime's freedesktop base, so it moves wi
 versions and has to be updated alongside it.
 
 Every push to `main` builds the same bundle in CI — see `.gitea/workflows/flatpak.yml` — and
-attaches it as a run artifact.
+attaches it as a run artifact, kept for 30 days.
+
+A release is cut by tagging. The tag must match the crate version, or the job fails before creating
+anything:
+
+```bash
+# with Cargo.toml at version = "0.1.0"
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+That runs the same build and publishes the bundle as a release asset, which is the permanent copy.
+Re-running a tag attaches to the existing release and replaces the asset rather than duplicating it.
 
 That job needs two things from its runner, because flatpak-builder sandboxes each module with
 bubblewrap, which has to create a user namespace and mount a fresh procfs inside it:
