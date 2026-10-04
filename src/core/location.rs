@@ -122,14 +122,51 @@ impl Location {
         self.file
             .parent()
             .and_then(|file| Self::try_from_file(file).ok())
+            // GIO stops at the root of a mount, which inside an archive is the
+            // archive itself. Going up from there means going back to the
+            // folder the archive is in, the way leaving any other folder does.
+            .or_else(|| self.archive_file().and_then(|archive| archive.parent()))
+    }
+
+    /// The archive a location at an archive root was opened from.
+    fn archive_file(&self) -> Option<Self> {
+        if !self.is_inside_archive() {
+            return None;
+        }
+        let parsed = glib::Uri::parse(&self.canonical_uri, glib::UriFlags::ENCODED).ok()?;
+        if !parsed.path().trim_matches('/').is_empty() {
+            return None;
+        }
+        let archive = glib::Uri::unescape_string(&parsed.host()?, None)?;
+        Self::from_uri(&archive).ok()
     }
 
     pub fn is_within(&self, root: &Self) -> bool {
         self == root || self.file.has_prefix(&root.file)
     }
 
+    /// Where this archive's contents live, as gvfs addresses them.
+    ///
+    /// `gvfsd-archive` names a mount by the archive's own URI, escaped twice:
+    /// once to put a URI inside an authority, and again because parsing the
+    /// result unescapes it. Any file can be asked for -- whether gvfs can read
+    /// it is answered by the mount, not here.
+    pub fn archive_contents(&self) -> Result<Self, LocationError> {
+        let escaped = glib::Uri::escape_string(&self.canonical_uri, None, false);
+        let host = glib::Uri::escape_string(&escaped, None, false);
+        Self::from_uri(&format!("archive://{host}/"))
+    }
+
+    /// Whether this location is inside an archive gvfs has mounted.
+    pub fn is_inside_archive(&self) -> bool {
+        self.canonical_uri.starts_with("archive://")
+    }
+
     /// A concise label suitable for a tab, breadcrumb, or sidebar row.
     pub fn display_name(&self) -> String {
+        if let Some(name) = self.archive_display_name() {
+            return name;
+        }
         self.local_path()
             .and_then(|path| {
                 path.file_name()
@@ -139,6 +176,39 @@ impl Location {
                     .or_else(|| Some(path.to_string_lossy().into_owned()))
             })
             .unwrap_or_else(|| self.redacted())
+    }
+
+    /// The label for a location inside an archive.
+    ///
+    /// Redaction exists to keep a remote share's path out of the interface, but
+    /// an archive's authority is a file the user picked themselves and its
+    /// segments are its own contents, so the usual `scheme://host/…` would hide
+    /// the only part that means anything. Named after the archive at the root,
+    /// and after the current entry below it.
+    fn archive_display_name(&self) -> Option<String> {
+        if !self.is_inside_archive() {
+            return None;
+        }
+        let parsed = glib::Uri::parse(&self.canonical_uri, glib::UriFlags::ENCODED).ok()?;
+        let path = parsed.path();
+        let inner = path
+            .rsplit('/')
+            .find(|segment| !segment.is_empty())
+            .map(|segment| glib::Uri::unescape_string(segment, None));
+        if let Some(Some(segment)) = inner {
+            return Some(segment.to_string());
+        }
+        // At the root the name of the archive is the name of the location.
+        let host = parsed.host()?;
+        let archive = glib::Uri::unescape_string(&host, None)?;
+        Self::from_uri(&archive).ok().map(|archive| {
+            let name = archive.display_name();
+            if name.is_empty() {
+                archive.redacted()
+            } else {
+                name
+            }
+        })
     }
 
     /// A user-safe URI description that never includes remote path details.
@@ -219,8 +289,18 @@ fn canonicalize_uri(input: &str) -> Result<String, LocationError> {
         return Err(LocationError::UnsafeLocation);
     }
     let scheme = parsed.scheme().to_ascii_lowercase();
-    let host = parsed.host().map(|host| host.to_ascii_lowercase());
     let path = normalize_percent_encoding(parsed.path().as_str())?;
+    // An authority that carries percent-encoding is identity, not a host name:
+    // gvfs addresses an archive as `archive://<the archive's escaped URI>/`.
+    // Lowercasing that loses the case of the archive's own path, and rebuilding
+    // it through `Uri::join` unescapes one layer, so either one addresses a
+    // mount that does not exist. Hostnames are still folded, because DNS does
+    // not distinguish case and the same share must not become two locations.
+    if let Some(authority) = opaque_authority(input) {
+        let authority = normalize_percent_encoding(authority)?;
+        return Ok(format!("{scheme}://{authority}{path}"));
+    }
+    let host = parsed.host().map(|host| host.to_ascii_lowercase());
     Ok(glib::Uri::join(
         glib::UriFlags::ENCODED,
         Some(&scheme),
@@ -232,6 +312,23 @@ fn canonicalize_uri(input: &str) -> Result<String, LocationError> {
         None,
     )
     .to_string())
+}
+
+/// The authority of a URI that names something other than a host.
+///
+/// Only percent-encoding marks one, since a real authority has none: a host
+/// name cannot contain `%`, and userinfo and ports are rejected before this is
+/// reached. Returning `None` leaves the ordinary host path untouched.
+fn opaque_authority(input: &str) -> Option<&str> {
+    let start = input.find("://")? + 3;
+    let rest = &input[start..];
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..end];
+    let opaque = authority.contains('%')
+        && !authority.contains(':')
+        && !authority.contains('@')
+        && !authority.contains('[');
+    opaque.then_some(authority)
 }
 
 fn validate_percent_escapes(value: &str) -> Result<(), LocationError> {

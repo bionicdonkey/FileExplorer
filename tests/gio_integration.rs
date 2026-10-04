@@ -1293,3 +1293,110 @@ fn denied_local_source_and_destination_remain_eligible_for_linked_elevation() {
             .any(|e| matches!(e, OperationEvent::Started { .. })));
     }
 }
+
+/// Writes a one-file tar archive, so the fixture needs no archiver installed
+/// and no crate beyond the standard library. Fields are the ustar ones: name,
+/// mode, uid, gid, size, mtime, checksum, type, then the magic.
+fn tar_with_one_file(path: &std::path::Path, name: &str, contents: &str) {
+    let mut header = [0u8; 512];
+    header[..name.len()].copy_from_slice(name.as_bytes());
+    header[100..107].copy_from_slice(b"0000644");
+    header[108..115].copy_from_slice(b"0000000");
+    header[116..123].copy_from_slice(b"0000000");
+    header[124..135].copy_from_slice(format!("{:011o}", contents.len()).as_bytes());
+    header[136..147].copy_from_slice(b"00000000000");
+    // The checksum is computed with its own field read as spaces.
+    header[148..156].copy_from_slice(b"        ");
+    header[156] = b'0';
+    header[257..263].copy_from_slice(b"ustar\0");
+    header[263..265].copy_from_slice(b"00");
+    let checksum: u32 = header.iter().map(|byte| u32::from(*byte)).sum();
+    header[148..155].copy_from_slice(format!("{checksum:06o}\0").as_bytes());
+    header[155] = b' ';
+
+    let mut archive = header.to_vec();
+    archive.extend_from_slice(contents.as_bytes());
+    archive.resize(512 + contents.len().div_ceil(512) * 512, 0);
+    // Two empty blocks end the archive.
+    archive.resize(archive.len() + 1024, 0);
+    std::fs::write(path, archive).unwrap();
+}
+
+fn archive_backend_installed() -> bool {
+    ["/usr/libexec/gvfsd-archive", "/usr/lib/gvfs/gvfsd-archive"]
+        .iter()
+        .any(|path| std::path::Path::new(path).exists())
+}
+
+/// Lists a location that has to be mounted first.
+///
+/// Mount-on-demand is enabled by the presence of a mount-operation factory --
+/// the window supplies a GTK one so authentication can be parented -- so a
+/// repository without one reports `MountUnavailable` rather than mounting. An
+/// archive needs no credentials, so a plain GIO operation is enough here.
+fn directory_result_mounting(location: Location) -> RequestOutcome<DirectorySnapshot> {
+    use zorin_explorer::{
+        core::ports::DirectoryRepository, infrastructure::gio_directory::GioDirectoryRepository,
+    };
+    let context = glib::MainContext::new();
+    let _guard = context.acquire().unwrap();
+    let adapter = GioDirectoryRepository::new(context.clone());
+    adapter.set_mount_operation(gio::MountOperation::new);
+    let received = Rc::new(RefCell::new(None));
+    let out = received.clone();
+    adapter.list(
+        DirectoryRequest {
+            id: RequestId(88),
+            location,
+            page: PageRequest {
+                offset: 0,
+                limit: usize::MAX,
+            },
+            cancellable: gio::Cancellable::new(),
+        },
+        Box::new(move |result| *out.borrow_mut() = Some(result.outcome)),
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while received.borrow().is_none() {
+        context.iteration(false);
+        assert!(
+            std::time::Instant::now() < deadline,
+            "mounting and listing the archive timed out"
+        );
+        std::thread::yield_now();
+    }
+    received.take().unwrap()
+}
+
+#[test]
+fn opening_an_archive_lists_its_contents_in_the_application() {
+    // The end of the path an archive takes: the activation policy turns the
+    // file into an `archive://` location, and the directory adapter mounts it
+    // on demand and lists what is inside. Anything short of this still opens
+    // another file manager, which is what it used to do.
+    if !archive_backend_installed() {
+        eprintln!("skipped: gvfs has no archive backend on this machine");
+        return;
+    }
+    use zorin_explorer::core::{activation_for, Activation, FileItem};
+    let fixture = tempfile::tempdir().unwrap();
+    let archive = fixture.path().join("Holiday Photos.tar");
+    tar_with_one_file(&archive, "packing-list.txt", "one tent\n");
+
+    let item = FileItem::from_path(&archive).unwrap();
+    let Activation::Browse(inside) = activation_for(&item) else {
+        panic!("a tar must open in the window");
+    };
+    assert_eq!(inside.display_name(), "Holiday Photos.tar");
+
+    let outcome = directory_result_mounting(inside);
+    let RequestOutcome::Succeeded(snapshot) = outcome else {
+        panic!("listing an archive must succeed, got {outcome:?}");
+    };
+    let names: Vec<&str> = snapshot
+        .entries
+        .iter()
+        .map(|entry| entry.display_name.as_str())
+        .collect();
+    assert_eq!(names, vec!["packing-list.txt"]);
+}

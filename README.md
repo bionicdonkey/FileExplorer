@@ -3,8 +3,8 @@
 A native Linux file manager with a Windows 11 Explorer-inspired interaction model, built with Rust,
 GTK 4, libadwaita and GIO. Aimed at Zorin OS and GNOME.
 
-Status: pre-release (`0.1.0`). The core browsing, file-operation, search and preferences paths are
-implemented and covered by tests; it has not been through a packaged release cycle.
+Status: pre-release (`0.3.0`). The core browsing, file-operation, search and preferences paths are
+implemented and covered by tests, and tagged versions are published as Flatpak bundles.
 
 ## Features
 
@@ -18,6 +18,9 @@ implemented and covered by tests; it has not been through a packaged release cyc
   before enumeration finishes
 - Thumbnails and file metadata fetched lazily for visible rows only, and cancelled when you
   navigate away
+- Archives (`.zip`, `.tar` and its compressed forms, `.7z`, `.rar`, …) open in the window like
+  folders, through the GVfs archive backend. Zip-based documents such as `.docx` and `.epub` are
+  not archives for this purpose and still open in the application that owns them.
 
 **Files**
 - Copy, move, rename, delete, trash and create, with conflict resolution (replace, keep both, skip)
@@ -206,6 +209,12 @@ diagnosing native faults.
   still needed.
 - `resources/com.zorin.Explorer.gschema.xml` is present but unused — preferences persist as JSON
   under `$XDG_CONFIG_HOME`, not GSettings.
+- Session restore is implemented in `core::application_preferences` (`encode_session` /
+  `decode_session`, schema-versioned, with a V1 import path) but nothing calls it, so open tabs do
+  not survive a restart.
+- Opening a file *inside* an archive hands its `archive://` URI to the desktop. Outside the sandbox
+  GVfs offers a FUSE path and this works; the Flatpak portal takes `file:` and `http(s):` only, so
+  it is expected to do nothing there. Extract the archive first.
 
 ## License
 

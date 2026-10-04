@@ -2703,19 +2703,22 @@ impl FileView {
     }
 
     pub fn open_item(&self, item: &FileItem) {
-        if item.is_dir() {
-            if let Some(callback) = self.on_navigate.borrow().as_ref() {
-                callback(item.location().clone());
-            } else {
-                self.navigate(item.location().clone());
+        match crate::core::activation_for(item) {
+            crate::core::Activation::Browse(location) => {
+                if let Some(callback) = self.on_navigate.borrow().as_ref() {
+                    callback(location);
+                } else {
+                    self.navigate(location);
+                }
             }
-        } else {
-            gio::AppInfo::launch_default_for_uri_async(
-                item.location().uri(),
-                None::<&gio::AppLaunchContext>,
-                None::<&gio::Cancellable>,
-                |_| {},
-            );
+            crate::core::Activation::LaunchExternally => {
+                gio::AppInfo::launch_default_for_uri_async(
+                    item.location().uri(),
+                    None::<&gio::AppLaunchContext>,
+                    None::<&gio::Cancellable>,
+                    |_| {},
+                );
+            }
         }
     }
 
@@ -4831,6 +4834,36 @@ mod tests {
             Some((256, 256))
         );
         super::invalidate_thumbnails();
+    }
+
+    #[gtk::test]
+    fn opening_an_archive_navigates_into_it_instead_of_leaving_the_window() {
+        // The view used to hand everything that was not a directory to the
+        // desktop, which for a zip is another file manager.
+        let directory = tempfile::tempdir().unwrap();
+        let archive_path = directory.path().join("Trip.zip");
+        fs::write(&archive_path, b"PK\x05\x06").unwrap();
+        let archive = FileItem::from_path(&archive_path).unwrap();
+        let note_path = directory.path().join("note.txt");
+        fs::write(&note_path, "plain").unwrap();
+        let note = FileItem::from_path(&note_path).unwrap();
+
+        let view = FileView::new(Location::from_local_path(directory.path()));
+        let navigated: std::rc::Rc<std::cell::RefCell<Vec<Location>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let record = navigated.clone();
+        view.set_navigation_handler(move |location| record.borrow_mut().push(location));
+
+        view.open_item(&archive);
+        let inside = navigated.borrow().last().cloned();
+        let inside = inside.expect("opening an archive must navigate");
+        assert!(inside.is_inside_archive(), "got {}", inside.uri());
+        assert_eq!(inside.display_name(), "Trip.zip");
+
+        // Everything else still belongs to the application that owns it, and
+        // leaving the window is not a navigation.
+        view.open_item(&note);
+        assert_eq!(navigated.borrow().len(), 1);
     }
 
     #[gtk::test]

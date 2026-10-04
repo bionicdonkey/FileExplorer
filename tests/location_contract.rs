@@ -121,3 +121,57 @@ fn parallel_non_local_locations_survive_repeated_construction_and_teardown() {
         thread.join().expect("no worker may corrupt native memory");
     }
 }
+
+#[test]
+fn an_archive_is_addressed_by_its_own_uri_escaped_twice() {
+    // gvfs mounts an archive under a host that is the archive's URI, escaped
+    // once to fit in an authority and again because parsing unescapes it. The
+    // canonical form has to come back byte for byte, or it names a mount that
+    // does not exist -- and the archive's own path is case-sensitive, so the
+    // host is the one authority that must not be lowercased.
+    let archive = Location::from_uri("file:///home/user/Downloads/Sample.zip").unwrap();
+    let inside = archive.archive_contents().unwrap();
+    assert_eq!(
+        inside.uri(),
+        "archive://file%253A%252F%252F%252Fhome%252Fuser%252FDownloads%252FSample.zip/"
+    );
+    assert!(inside.is_inside_archive());
+    assert_eq!(Location::from_uri(inside.uri()).unwrap(), inside);
+    assert_eq!(inside.local_path(), None, "an archive is not a local path");
+}
+
+#[test]
+fn a_hostname_is_still_folded_while_an_opaque_authority_is_not() {
+    assert_eq!(
+        Location::from_uri("SMB://HOST/Share").unwrap().uri(),
+        "smb://host/Share"
+    );
+    assert_eq!(
+        Location::from_uri("archive://file%253A%252F%252F%252FA%252FB.zip/")
+            .unwrap()
+            .uri(),
+        "archive://file%253A%252F%252F%252FA%252FB.zip/"
+    );
+}
+
+#[test]
+fn a_location_in_an_archive_is_named_rather_than_redacted() {
+    let archive = Location::from_uri("file:///home/user/Backups/photos 2025.tar.gz").unwrap();
+    let root = archive.archive_contents().unwrap();
+    assert_eq!(root.display_name(), "photos 2025.tar.gz");
+    let inner = Location::from_uri(&format!("{}Holiday/Day%201", root.uri())).unwrap();
+    assert_eq!(inner.display_name(), "Day 1");
+}
+
+#[test]
+fn leaving_an_archive_returns_to_the_folder_it_is_in() {
+    // GIO stops at a mount root, so Up inside an archive had nowhere to go.
+    let archive = Location::from_uri("file:///home/user/Backups/photos.zip").unwrap();
+    let root = archive.archive_contents().unwrap();
+    assert_eq!(
+        root.parent().map(|parent| parent.uri().to_owned()),
+        Some("file:///home/user/Backups".to_owned())
+    );
+    let inner = Location::from_uri(&format!("{}Holiday", root.uri())).unwrap();
+    assert_eq!(inner.parent().as_ref(), Some(&root));
+}

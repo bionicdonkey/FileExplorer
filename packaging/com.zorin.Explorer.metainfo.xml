@@ -11,6 +11,12 @@
   <!-- Keep in step with `version` in Cargo.toml: the About page reads the crate
        version, and the CI release job refuses a tag that disagrees with it. -->
   <releases>
+    <release version="0.3.0" date="2026-10-04">
+      <description>
+        <p>Archives open in the window. Activating a zip, tar, 7z or rar browses it like a folder, with the archive itself in the path, instead of handing it to another file manager. Zip-based documents such as .docx and .epub still open in the application that owns them.</p>
+        <p>Going up from the top of an archive returns to the folder the archive is in.</p>
+      </description>
+    </release>
     <release version="0.2.3" date="2026-10-04">
       <description>
         <p>An online account is listed once, under Online accounts, rather than three times: GIO reports one account as two mounts, and both were given rows of their own.</p>

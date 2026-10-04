@@ -1,3 +1,4 @@
+pub mod activation;
 pub mod application_preferences;
 pub mod contracts;
 pub mod directory_model;
@@ -13,6 +14,7 @@ pub mod search;
 pub mod sidebar_model;
 pub mod view_options;
 
+pub use activation::{activation_for, Activation};
 pub use application_preferences::{
     ApplicationPreferences, ConflictDefault, RecoverableStateNotice,
 };
