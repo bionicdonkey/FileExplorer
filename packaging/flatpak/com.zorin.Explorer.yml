@@ -16,6 +16,19 @@ finish-args:
   - --socket=fallback-x11
   - --filesystem=host
   - --talk-name=org.freedesktop.FileManager1
+  # GVfs. Without these the sandbox cannot reach the gvfs daemons at all, and
+  # every non-local location fails with "Operation not supported" -- which is
+  # not an empty network but no access to ask. That silently emptied Browse
+  # Network and Online accounts, and disabled remote browsing generally, while
+  # the same URIs enumerated fine outside the sandbox.
+  #
+  # Both paths are needed and are not the same thing: gvfsd is the daemon's
+  # peer-to-peer socket, and without it gvfs falls back to the session bus and
+  # says so on every call; gvfs is the FUSE mount point remote files are read
+  # through.
+  - --talk-name=org.gtk.vfs.*
+  - --filesystem=xdg-run/gvfsd
+  - --filesystem=xdg-run/gvfs
 modules:
   - name: zorin-explorer
     buildsystem: simple

@@ -161,6 +161,25 @@ button.sidebar-expander {
   border-radius: 6px;
 }
 
+/* An expander is a toggle, so Adwaita gives it the filled "pressed" background
+ * whenever it is expanded. On a tree that reads as several rows being
+ * highlighted at once, which looks like stuck focus rather than like state --
+ * the chevron already says expanded or collapsed. Hover and keyboard focus are
+ * left alone: focus-visible above still draws its outline, which is the only
+ * cue a keyboard user has. */
+button.sidebar-expander:checked,
+button.sidebar-section-toggle:checked,
+button.sidebar-subsection-toggle:checked {
+  background: none;
+  box-shadow: none;
+}
+
+button.sidebar-expander:checked:hover,
+button.sidebar-section-toggle:checked:hover,
+button.sidebar-subsection-toggle:checked:hover {
+  background: alpha(currentColor, 0.08);
+}
+
 .cut-pending { border: 1px dashed @window_fg_color; }
 .cut-pending label { font-style: italic; }
 

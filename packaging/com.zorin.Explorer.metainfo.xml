@@ -11,6 +11,14 @@
   <!-- Keep in step with `version` in Cargo.toml: the About page reads the crate
        version, and the CI release job refuses a tag that disagrees with it. -->
   <releases>
+    <release version="0.2.1" date="2026-10-04">
+      <description>
+        <p>Remote locations work inside the Flatpak sandbox again: it had no permission to reach GVfs, so every non-local location failed and Browse Network and Online accounts were empty.</p>
+        <p>Discovered network servers are listed under Browse Network.</p>
+        <p>Sidebar clicks work while Preferences or Operations is open instead of doing nothing.</p>
+        <p>Expanded tree arrows no longer keep a pressed highlight.</p>
+      </description>
+    </release>
     <release version="0.2.0" date="2026-10-04">
       <description>
         <p>Attached devices that are not mounted are now listed, and activating one mounts it.</p>

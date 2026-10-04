@@ -445,12 +445,19 @@ impl SidebarModel {
         let mut children = snapshot
             .entries
             .iter()
-            .filter(|entry| entry.kind == EntryKind::Directory)
+            // Shortcuts as well as directories: everything `network:///` lists is
+            // a shortcut to a server, so filtering to directories left Browse
+            // Network permanently empty even when discovery had found something.
+            .filter(|entry| matches!(entry.kind, EntryKind::Directory | EntryKind::Shortcut))
             .map(|entry| {
                 SidebarNode::remote(
                     entry.location.clone(),
                     entry.display_name.clone(),
-                    "folder-symbolic",
+                    if entry.kind == EntryKind::Shortcut {
+                        "network-server-symbolic"
+                    } else {
+                        "folder-symbolic"
+                    },
                     true,
                 )
             })
@@ -731,6 +738,50 @@ fn remote_label(uri: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn network_shortcuts_become_sidebar_children() {
+        // Everything `network:///` lists is a shortcut to a server, not a
+        // directory, so filtering to directories left Browse Network empty even
+        // when discovery had found something.
+        use crate::core::contracts::{
+            CapabilitySnapshot, DirectorySnapshot, EntryKind, EntrySnapshot,
+        };
+        let root = crate::core::Location::from_uri("network:///").unwrap();
+        let snapshot = DirectorySnapshot {
+            location: crate::core::ResolvedLocation {
+                requested: root.clone(),
+                resolved: root,
+            },
+            entries: vec![
+                EntrySnapshot {
+                    location: crate::core::Location::from_uri("smb://octavia.local/").unwrap(),
+                    display_name: "Octavia".into(),
+                    kind: EntryKind::Shortcut,
+                    size: None,
+                    modified: None,
+                    content_type: None,
+                    capabilities: CapabilitySnapshot::default(),
+                },
+                EntrySnapshot {
+                    location: crate::core::Location::from_uri("smb://other/share").unwrap(),
+                    display_name: "A share".into(),
+                    kind: EntryKind::Directory,
+                    size: None,
+                    modified: None,
+                    content_type: None,
+                    capabilities: CapabilitySnapshot::default(),
+                },
+            ],
+            capabilities: CapabilitySnapshot::default(),
+            next_page: None,
+        };
+
+        let children = super::SidebarModel::children_from_snapshot(&snapshot);
+        let labels: Vec<&str> = children.iter().map(|c| c.location.label()).collect();
+        assert_eq!(labels, vec!["A share", "Octavia"]);
+    }
+
     use std::fs;
     use std::path::{Path, PathBuf};
 

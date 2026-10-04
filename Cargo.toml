@@ -1,6 +1,6 @@
 [package]
 name = "zorin-explorer"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "A native Explorer-style file manager for Linux"
 license = "GPL-3.0-or-later"

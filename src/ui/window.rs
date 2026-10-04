@@ -266,11 +266,12 @@ impl ExplorerWindow {
                     .into_iter()
                     .find(|section| section.title == title);
                 let sidebar = sidebar_holder_actions.borrow().clone();
-                if let (Some(index), Some(section), Some(sidebar)) = (
+                let target = sidebar_target(
                     selected_index(&sidebar_context_tabs, &sidebar_context_data),
-                    section,
-                    sidebar,
-                ) {
+                    sidebar_context_data.borrow().len(),
+                );
+                if let (Some(index), Some(section), Some(sidebar)) = (target, section, sidebar) {
+                    show_file_tab(&sidebar_context_tabs, &sidebar_context_data, index);
                     let tab = &sidebar_context_data.borrow()[index];
                     tab.view.show_section_overview(section.clone());
                     tab.page.set_title(&section.title);
@@ -280,10 +281,12 @@ impl ExplorerWindow {
             }
             SidebarAction::Open(path) => {
                 let sidebar = sidebar_holder_actions.borrow().clone();
-                if let (Some(index), Some(sidebar)) = (
+                let target = sidebar_target(
                     selected_index(&sidebar_context_tabs, &sidebar_context_data),
-                    sidebar,
-                ) {
+                    sidebar_context_data.borrow().len(),
+                );
+                if let (Some(index), Some(sidebar)) = (target, sidebar) {
+                    show_file_tab(&sidebar_context_tabs, &sidebar_context_data, index);
                     navigate_tab(
                         index,
                         path,
@@ -2285,9 +2288,35 @@ fn sidebar_path_for_tab(path: &Path, is_remote: bool) -> Option<PathBuf> {
     (!is_remote).then(|| path.to_path_buf())
 }
 
+/// Brings a file tab to the front, so a sidebar action taken while Preferences
+/// or Operations is open shows its result rather than changing a hidden tab.
+fn show_file_tab(tabs: &TabView, data: &Rc<RefCell<Vec<TabData>>>, index: usize) {
+    let page = data.borrow().get(index).map(|tab| tab.page.clone());
+    if let Some(page) = page {
+        if tabs.selected_page().as_ref() != Some(&page) {
+            tabs.set_selected_page(&page);
+        }
+    }
+}
+
 fn selected_index(tabs: &TabView, data: &Rc<RefCell<Vec<TabData>>>) -> Option<usize> {
     let page = tabs.selected_page()?;
     matching_index(&data.borrow(), |tab| tab.page == page)
+}
+
+/// Which file tab a sidebar action should act on.
+///
+/// Preferences and Operations are appended to the tab view but are not file
+/// tabs, so nothing in `tabs_data` matches the selected page while one of them
+/// is open. Every sidebar action was guarded on that lookup and so did nothing
+/// at all, silently, whenever Preferences had focus. Falling back to the first
+/// file tab is what clicking a location is asking for.
+fn sidebar_target(selected: Option<usize>, file_tabs: usize) -> Option<usize> {
+    match selected {
+        Some(index) => Some(index),
+        None if file_tabs > 0 => Some(0),
+        None => None,
+    }
 }
 
 fn should_protect_last_file_tab(closing_file_tab: bool, file_tab_count: usize) -> bool {
@@ -3411,5 +3440,27 @@ mod tests {
         assert!(!should_protect_last_file_tab(false, 1));
         assert!(should_protect_last_file_tab(true, 1));
         assert!(!should_protect_last_file_tab(true, 2));
+    }
+
+    #[test]
+    fn sidebar_actions_fall_back_to_a_file_tab() {
+        // Preferences and Operations are in the tab view but not in `tabs_data`,
+        // so nothing matches the selected page while one is open. Without a
+        // fallback every sidebar action silently did nothing.
+        assert_eq!(
+            super::sidebar_target(Some(2), 4),
+            Some(2),
+            "a selected file tab is used as-is"
+        );
+        assert_eq!(
+            super::sidebar_target(None, 3),
+            Some(0),
+            "Preferences selected falls back to a file tab"
+        );
+        assert_eq!(
+            super::sidebar_target(None, 0),
+            None,
+            "with no file tabs there is nothing to act on"
+        );
     }
 }
