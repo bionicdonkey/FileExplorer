@@ -4641,6 +4641,7 @@ mod tests {
         state.show_section(SidebarSection {
             title: "This PC".into(),
             nodes: Vec::new(),
+            mountables: vec![],
         });
 
         assert_eq!(state.location.uri(), "smb://server/share");
@@ -4655,10 +4656,12 @@ mod tests {
         state.show_section(SidebarSection {
             title: "Network & online".into(),
             nodes: Vec::new(),
+            mountables: vec![],
         });
         state.show_section(SidebarSection {
             title: "Network & online".into(),
             nodes: Vec::new(),
+            mountables: vec![],
         });
 
         assert_eq!(state.location.uri(), "smb://server/share");

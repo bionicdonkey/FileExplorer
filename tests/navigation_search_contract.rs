@@ -733,6 +733,7 @@ fn slice2_section_overlay_does_not_restore_directory_availability() {
     tab.show_section(zorin_explorer::core::sidebar_model::SidebarSection {
         title: "This PC".into(),
         nodes: vec![],
+        mountables: vec![],
     });
     assert!(!tab.has_available_directory());
 }
@@ -807,6 +808,7 @@ fn navigation_refresh_from_section_replaces_pending_directory_request() {
     tab.show_section(SidebarSection {
         title: "Network & online".into(),
         nodes: vec![],
+        mountables: vec![],
     });
     let first = tab.begin_navigation(location("smb://host/share")).unwrap();
     assert!(tab.has_pending_navigation());

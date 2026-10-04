@@ -8,4 +8,14 @@
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>GPL-3.0-or-later</project_license>
   <launchable type="desktop-id">com.zorin.Explorer.desktop</launchable>
+  <!-- Keep in step with `version` in Cargo.toml: the About page reads the crate
+       version, and the CI release job refuses a tag that disagrees with it. -->
+  <releases>
+    <release version="0.2.0" date="2026-10-04">
+      <description>
+        <p>Attached devices that are not mounted are now listed, and activating one mounts it.</p>
+        <p>Hot-plugged devices now appear without restarting: the volume monitor was being finalized immediately, so no device signal ever arrived.</p>
+      </description>
+    </release>
+  </releases>
 </component>

@@ -1433,6 +1433,7 @@ fn slice2_navigation_commits_after_success_and_refresh_restores_selection() {
     view.show_section_overview(zorin_explorer::core::sidebar_model::SidebarSection {
         title: "Network & online".into(),
         nodes: vec![],
+        mountables: vec![],
     });
     view.set_uri("smb://host/missing".into());
     let generation = view.tab_state().borrow().navigation_generation;
@@ -1526,6 +1527,7 @@ fn slice2_navigation_commits_after_success_and_refresh_restores_selection() {
         section: zorin_explorer::core::sidebar_model::SidebarSection {
             title: "Network & online".into(),
             nodes: vec![],
+            mountables: vec![],
         },
         underlying: Location::from_uri("smb://other/retained").unwrap(),
     };
@@ -1659,6 +1661,7 @@ fn slice2_navigation_commits_after_success_and_refresh_restores_selection() {
     unavailable_local.show_section_overview(zorin_explorer::core::sidebar_model::SidebarSection {
         title: "This PC".into(),
         nodes: vec![],
+        mountables: vec![],
     });
     assert!(!unavailable_local.command_availability().can_paste);
     let dispatched = Rc::new(std::cell::Cell::new(false));

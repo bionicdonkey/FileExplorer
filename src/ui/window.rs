@@ -375,6 +375,78 @@ impl ExplorerWindow {
                     );
                 }
             }
+            SidebarAction::MountVolume(id) => {
+                let volume = sidebar_model_actions.borrow().volume_for_id(&id);
+                if let Some(volume) = volume {
+                    // Parented to the window so an encrypted or password-protected
+                    // device can prompt, rather than failing silently.
+                    let operation = gtk::MountOperation::new(Some(&sidebar_window));
+                    let keep_operation = operation.clone();
+                    let cancellable = gio::Cancellable::new();
+                    let cancel_on_destroy = cancellable.clone();
+                    let cancel_handler =
+                        sidebar_window.connect_destroy(move |_| cancel_on_destroy.cancel());
+                    let operation_window = sidebar_window.clone();
+                    let sidebar = sidebar_holder_actions.clone();
+                    let mounted_volume = volume.clone();
+                    let open_data = sidebar_context_data.clone();
+                    let open_tabs = sidebar_context_tabs.clone();
+                    let open_header = sidebar_context_header.clone();
+                    let open_preferences = sidebar_context_preferences.clone();
+                    volume.mount(
+                        gio::MountMountFlags::NONE,
+                        Some(&operation),
+                        Some(&cancellable),
+                        move |result| {
+                            let _keep_operation_alive = &keep_operation;
+                            match result {
+                                Ok(()) => {
+                                    AccessibleStatus::announce_for(
+                                        &operation_window,
+                                        &format!("Mounted {}", mounted_volume.name()),
+                                        StatusPriority::Polite,
+                                    );
+                                    // Only now does the device have somewhere to
+                                    // navigate to, so the open happens here rather
+                                    // than when the row was activated.
+                                    let landed = mounted_volume.get_mount().and_then(|mount| {
+                                        Location::try_from_file(mount.root()).ok()
+                                    });
+                                    if let (Some(location), Some(index), Some(sidebar)) = (
+                                        landed,
+                                        selected_index(&open_tabs, &open_data),
+                                        sidebar.borrow().clone(),
+                                    ) {
+                                        navigate_tab(
+                                            index,
+                                            location,
+                                            &open_data,
+                                            &open_tabs,
+                                            &open_header,
+                                            &open_preferences,
+                                            &sidebar,
+                                            true,
+                                        );
+                                    }
+                                }
+                                Err(error) => AccessibleStatus::announce_for(
+                                    &operation_window,
+                                    &format!(
+                                        "Could not mount {}: {}",
+                                        mounted_volume.name(),
+                                        error.message()
+                                    ),
+                                    StatusPriority::Urgent,
+                                ),
+                            }
+                            operation_window.disconnect(cancel_handler);
+                            if let Some(sidebar) = sidebar.borrow().as_ref() {
+                                sidebar.refresh();
+                            }
+                        },
+                    );
+                }
+            }
             SidebarAction::OpenOperations => {
                 open_operations_tab(&sidebar_context_tabs, sidebar_context_operations.clone())
             }
@@ -3060,6 +3132,7 @@ mod tests {
         view.show_section_overview(SidebarSection {
             title: "Network & online".into(),
             nodes: vec![],
+            mountables: vec![],
         });
         let tabs = adw::TabView::new();
         let page = tabs.append(&view.widget);

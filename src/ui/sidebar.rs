@@ -21,6 +21,8 @@ use crate::ui::operations_page::active_summary;
 #[derive(Clone, Debug)]
 pub enum SidebarAction {
     OpenSection(String),
+    /// Mount an attached-but-unmounted volume, then open wherever it landed.
+    MountVolume(String),
     Open(Location),
     OpenInNewTab(Location),
     OpenInNewWindow(Location),
@@ -244,6 +246,13 @@ impl Sidebar {
                 } else {
                     self.append_node(&rows, node, 0, &section.title, focus_token);
                 }
+            }
+
+            // Unmounted devices sit with the mounted ones, below them, because
+            // that is where someone looks for a stick they just plugged in.
+            for volume in &section.mountables {
+                let target = if has_devices { &device_rows } else { &rows };
+                self.append_mountable(target, volume, if has_devices { 1 } else { 0 });
             }
 
             let heading_row = GtkBox::new(Orientation::Horizontal, 0);
@@ -493,6 +502,45 @@ impl Sidebar {
         let _ = model.preferences().save();
         drop(model);
         self.refresh();
+    }
+
+    /// A row for a device with nothing mounted. It deliberately looks like the
+    /// mounted rows: the distinction that matters to someone plugging in a stick
+    /// is that it is listed at all, and activating it mounts it.
+    fn append_mountable(
+        &self,
+        parent: &GtkBox,
+        volume: &crate::core::sidebar_model::MountableVolume,
+        depth: i32,
+    ) {
+        let header = GtkBox::new(Orientation::Horizontal, 0);
+        header.set_margin_start(depth * 16);
+        header.add_css_class("sidebar-tree-row");
+
+        let button = Button::new();
+        button.set_widget_name(&format!("sidebar-mountable-{}", volume.id));
+        button.add_css_class("flat");
+        button.set_hexpand(true);
+        button.set_halign(gtk::Align::Fill);
+
+        let content = GtkBox::new(Orientation::Horizontal, 0);
+        let icon = Image::from_icon_name(&volume.icon_name);
+        icon.set_pixel_size(18);
+        icon.set_margin_end(8);
+        icon.add_css_class("sidebar-location-icon");
+        content.append(&icon);
+        let label = Label::new(Some(&volume.label));
+        label.set_xalign(0.0);
+        content.append(&label);
+        button.set_child(Some(&content));
+        crate::ui::accessibility::name_control(&button, &format!("{} (not mounted)", volume.label));
+
+        let action = self.on_action.clone();
+        let id = volume.id.clone();
+        button.connect_clicked(move |_| action(SidebarAction::MountVolume(id.clone())));
+
+        header.append(&button);
+        parent.append(&header);
     }
 
     fn append_node(
@@ -1092,6 +1140,108 @@ mod tests {
         );
 
         drop(sidebar);
+    }
+
+    fn find_named(root: &gtk::Widget, name: &str) -> Option<gtk::Widget> {
+        if root.widget_name() == name {
+            return Some(root.clone());
+        }
+        let mut child = root.first_child();
+        while let Some(widget) = child {
+            if let Some(found) = find_named(&widget, name) {
+                return Some(found);
+            }
+            child = widget.next_sibling();
+        }
+        None
+    }
+
+    #[gtk::test]
+    fn clicking_a_section_heading_asks_for_its_overview() {
+        let model = Rc::new(RefCell::new(SidebarModel::new(
+            SidebarPreferences::in_memory(),
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+        )));
+        let window = gtk::Window::new();
+        let actions: Rc<RefCell<Vec<super::SidebarAction>>> = Rc::new(RefCell::new(Vec::new()));
+        let collected = actions.clone();
+        let sidebar = super::Sidebar::new(model, &window, move |action| {
+            collected.borrow_mut().push(action)
+        });
+        window.set_child(Some(&sidebar.widget));
+        window.present();
+
+        for title in ["This PC", "Network & online"] {
+            let widget = find_named(
+                sidebar.widget.upcast_ref(),
+                &format!("sidebar-section-{title}"),
+            )
+            .unwrap_or_else(|| panic!("{title} heading must be rendered"));
+            let heading = widget
+                .downcast::<gtk::Button>()
+                .unwrap_or_else(|_| panic!("{title} heading must be activatable"));
+            assert!(heading.is_sensitive(), "{title} heading must accept input");
+            heading.emit_clicked();
+        }
+
+        let requested: Vec<String> = actions
+            .borrow()
+            .iter()
+            .filter_map(|action| match action {
+                super::SidebarAction::OpenSection(title) => Some(title.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(requested, vec!["This PC", "Network & online"]);
+    }
+
+    #[gtk::test]
+    fn an_unmounted_device_is_listed_and_asks_to_be_mounted() {
+        // GIO gives a local unmounted volume no activation root, so it has no
+        // location to navigate to and cannot be an ordinary node. It still has to
+        // be visible, or a stick that was never auto-mounted is absent with no way
+        // to mount it.
+        use crate::core::sidebar_model::MountableVolume;
+
+        let model = Rc::new(RefCell::new(SidebarModel::new(
+            SidebarPreferences::in_memory(),
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+        )));
+        let window = gtk::Window::new();
+        let actions: Rc<RefCell<Vec<super::SidebarAction>>> = Rc::new(RefCell::new(Vec::new()));
+        let collected = actions.clone();
+        let sidebar = super::Sidebar::new(model, &window, move |action| {
+            collected.borrow_mut().push(action)
+        });
+        window.set_child(Some(&sidebar.widget));
+        window.present();
+
+        let rows = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        sidebar.append_mountable(
+            &rows,
+            &MountableVolume {
+                id: "942F07457EFC3C7F".into(),
+                label: "450 GB Volume".into(),
+                icon_name: "drive-harddisk-symbolic".into(),
+            },
+            1,
+        );
+
+        let widget = find_named(rows.upcast_ref(), "sidebar-mountable-942F07457EFC3C7F")
+            .expect("an unmounted device must be rendered");
+        let button = widget
+            .downcast::<gtk::Button>()
+            .expect("an unmounted device must be activatable");
+        button.emit_clicked();
+
+        assert!(
+            matches!(
+                actions.borrow().first(),
+                Some(super::SidebarAction::MountVolume(id)) if id == "942F07457EFC3C7F"
+            ),
+            "activating it must ask for a mount, got {:?}",
+            actions.borrow()
+        );
     }
 
     fn remote_sidebar(remote: Location, provider: Rc<MockProvider>) -> super::Sidebar {

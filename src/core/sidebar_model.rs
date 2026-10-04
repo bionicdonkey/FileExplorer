@@ -118,6 +118,21 @@ impl SidebarNode {
 pub struct SidebarSection {
     pub title: String,
     pub nodes: Vec<SidebarNode>,
+    /// Devices GIO reports as present but not mounted. They are kept apart from
+    /// `nodes` because they have no location to navigate to until they are
+    /// mounted, which is the whole reason they were previously invisible.
+    pub mountables: Vec<MountableVolume>,
+}
+
+/// A volume that is attached but has nothing mounted. GIO gives a local one no
+/// activation root, so there is no URI to open; activating it has to mount it
+/// first and navigate to wherever that landed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MountableVolume {
+    /// Identity used to find the volume again when the row is activated.
+    pub id: String,
+    pub label: String,
+    pub icon_name: String,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -459,6 +474,7 @@ impl SidebarModel {
             })
             .collect();
         SidebarSection {
+            mountables: Vec::new(),
             title: "Quick access".into(),
             nodes,
         }
@@ -487,6 +503,7 @@ impl SidebarModel {
         SidebarSection {
             title: user_section_title(&glib::real_name(), &self.home),
             nodes,
+            mountables: Vec::new(),
         }
     }
 
@@ -501,7 +518,51 @@ impl SidebarModel {
         SidebarSection {
             title: "This PC".into(),
             nodes,
+            mountables: self.mountable_volumes(),
         }
+    }
+
+    /// Attached devices with nothing mounted. Without these a stick that has not
+    /// been mounted -- because auto-mounting is off, or it was ejected while left
+    /// plugged in -- is absent from the sidebar entirely, with no way to mount it.
+    fn mountable_volumes(&self) -> Vec<MountableVolume> {
+        let mut volumes = gio::VolumeMonitor::get()
+            .volumes()
+            .into_iter()
+            .filter(|volume| volume.get_mount().is_none() && volume.can_mount())
+            .filter_map(|volume| {
+                // Network volumes reach the sidebar through `computer:///` under
+                // Network & online already; repeating them here would show one
+                // account twice.
+                if volume
+                    .identifier("class")
+                    .is_some_and(|class| class.as_str() == "network")
+                {
+                    return None;
+                }
+                let icon_name = themed_icon_name(volume.icon())
+                    .unwrap_or_else(|| "drive-removable-media-symbolic".to_owned());
+                Some(MountableVolume {
+                    id: volume_identity(&volume),
+                    label: volume.name().to_string(),
+                    icon_name,
+                })
+            })
+            .collect::<Vec<_>>();
+        volumes.sort_by(|left, right| {
+            device_kind_rank(&left.icon_name)
+                .cmp(&device_kind_rank(&right.icon_name))
+                .then_with(|| left.label.to_lowercase().cmp(&right.label.to_lowercase()))
+        });
+        volumes
+    }
+
+    /// The volume behind a `MountableVolume`, or `None` once it has gone away.
+    pub fn volume_for_id(&self, id: &str) -> Option<gio::Volume> {
+        gio::VolumeMonitor::get()
+            .volumes()
+            .into_iter()
+            .find(|volume| volume_identity(volume) == id)
     }
 
     fn network_and_online(&self) -> SidebarSection {
@@ -529,6 +590,7 @@ impl SidebarModel {
         }));
         nodes.extend(self.remote_mounts());
         SidebarSection {
+            mountables: Vec::new(),
             title: "Network & online".into(),
             nodes,
         }
@@ -610,6 +672,17 @@ pub(crate) fn standard_folder_icon(path: &Path) -> &'static str {
         Some("Videos") => "folder-videos-symbolic",
         _ => "folder-symbolic",
     }
+}
+
+/// A volume's identity, stable enough to find it again between renders. GIO
+/// supplies a UUID for local partitions and a URI for provider volumes; name is
+/// the last resort, and duplicates there only mean the first match wins.
+fn volume_identity(volume: &gio::Volume) -> String {
+    volume
+        .uuid()
+        .or_else(|| volume.identifier("unix-device"))
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| volume.name().to_string())
 }
 
 fn mount_icon_name(mount: &gio::Mount, fallback: &str) -> String {
