@@ -11,6 +11,12 @@
   <!-- Keep in step with `version` in Cargo.toml: the About page reads the crate
        version, and the CI release job refuses a tag that disagrees with it. -->
   <releases>
+    <release version="0.2.3" date="2026-10-04">
+      <description>
+        <p>An online account is listed once, under Online accounts, rather than three times: GIO reports one account as two mounts, and both were given rows of their own.</p>
+        <p>The sidebar reads as a tree: sections are separated and their titles aligned, each level of children is drawn with a guide line, and every row reserves the same column for its arrow so icons line up.</p>
+      </description>
+    </release>
     <release version="0.2.2" date="2026-10-04">
       <description>
         <p>Online accounts lists accounts again rather than every disk, restoring a filter lost when sidebar enumeration moved behind the directory repository.</p>

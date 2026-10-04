@@ -86,16 +86,46 @@
   min-width: 220px;
 }
 
+/* A section is a block with a rule above it, not more rows in one long list.
+ * The rule belongs to the group below it, so the first section has none. */
+.sidebar-section-divider {
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid alpha(@window_fg_color, 0.09);
+}
+
 button.sidebar-section-heading {
-  margin-top: 4px;
-  margin-bottom: 3px;
-  padding-left: 4px;
+  margin-top: 2px;
+  margin-bottom: 2px;
+  /* Matches .sidebar-location, so a title starts in the same column as the
+   * icons of the rows underneath it. */
+  padding: 0 6px;
   border-radius: 6px;
+}
+
+/* A title names the group rather than competing with the rows in it, until it
+ * is the one being pointed at or the section currently open. */
+button.sidebar-section-heading label {
+  opacity: 0.7;
+  letter-spacing: 0.02em;
+}
+
+button.sidebar-section-heading:hover label,
+button.sidebar-section-heading.selected label,
+button.sidebar-section-heading:focus-visible label {
+  opacity: 1;
 }
 
 button.sidebar-section-heading:hover,
 button.sidebar-section-heading.selected {
   background-color: alpha(@accent_bg_color, 0.14);
+}
+
+/* One guide line per level of nesting, down the leading edge of the children
+ * themselves. Widget code indents each group from its own parent, so the line
+ * sits under the chevron that opened it however deep the tree goes. */
+.sidebar-tree-children {
+  border-left: 1px solid alpha(@window_fg_color, 0.13);
 }
 
 .sidebar-subheading {
@@ -104,7 +134,9 @@ button.sidebar-section-heading.selected {
 }
 
 button.sidebar-section-toggle {
-  min-width: 32px;
+  /* The chevron column is one width everywhere: section titles, tree rows and
+   * the rows that reserve it without having a chevron all share it. */
+  min-width: 24px;
   min-height: 30px;
   padding: 0;
   border-radius: 8px;
@@ -213,10 +245,11 @@ button.sidebar-section-heading.selected {
 
 .high-contrast .dim-label { opacity: 1; }
 
-/* Logical margins in widget code mirror indentation under RTL. */
-button.sidebar-section-heading:dir(rtl) {
-  padding-left: 0;
-  padding-right: 4px;
+/* Logical margins in widget code mirror indentation under RTL; these two are
+ * the physical properties GTK CSS has no logical spelling for. */
+.sidebar-tree-children:dir(rtl) {
+  border-left: 0;
+  border-right: 1px solid alpha(@window_fg_color, 0.13);
 }
 
 .operation-row {

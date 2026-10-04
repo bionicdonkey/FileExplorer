@@ -18,6 +18,23 @@ use crate::core::{SidebarLocation, SidebarModel, SidebarNode};
 use crate::infrastructure::gio_directory::GioDirectoryRepository;
 use crate::ui::operations_page::active_summary;
 
+/// Width of the column every chevron sits in. Rows without one reserve it, so a
+/// row's icon starts at the same place whether or not it can be expanded; the
+/// stylesheet gives the chevron buttons the same width.
+const EXPANDER_COLUMN: i32 = 24;
+
+/// How far one level of children is indented from its parent row. Half the
+/// chevron column, so the guide line down a child group's leading edge passes
+/// through the middle of the chevron that opened it.
+const TREE_INDENT: i32 = 12;
+
+/// Holds the chevron column open for a row that has nothing to expand.
+fn expander_column_spacer() -> GtkBox {
+    let spacer = GtkBox::new(Orientation::Horizontal, 0);
+    spacer.set_size_request(EXPANDER_COLUMN, -1);
+    spacer
+}
+
 #[derive(Clone, Debug)]
 pub enum SidebarAction {
     OpenSection(String),
@@ -184,11 +201,21 @@ impl Sidebar {
             self.content.remove(&child);
         }
         let sections = sidebar_sections(&self.model);
-        for section in sections {
+        for (position, section) in sections.into_iter().enumerate() {
             let section_is_empty = section.nodes.is_empty();
+            // One box per section, so a section reads as a block rather than as
+            // more rows in a single undifferentiated list: the rule above it
+            // belongs to the group below it, not to the row it follows.
+            let section_box = GtkBox::new(Orientation::Vertical, 0);
+            section_box.add_css_class("sidebar-section");
+            if position > 0 {
+                section_box.add_css_class("sidebar-section-divider");
+            }
             let rows = GtkBox::new(Orientation::Vertical, 0);
             rows.add_css_class("sidebar-tree");
             let device_rows = GtkBox::new(Orientation::Vertical, 0);
+            device_rows.add_css_class("sidebar-tree-children");
+            device_rows.set_margin_start(TREE_INDENT);
             let has_devices = section.title == "This PC" && section.nodes.len() > 1;
             for (index, node) in section.nodes.into_iter().enumerate() {
                 if should_show_devices_heading(&section.title, index) {
@@ -242,9 +269,9 @@ impl Sidebar {
                     rows.append(&device_rows);
                 }
                 if has_devices && index > 0 {
-                    self.append_node(&device_rows, node, 1, &section.title, focus_token);
+                    self.append_node(&device_rows, node, &section.title, focus_token);
                 } else {
-                    self.append_node(&rows, node, 0, &section.title, focus_token);
+                    self.append_node(&rows, node, &section.title, focus_token);
                 }
             }
 
@@ -252,7 +279,7 @@ impl Sidebar {
             // that is where someone looks for a stick they just plugged in.
             for volume in &section.mountables {
                 let target = if has_devices { &device_rows } else { &rows };
-                self.append_mountable(target, volume, if has_devices { 1 } else { 0 });
+                self.append_mountable(target, volume);
             }
 
             let heading_row = GtkBox::new(Orientation::Horizontal, 0);
@@ -295,6 +322,17 @@ impl Sidebar {
             });
             heading_row.append(&toggle);
             let heading = Button::with_label(&section.title);
+            // A button centres its label, which left the section titles floating
+            // mid-sidebar with nothing lining up under them. The button keeps
+            // ownership of the label -- `Button::label()` is how tests and ATs
+            // read a heading -- so the alignment is set on the child it made.
+            if let Some(title) = heading
+                .child()
+                .and_then(|child| child.downcast::<Label>().ok())
+            {
+                title.set_xalign(0.0);
+                title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            }
             heading.set_widget_name(&format!("sidebar-section-{}", section.title));
             heading.set_hexpand(true);
             heading.set_halign(gtk::Align::Fill);
@@ -322,21 +360,22 @@ impl Sidebar {
                 add.connect_clicked(move |_| action(SidebarAction::AddNetworkLocation));
                 heading_row.append(&heading);
                 heading_row.append(&add);
-                self.content.append(&heading_row);
+                section_box.append(&heading_row);
             } else {
                 heading_row.append(&heading);
-                self.content.append(&heading_row);
+                section_box.append(&heading_row);
             }
 
             if section_is_empty && section.title == "Quick access" {
                 let empty = Label::new(Some("Pin folders here for quick access"));
                 empty.add_css_class("dim-label");
                 empty.set_xalign(0.0);
-                empty.set_margin_start(10);
-                self.content.append(&empty);
+                empty.set_margin_start(TREE_INDENT + EXPANDER_COLUMN);
+                section_box.append(&empty);
             }
 
-            self.content.append(&rows);
+            section_box.append(&rows);
+            self.content.append(&section_box);
         }
         if let Some(manager) = self.operation_manager.borrow().as_ref() {
             if let Some(summary) = active_summary(&manager.records()) {
@@ -511,11 +550,12 @@ impl Sidebar {
         &self,
         parent: &GtkBox,
         volume: &crate::core::sidebar_model::MountableVolume,
-        depth: i32,
     ) {
         let header = GtkBox::new(Orientation::Horizontal, 0);
-        header.set_margin_start(depth * 16);
         header.add_css_class("sidebar-tree-row");
+        // An unmounted device has nothing to expand, but its icon still belongs
+        // in the same column as the mounted devices it sits with.
+        header.append(&expander_column_spacer());
 
         let button = Button::new();
         button.set_widget_name(&format!("sidebar-mountable-{}", volume.id));
@@ -543,18 +583,10 @@ impl Sidebar {
         parent.append(&header);
     }
 
-    fn append_node(
-        &self,
-        parent: &GtkBox,
-        node: SidebarNode,
-        depth: i32,
-        section: &str,
-        focus_token: u64,
-    ) {
+    fn append_node(&self, parent: &GtkBox, node: SidebarNode, section: &str, focus_token: u64) {
         Self::append_node_inner(
             parent,
             node,
-            depth,
             vec![section.to_owned()],
             self.model.clone(),
             self.repository.clone(),
@@ -569,7 +601,6 @@ impl Sidebar {
     fn append_node_inner(
         parent: &GtkBox,
         node: SidebarNode,
-        depth: i32,
         mut occurrence: Vec<String>,
         model: Rc<RefCell<SidebarModel>>,
         repository: Rc<dyn DirectoryRepository>,
@@ -587,10 +618,15 @@ impl Sidebar {
         let focus_key = serde_json::to_string(&occurrence).expect("string paths serialize");
         let row = GtkBox::new(Orientation::Vertical, 0);
         let header = GtkBox::new(Orientation::Horizontal, 0);
-        header.set_margin_start(depth * 16);
         header.add_css_class("sidebar-tree-row");
 
+        // Depth is expressed by nesting rather than by a computed margin: each
+        // level of children is indented from its own parent, so the guide line
+        // the stylesheet draws down this box's leading edge lands under that
+        // parent's chevron at every depth.
         let children = GtkBox::new(Orientation::Vertical, 0);
+        children.add_css_class("sidebar-tree-children");
+        children.set_margin_start(TREE_INDENT);
         children.set_visible(false);
         if node.expandable {
             let expander = ToggleButton::new();
@@ -601,6 +637,7 @@ impl Sidebar {
             );
             expander.add_css_class("flat");
             expander.add_css_class("sidebar-expander");
+            expander.set_size_request(EXPANDER_COLUMN, -1);
             let initially_expanded = model
                 .borrow()
                 .preferences()
@@ -707,7 +744,6 @@ impl Sidebar {
                             Self::append_children(
                                 &children_after_result,
                                 SidebarModel::children_from_snapshot(&snapshot),
-                                depth,
                                 occurrence_after_result.clone(),
                                 model_after_result.clone(),
                                 repository_after_result.clone(),
@@ -727,9 +763,7 @@ impl Sidebar {
             }
             header.append(&expander);
         } else {
-            let spacer = GtkBox::new(Orientation::Horizontal, 0);
-            spacer.set_size_request(32, -1);
-            header.append(&spacer);
+            header.append(&expander_column_spacer());
         }
 
         let button = Button::new();
@@ -769,7 +803,6 @@ impl Sidebar {
     fn append_children(
         parent: &GtkBox,
         children: Vec<SidebarNode>,
-        depth: i32,
         occurrence: Vec<String>,
         model: Rc<RefCell<SidebarModel>>,
         repository: Rc<dyn DirectoryRepository>,
@@ -783,7 +816,6 @@ impl Sidebar {
             Self::append_node_inner(
                 parent,
                 child,
-                depth + 1,
                 occurrence.clone(),
                 model.clone(),
                 repository.clone(),
@@ -1156,6 +1188,72 @@ mod tests {
         None
     }
 
+    /// The chevron column each row starts with: a chevron, or the space one
+    /// would occupy.
+    fn chevron_column(header: &gtk::Widget) -> gtk::Widget {
+        header
+            .first_child()
+            .expect("a row starts with its chevron column")
+    }
+
+    #[gtk::test]
+    fn every_row_reserves_the_chevron_column() {
+        // An unmounted device has nothing to expand, and used to be built with
+        // no chevron and no space for one, so its icon sat a column left of the
+        // mounted devices listed beside it.
+        use crate::core::contracts::DirectorySnapshot;
+        use crate::core::sidebar_model::MountableVolume;
+        let model = Rc::new(RefCell::new(SidebarModel::new(
+            SidebarPreferences::in_memory(),
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+        )));
+        let window = gtk::Window::new();
+        let sidebar = super::Sidebar::new(model, &window, |_| {});
+        let rows = gtk::Box::new(gtk::Orientation::Vertical, 0);
+
+        let root = Location::from_uri("file:///").unwrap();
+        let snapshot = DirectorySnapshot {
+            location: crate::core::ResolvedLocation {
+                requested: root.clone(),
+                resolved: root,
+            },
+            entries: vec![directory_entry(
+                Location::from_uri("file:///media").unwrap(),
+                "media",
+            )],
+            capabilities: list_capabilities(),
+            next_page: None,
+        };
+        let node = SidebarModel::children_from_snapshot(&snapshot)
+            .pop()
+            .expect("the snapshot has one child");
+        sidebar.append_node(&rows, node, "This PC", 1);
+        sidebar.append_mountable(
+            &rows,
+            &MountableVolume {
+                id: "942F07457EFC3C7F".into(),
+                label: "450 GB Volume".into(),
+                icon_name: "drive-harddisk-symbolic".into(),
+            },
+        );
+
+        let tree_header = rows
+            .first_child()
+            .and_then(|row| row.first_child())
+            .expect("the tree row is rendered");
+        let mountable_header = rows.last_child().expect("the unmounted device is rendered");
+        for (what, header) in [
+            ("a row that can be expanded", tree_header),
+            ("a row that cannot", mountable_header),
+        ] {
+            assert_eq!(
+                chevron_column(&header).width_request(),
+                super::EXPANDER_COLUMN,
+                "{what} must still reserve the chevron column"
+            );
+        }
+    }
+
     #[gtk::test]
     fn clicking_a_section_heading_asks_for_its_overview() {
         let model = Rc::new(RefCell::new(SidebarModel::new(
@@ -1224,7 +1322,6 @@ mod tests {
                 label: "450 GB Volume".into(),
                 icon_name: "drive-harddisk-symbolic".into(),
             },
-            1,
         );
 
         let widget = find_named(rows.upcast_ref(), "sidebar-mountable-942F07457EFC3C7F")

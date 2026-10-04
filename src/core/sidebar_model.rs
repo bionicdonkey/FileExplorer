@@ -636,6 +636,11 @@ impl SidebarModel {
             .into_iter()
             .filter_map(|mount| {
                 let root = mount.root();
+                let class = mount.volume().and_then(|volume| volume.identifier("class"));
+                if !lists_as_its_own_remote(mount.is_shadowed(), class.as_ref().map(|c| c.as_str()))
+                {
+                    return None;
+                }
                 let location = Location::try_from_file(root.clone()).ok()?;
                 (!is_local_mount_uri(&root.uri())).then(|| {
                     SidebarNode::remote(
@@ -732,6 +737,23 @@ fn device_kind_rank(icon_name: &str) -> u8 {
     }
 }
 
+/// Whether a non-local mount earns a row of its own under Network & online.
+///
+/// GIO reports one online account as two mounts: the `GDaemonMount` the backend
+/// actually created, and a shadow mount that the provider's volume monitor puts
+/// in front of it to carry the account name. The real one answers true to
+/// `is_shadowed`, and listing it shows the account a second time under its
+/// internal id -- `0123456789abcdef` rather than `alex@example.com`.
+///
+/// Dropping it leaves the shadow mount, which is still a duplicate: its volume
+/// is one of the network-class volumes `computer:///` already lists under
+/// Online accounts, the same reason `mountable_volumes` skips that class. A
+/// mount with no volume -- a share mounted by hand, `gio mount smb://...` --
+/// belongs to no other row, so it stays.
+fn lists_as_its_own_remote(shadowed: bool, volume_class: Option<&str>) -> bool {
+    !shadowed && volume_class != Some("network")
+}
+
 fn is_local_mount_uri(uri: &str) -> bool {
     uri.starts_with("file://")
 }
@@ -817,6 +839,27 @@ mod tests {
             vec!["alex@example.com", "someone@example.com"],
             "only provider accounts belong here, mounted or not"
         );
+    }
+
+    #[test]
+    fn an_account_is_listed_once_rather_than_once_per_gio_mount() {
+        // One OneDrive account, as `gio mount -l` reports it on the machine that
+        // showed three rows for it: a network-class volume whose shadow mount
+        // carries the account name, and behind it the daemon mount named after
+        // the account's internal id. The account's row is the one `computer:///`
+        // already provides under Online accounts, so neither mount adds a row.
+        assert!(
+            !super::lists_as_its_own_remote(true, None),
+            "the shadowed daemon mount would appear as 0123456789abcdef"
+        );
+        assert!(
+            !super::lists_as_its_own_remote(false, Some("network")),
+            "the shadow mount repeats the account listed under Online accounts"
+        );
+        // A share mounted by hand has no volume behind it, so nothing else lists
+        // it and Network & online is the only place it can appear.
+        assert!(super::lists_as_its_own_remote(false, None));
+        assert!(super::lists_as_its_own_remote(false, Some("device")));
     }
 
     #[test]
