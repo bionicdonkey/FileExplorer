@@ -442,9 +442,11 @@ impl SidebarModel {
     /// the sidebar model only transforms immutable snapshot data on the UI
     /// context.
     pub fn children_from_snapshot(snapshot: &DirectorySnapshot) -> Vec<SidebarNode> {
+        let providers_only = snapshot.location.requested.uri() == "computer:///";
         let mut children = snapshot
             .entries
             .iter()
+            .filter(|entry| !providers_only || is_online_provider(entry))
             // Shortcuts as well as directories: everything `network:///` lists is
             // a shortcut to a server, so filtering to directories left Browse
             // Network permanently empty even when discovery had found something.
@@ -681,6 +683,30 @@ pub(crate) fn standard_folder_icon(path: &Path) -> &'static str {
     }
 }
 
+/// Whether a `computer:///` child is an online account rather than a disk.
+///
+/// `computer:///` lists physical drives, the filesystem root and provider
+/// accounts alike, all of them `Mountable` with no content type, so the only
+/// thing GIO distinguishes them by is the `.volume` / `.drive` / `.link` suffix
+/// on the entry name. Showing the lot turns Online accounts into a second,
+/// worse copy of Devices.
+///
+/// The suffix survives in the entry's URI only while the entry has no target to
+/// resolve to, so both forms are checked: a mounted account resolves to its own
+/// scheme (`onedrive://…`), while an unmounted one stays `computer:///….volume`.
+/// A drive resolves to `file://…`, or keeps a `.drive` suffix when it has
+/// nothing mounted.
+fn is_online_provider(entry: &crate::core::contracts::EntrySnapshot) -> bool {
+    let uri = entry.location.uri();
+    if uri.starts_with("file:") {
+        return false;
+    }
+    if uri.starts_with("computer:") {
+        return uri.ends_with(".volume");
+    }
+    true
+}
+
 /// A volume's identity, stable enough to find it again between renders. GIO
 /// supplies a UUID for local partitions and a URI for provider volumes; name is
 /// the last resort, and duplicates there only mean the first match wins.
@@ -738,6 +764,60 @@ fn remote_label(uri: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn online_accounts_lists_providers_not_disks() {
+        // `computer:///` lists drives, the filesystem root and accounts alike,
+        // every one of them Mountable with no content type. Without the suffix
+        // filter Online accounts becomes a second copy of Devices. These are the
+        // entries a real machine reports, after target-uri resolution.
+        use crate::core::contracts::{
+            CapabilitySnapshot, DirectorySnapshot, EntryKind, EntrySnapshot,
+        };
+        let root = crate::core::Location::from_uri("computer:///").unwrap();
+        let entry = |uri: &str, name: &str| EntrySnapshot {
+            location: crate::core::Location::from_uri(uri).unwrap(),
+            display_name: name.into(),
+            kind: EntryKind::Directory,
+            size: None,
+            modified: None,
+            content_type: None,
+            capabilities: CapabilitySnapshot::default(),
+        };
+        let snapshot = DirectorySnapshot {
+            location: crate::core::ResolvedLocation {
+                requested: root.clone(),
+                resolved: root,
+            },
+            entries: vec![
+                entry("file:///media/user/Storage2", "CT1000P1SSD8: Storage"),
+                entry("computer:///CT1000P510SSD8.drive", "CT1000P510SSD8"),
+                entry(
+                    "file:///media/user/writable",
+                    "USB SanDisk 3.2Gen1: writable",
+                ),
+                entry("onedrive://0123456789abcdef/", "alex@example.com"),
+                entry(
+                    "computer:///someone%40example.com.volume",
+                    "someone@example.com",
+                ),
+                entry("file:///", "File System"),
+            ],
+            capabilities: CapabilitySnapshot::default(),
+            next_page: None,
+        };
+
+        let children = super::SidebarModel::children_from_snapshot(&snapshot);
+        let labels: Vec<&str> = children
+            .iter()
+            .map(|child| child.location.label())
+            .collect();
+        assert_eq!(
+            labels,
+            vec!["alex@example.com", "someone@example.com"],
+            "only provider accounts belong here, mounted or not"
+        );
+    }
 
     #[test]
     fn network_shortcuts_become_sidebar_children() {

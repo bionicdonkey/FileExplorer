@@ -11,6 +11,11 @@
   <!-- Keep in step with `version` in Cargo.toml: the About page reads the crate
        version, and the CI release job refuses a tag that disagrees with it. -->
   <releases>
+    <release version="0.2.2" date="2026-10-04">
+      <description>
+        <p>Online accounts lists accounts again rather than every disk, restoring a filter lost when sidebar enumeration moved behind the directory repository.</p>
+      </description>
+    </release>
     <release version="0.2.1" date="2026-10-04">
       <description>
         <p>Remote locations work inside the Flatpak sandbox again: it had no permission to reach GVfs, so every non-local location failed and Browse Network and Online accounts were empty.</p>
