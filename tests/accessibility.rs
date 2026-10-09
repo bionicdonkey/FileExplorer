@@ -194,17 +194,17 @@ fn slice4_sidebar_duplicate_tree_expander_restores_its_ancestor_occurrence() {
     provider.advance(1);
     // The rebuilt row maps a frame later, and the sidebar grabs focus once it
     // does; a spontaneous refresh in between rebuilds again and needs another
-    // listing first. Query the rows and the focus together so the pair below
-    // always comes from one build of the tree.
+    // listing first. Query the rows and the focus together so the check below
+    // always uses one build of the tree.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-    let (refreshed_home, focused) = loop {
+    let focused = loop {
         let rows = sidebar_section_rows(&sidebar.widget, "Quick access");
         let home = rows.last_child().unwrap();
         let focused = gtk::prelude::GtkWindowExt::focus(&window);
         if let Some(focused) = focused
             .filter(|focused| focused.widget_name() == nested_name && focused.is_ancestor(&home))
         {
-            break (home, focused);
+            break focused;
         }
         if descendants(sidebar.widget.upcast_ref::<gtk::Widget>())
             .iter()
