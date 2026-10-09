@@ -149,19 +149,75 @@ fn slice4_sidebar_duplicate_tree_expander_restores_its_ancestor_occurrence() {
         })
         .unwrap();
     nested.set_active(true);
-    nested.grab_focus();
+    let nested_name = nested.widget_name();
+    // A volume monitor signal can refresh the sidebar at any moment, which
+    // rebuilds every row and drops children until the next listing completes,
+    // so re-find the row by name and keep the provider advancing while waiting
+    // for it to be mapped and focusable.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let grabbed = loop {
+        let current = descendants(sidebar.widget.upcast_ref::<gtk::Widget>())
+            .into_iter()
+            .find(|widget| widget.widget_name() == nested_name);
+        match current {
+            Some(current) if current.is_mapped() && current.grab_focus() => break true,
+            _ => {
+                provider.advance(1);
+                context.iteration(true);
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            break false;
+        }
+    };
+    assert!(grabbed, "the nested expander never mapped to take focus");
     sidebar.refresh();
-    provider.advance(1);
-    while context.pending() {
-        context.iteration(false);
-    }
-    let refreshed_rows = sidebar_section_rows(&sidebar.widget, "Quick access");
-    let refreshed_home = refreshed_rows.last_child().unwrap();
-    let focused = gtk::prelude::GtkWindowExt::focus(&window).unwrap();
+    // The defect this guards: expansion used to be stored per URI, so opening
+    // the nested occurrence reopened the direct pin of the same URI as well.
+    let rebuilt_rows = sidebar_section_rows(&sidebar.widget, "Quick access");
+    let direct_pin = rebuilt_rows.first_child().unwrap();
+    let pin_expander = descendants(&direct_pin)
+        .into_iter()
+        .find_map(|widget| {
+            widget
+                .downcast::<gtk::ToggleButton>()
+                .ok()
+                .filter(|button| {
+                    button.tooltip_text().as_deref() == Some("Expand or collapse Child")
+                })
+        })
+        .expect("the direct pin row has an expander");
     assert!(
-        focused.is_ancestor(&refreshed_home),
-        "nested expander must not jump to the direct pin for the same URI"
+        !pin_expander.is_active(),
+        "expanding the nested occurrence must not reopen the direct pin"
     );
+    provider.advance(1);
+    // The rebuilt row maps a frame later, and the sidebar grabs focus once it
+    // does; a spontaneous refresh in between rebuilds again and needs another
+    // listing first. Query the rows and the focus together so the pair below
+    // always comes from one build of the tree.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let (refreshed_home, focused) = loop {
+        let rows = sidebar_section_rows(&sidebar.widget, "Quick access");
+        let home = rows.last_child().unwrap();
+        let focused = gtk::prelude::GtkWindowExt::focus(&window);
+        if let Some(focused) = focused
+            .filter(|focused| focused.widget_name() == nested_name && focused.is_ancestor(&home))
+        {
+            break (home, focused);
+        }
+        if descendants(sidebar.widget.upcast_ref::<gtk::Widget>())
+            .iter()
+            .all(|widget| widget.widget_name() != nested_name)
+        {
+            provider.advance(1);
+        }
+        context.iteration(true);
+        assert!(
+            std::time::Instant::now() < deadline,
+            "refresh did not restore focus to the nested expander"
+        );
+    };
     assert_eq!(
         focused.tooltip_text().as_deref(),
         Some("Expand or collapse Child")

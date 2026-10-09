@@ -148,7 +148,7 @@ struct StoredPreferences {
     #[serde(default)]
     section_expanded: BTreeMap<String, bool>,
     #[serde(default)]
-    expanded_locations: BTreeMap<String, bool>,
+    expanded_occurrences: BTreeMap<String, bool>,
     #[serde(default = "default_expanded_section")]
     default_expanded_section: String,
 }
@@ -158,7 +158,7 @@ pub struct SidebarPreferences {
     pins: Vec<Location>,
     remote_pins: Vec<Location>,
     section_expanded: BTreeMap<String, bool>,
-    expanded_locations: BTreeMap<String, bool>,
+    expanded_occurrences: BTreeMap<String, bool>,
     default_expanded_section: String,
     needs_defaults: bool,
     recoverable_notices: Vec<RecoverableStateNotice>,
@@ -171,7 +171,7 @@ impl SidebarPreferences {
             pins: Vec::new(),
             remote_pins: Vec::new(),
             section_expanded: BTreeMap::new(),
-            expanded_locations: BTreeMap::new(),
+            expanded_occurrences: BTreeMap::new(),
             default_expanded_section: default_expanded_section(),
             needs_defaults: false,
             recoverable_notices: Vec::new(),
@@ -195,7 +195,7 @@ impl SidebarPreferences {
                 pins: Vec::new(),
                 remote_pins: Vec::new(),
                 section_expanded: BTreeMap::new(),
-                expanded_locations: BTreeMap::new(),
+                expanded_occurrences: BTreeMap::new(),
                 default_expanded_section: default_expanded_section(),
                 needs_defaults: true,
                 recoverable_notices: Vec::new(),
@@ -208,7 +208,7 @@ impl SidebarPreferences {
             pins: Vec::new(),
             remote_pins: Vec::new(),
             section_expanded: stored.section_expanded,
-            expanded_locations: stored.expanded_locations,
+            expanded_occurrences: stored.expanded_occurrences,
             default_expanded_section: stored.default_expanded_section,
             needs_defaults: false,
             recoverable_notices: Vec::new(),
@@ -313,14 +313,21 @@ impl SidebarPreferences {
         self.section_expanded
             .insert("This PC/Devices".into(), expanded);
     }
-    pub fn location_expanded(&self, location: &SidebarLocation) -> bool {
-        self.expanded_locations
-            .get(&location.uri())
+    /// Whether a tree branch was left open. Keyed by the occurrence path --
+    /// the ancestry chain the sidebar also uses for focus keys -- because one
+    /// URI can appear in several places: expanding it nested under Home must
+    /// not open a direct pin of the same URI, or a refresh re-expands both and
+    /// the nested occurrence loses the race to restore keyboard focus.
+    pub fn occurrence_expanded(&self, occurrence: &[String]) -> bool {
+        let key = serde_json::to_string(occurrence).expect("string paths serialize");
+        self.expanded_occurrences
+            .get(&key)
             .copied()
             .unwrap_or(false)
     }
-    pub fn set_location_expanded(&mut self, location: &SidebarLocation, expanded: bool) {
-        self.expanded_locations.insert(location.uri(), expanded);
+    pub fn set_occurrence_expanded(&mut self, occurrence: &[String], expanded: bool) {
+        let key = serde_json::to_string(occurrence).expect("string paths serialize");
+        self.expanded_occurrences.insert(key, expanded);
     }
 
     pub fn pin(&mut self, path: PathBuf) {
@@ -367,7 +374,7 @@ impl SidebarPreferences {
             pins: Vec::new(),
             remote_pins: Vec::new(),
             section_expanded: self.section_expanded.clone(),
-            expanded_locations: self.expanded_locations.clone(),
+            expanded_occurrences: self.expanded_occurrences.clone(),
             default_expanded_section: self.default_expanded_section.clone(),
         })
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
@@ -949,11 +956,17 @@ mod tests {
         );
         let mut preferences = SidebarPreferences::load_from(path.clone()).unwrap();
 
-        preferences.set_location_expanded(&location, true);
+        let occurrence = vec![location.uri().to_string()];
+        preferences.set_occurrence_expanded(&occurrence, true);
         preferences.save().unwrap();
 
         let restored = SidebarPreferences::load_from(path).unwrap();
-        assert!(restored.location_expanded(&location));
+        assert!(restored.occurrence_expanded(&occurrence));
+        let nested = vec!["file:///home/user".to_string(), location.uri().to_string()];
+        assert!(
+            !restored.occurrence_expanded(&nested),
+            "the same URI under another ancestor is a different branch"
+        );
     }
 
     #[test]

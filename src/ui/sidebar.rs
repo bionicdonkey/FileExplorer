@@ -641,7 +641,7 @@ impl Sidebar {
             let initially_expanded = model
                 .borrow()
                 .preferences()
-                .location_expanded(&node.location);
+                .occurrence_expanded(&occurrence);
             let chevron = Image::from_icon_name(if initially_expanded {
                 "pan-down-symbolic"
             } else {
@@ -685,7 +685,7 @@ impl Sidebar {
                     let mut sidebar_model = children_model.borrow_mut();
                     sidebar_model
                         .preferences_mut()
-                        .set_location_expanded(&child_location, expanded);
+                        .set_occurrence_expanded(&occurrence, expanded);
                     let _ = sidebar_model.preferences().save();
                 }
                 if expanded && children_for_toggle.first_child().is_none() {
