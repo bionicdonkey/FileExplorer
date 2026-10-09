@@ -294,7 +294,7 @@ impl X11 {
             }
         }
     }
-    fn place(&self, window: c_ulong, x: i32) {
+    fn place(&self, window: c_ulong, x: i32, y: i32) {
         unsafe {
             let place: unsafe extern "C" fn(
                 *mut c_void,
@@ -304,9 +304,24 @@ impl X11 {
                 c_uint,
                 c_uint,
             ) -> c_int = self.symbol("XMoveResizeWindow");
-            place(self.display, self.root_level(window), x, 100, 300, 300);
+            place(self.display, self.root_level(window), x, y, 300, 300);
         }
         self.flush();
+    }
+    /// Root coordinates of the bottom-right corner: window managers cascade
+    /// new windows from the top-left, and a live desktop usually has something
+    /// there, so the test drags where nothing else is likely to sit.
+    fn drag_origin(&self) -> (i32, i32) {
+        unsafe {
+            let width: unsafe extern "C" fn(*mut c_void, c_int) -> c_int =
+                self.symbol("XDisplayWidth");
+            let height: unsafe extern "C" fn(*mut c_void, c_int) -> c_int =
+                self.symbol("XDisplayHeight");
+            let screen = 0;
+            let x = width(self.display, screen) - 700;
+            let y = (height(self.display, screen) - 400).max(100);
+            (x.max(0), y)
+        }
     }
     fn flush(&self) {
         unsafe {
@@ -486,12 +501,13 @@ fn slice3_external_move_waits_for_terminal_ack_over_real_x11() {
             pump_for(Duration::from_millis(10));
             assert!(Instant::now() < end);
         };
-        x.place(source_window, 0);
-        x.place(destination_window, 400);
-        x.motion(80, 200);
+        let (origin_x, origin_y) = x.drag_origin();
+        x.place(source_window, origin_x, origin_y);
+        x.place(destination_window, origin_x + 400, origin_y);
+        x.motion(origin_x + 80, origin_y + 100);
         x.button(true);
-        for (a, b) in [(110, 200), (160, 210), (350, 220), (500, 250), (550, 300)] {
-            x.motion(a, b);
+        for (a, b) in [(110, 100), (160, 110), (350, 120), (500, 150), (550, 200)] {
+            x.motion(origin_x + a, origin_y + b);
         }
         x.button(false);
         while pending.borrow().is_none() {
