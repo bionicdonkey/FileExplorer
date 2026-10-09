@@ -648,6 +648,13 @@ pub struct FileView {
     monitor_refresh_pending: Rc<std::cell::Cell<bool>>,
     controllers: Rc<RefCell<Vec<gtk::EventController>>>,
     stream_selection: Rc<RefCell<Option<Vec<String>>>>,
+    /// Identity keys of the selection when a plain left click was pressed, so
+    /// the release can tell "clicked what was already selected" apart from
+    /// "clicked something new".
+    selection_click_keys: Rc<RefCell<Option<Vec<String>>>>,
+    /// Set while a selection change is programmatic rather than a click, so the
+    /// pane it came from does not write an emptied selection back.
+    syncing_selection: Rc<std::cell::Cell<bool>>,
     visible_metadata:
         Rc<RefCell<crate::application::performance::VisibleCache<VisibleMetadataCacheEntry>>>,
     metadata_target: Rc<VisibleMetadataTarget>,
@@ -761,6 +768,8 @@ impl FileView {
             monitor_refresh_pending: Default::default(),
             controllers: Default::default(),
             stream_selection: Default::default(),
+            selection_click_keys: Default::default(),
+            syncing_selection: Default::default(),
             visible_metadata,
             metadata_target,
         };
@@ -784,6 +793,44 @@ impl FileView {
         });
         view.widget.add_controller(background.clone());
         view.controllers.borrow_mut().push(background.upcast());
+        // Neither a FlowBox in multiple-selection mode nor a list row turns a
+        // click on an already-selected item into a deselection, and neither
+        // clears the selection when the click lands on empty space, so both are
+        // decided here. Capture phase sees the press and the release before the
+        // row or tile applies its own selection in the bubble phase.
+        let pressed_view = view.clone();
+        let pressed_root = view.widget.clone();
+        let deselect = GestureClick::new();
+        deselect.set_button(1);
+        deselect.set_propagation_phase(gtk::PropagationPhase::Capture);
+        deselect.connect_pressed(move |gesture, _, x, y| {
+            let modifiers = gesture.current_event_state();
+            let modifying = modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK)
+                || modifiers.contains(gtk::gdk::ModifierType::SHIFT_MASK);
+            let pressed = if modifying || click_is_on_a_control_or_header(&pressed_root, x, y) {
+                None
+            } else {
+                Some(selection_keys_of(&pressed_view.selected_items()))
+            };
+            *pressed_view.selection_click_keys.borrow_mut() = pressed;
+        });
+        let released_view = view.clone();
+        deselect.connect_released(move |_, _, _, _| {
+            let Some(pressed) = released_view.selection_click_keys.borrow_mut().take() else {
+                return;
+            };
+            let view = released_view.clone();
+            // The pane applies its own selection while this release is still
+            // propagating, so the verdict waits for the main loop.
+            glib::idle_add_local_once(move || {
+                let released = selection_keys_of(&view.selected_items());
+                if click_leaves_selection_unchanged(&pressed, &released) {
+                    view.clear_selection();
+                }
+            });
+        });
+        view.widget.add_controller(deselect.clone());
+        view.controllers.borrow_mut().push(deselect.upcast());
         let keyboard_view = view.clone();
         let keys = gtk::EventControllerKey::new();
         keys.connect_key_pressed(move |_, key, _, modifiers| {
@@ -1307,7 +1354,42 @@ impl FileView {
         self.selection.borrow().clone()
     }
 
+    /// Drops every pane's visual selection, then the logical one. This is what
+    /// a click on empty space, or on the item that was already selected, means.
+    fn clear_selection(&self) {
+        clear_pane_selection(self.widget.upcast_ref::<gtk::Widget>());
+        self.select_items(Vec::new());
+    }
+
+    /// Hybrid view renders two panes that own their selections independently.
+    /// Selecting in one clears the other, so the highlight matches the logical
+    /// selection, which only ever names the pane that was clicked last.
+    fn link_hybrid_panes(&self, folders: &gtk::Widget, files: &gtk::Widget) {
+        self.clear_other_pane_on_selection(folders, files);
+        self.clear_other_pane_on_selection(files, folders);
+    }
+
+    fn clear_other_pane_on_selection(&self, source: &gtk::Widget, other: &gtk::Widget) {
+        let syncing = self.syncing_selection.clone();
+        let other = other.downgrade();
+        connect_pane_selection_changed(source, move |selected| {
+            if syncing.get() || selected == 0 {
+                return;
+            }
+            let Some(other) = other.upgrade() else {
+                return;
+            };
+            syncing.set(true);
+            clear_pane_selection(&other);
+            syncing.set(false);
+        });
+    }
+
     fn select_items(&self, items: Vec<FileItem>) {
+        if self.syncing_selection.get() {
+            // Clearing the other hybrid pane, not a click in this one.
+            return;
+        }
         *self.selected_target.borrow_mut() = items.first().map(file_target);
         *self.selection.borrow_mut() = items;
         self.notify_command_availability_changed();
@@ -2893,17 +2975,25 @@ impl FileView {
                 .build();
             root.append(&Label::new(Some("Files")));
             root.append(&files_scroll);
+            self.link_hybrid_panes(
+                folders_view.upcast_ref::<gtk::Widget>(),
+                files_view.upcast_ref::<gtk::Widget>(),
+            );
             // The outer viewport must allocate these two bounded scrollers,
             // rather than measuring an unbounded list's natural height.
             root.set_vexpand(true);
             return root;
         }
+        let mut folder_pane = None;
+        let mut file_pane = None;
         if !folders.is_empty() {
             let heading = Label::new(Some("Folders"));
             heading.add_css_class("heading");
             heading.set_xalign(0.0);
             root.append(&heading);
-            root.append(&self.grid_view(&folders, options));
+            let grid = self.grid_view(&folders, options);
+            folder_pane = Some(grid.clone().upcast::<gtk::Widget>());
+            root.append(&grid);
         }
         if !files.is_empty() {
             let heading = Label::new(Some("Files"));
@@ -2916,10 +3006,118 @@ impl FileView {
                 folders_first: false,
                 ..options.clone()
             };
-            root.append(&self.column_view_for(&files, &file_options));
+            let list = self.column_view_for(&files, &file_options);
+            file_pane = Some(list.clone().upcast::<gtk::Widget>());
+            root.append(&list);
+        }
+        if let (Some(folders), Some(files)) = (folder_pane, file_pane) {
+            self.link_hybrid_panes(&folders, &files);
         }
         root
     }
+}
+
+fn selection_keys_of(items: &[FileItem]) -> Vec<String> {
+    items
+        .iter()
+        .map(|item| item.identity_key().to_owned())
+        .collect()
+}
+
+/// Whether a plain click should leave nothing selected.
+///
+/// `GtkFlowBox` in multiple-selection mode clears every child and then re-selects
+/// the one clicked, and a list row selects exclusively, so neither turns a click
+/// on an already-selected item into a deselection; and neither clears the
+/// selection when the click lands on empty space. Both leave the selection
+/// exactly as it was, which is the user asking for no selection at all.
+fn click_leaves_selection_unchanged(pressed: &[String], released: &[String]) -> bool {
+    if pressed.is_empty() {
+        return false;
+    }
+    fn key_set(selection: &[String]) -> std::collections::HashSet<&str> {
+        selection.iter().map(String::as_str).collect()
+    }
+    key_set(pressed) == key_set(released)
+}
+
+fn selection_model_of(widget: &gtk::Widget) -> Option<gtk::SelectionModel> {
+    if let Some(view) = widget.downcast_ref::<ColumnView>() {
+        return view.model();
+    }
+    if let Some(view) = widget.downcast_ref::<gtk::GridView>() {
+        return view.model();
+    }
+    if let Some(view) = widget.downcast_ref::<gtk::ListView>() {
+        return view.model();
+    }
+    None
+}
+
+/// Drops the selection a pane is showing, descending into a container that is
+/// not itself a pane. Each pane reports the empty selection through its own
+/// handler, which is what clears the logical selection.
+fn clear_pane_selection(widget: &gtk::Widget) {
+    if let Some(grid) = widget.downcast_ref::<FlowBox>() {
+        grid.unselect_all();
+        return;
+    }
+    if let Some(model) = selection_model_of(widget) {
+        model.unselect_all();
+        return;
+    }
+    let mut child = widget.first_child();
+    while let Some(next) = child {
+        clear_pane_selection(&next);
+        child = next.next_sibling();
+    }
+}
+
+fn connect_pane_selection_changed(widget: &gtk::Widget, callback: impl Fn(usize) + 'static) {
+    let callback = Rc::new(callback);
+    if let Some(grid) = widget.downcast_ref::<FlowBox>() {
+        let selected = callback.clone();
+        grid.connect_selected_children_changed(move |grid| {
+            selected(grid.selected_children().len());
+        });
+        return;
+    }
+    if let Some(model) = selection_model_of(widget) {
+        let selected = callback;
+        model.connect_selection_changed(move |model, _, _| {
+            selected(model.selection().size() as usize);
+        });
+    }
+}
+
+/// Whether a click landed on something the user is operating rather than on
+/// empty space: a control, or a column header they are sorting by. Neither
+/// should cost them their selection. `GtkColumnViewTitle` is private to GTK, so
+/// the header is recognised structurally -- reaching the `ColumnView` without
+/// passing through the `ListView` holding its rows means the click was above
+/// them.
+fn click_is_on_a_control_or_header(root: &ScrolledWindow, x: f64, y: f64) -> bool {
+    let Some(picked) = root.pick(x, y, gtk::PickFlags::DEFAULT) else {
+        return false;
+    };
+    let mut widget = Some(picked);
+    while let Some(current) = widget {
+        if current.downcast_ref::<gtk::Scrollbar>().is_some()
+            || current.downcast_ref::<Button>().is_some()
+            || current.downcast_ref::<gtk::Entry>().is_some()
+            || current.downcast_ref::<gtk::Switch>().is_some()
+        {
+            return true;
+        }
+        if current.downcast_ref::<ColumnView>().is_some() {
+            return true;
+        }
+        if current.downcast_ref::<FlowBox>().is_some() || selection_model_of(&current).is_some() {
+            return false;
+        }
+        widget = current.parent();
+    }
+    false
 }
 
 /// Group headings and the entries underneath them must be treated as one ordered
@@ -3595,11 +3793,13 @@ mod tests {
 
     use gio::prelude::FileExt;
     use gtk::prelude::{ListModelExt, WidgetExt};
+    use gtk::ColumnView;
 
     use super::{
-        cached_thumbnail_file_for, command_availability_for_target, drag_uri_for, grid_tile_label,
-        local_image_thumbnail_file, thumbnail_cache_homes_from, thumbnail_cache_paths,
-        uses_native_row_sorting, FileView,
+        cached_thumbnail_file_for, click_is_on_a_control_or_header,
+        click_leaves_selection_unchanged, command_availability_for_target, drag_uri_for,
+        grid_tile_label, local_image_thumbnail_file, thumbnail_cache_homes_from,
+        thumbnail_cache_paths, uses_native_row_sorting, FileView,
     };
     use crate::core::navigation::{TabContent, TabState};
     use crate::core::sidebar_model::SidebarSection;
@@ -5251,6 +5451,232 @@ mod tests {
             view.on_close.borrow().is_none(),
             "close() finished clearing the handler the callback was invoked from"
         );
+    }
+
+    /// Shared helpers for the selection tests: a view backed by a real
+    /// directory, and the panes a view mode renders.
+    fn loaded_view(directory: &std::path::Path, view_mode: ViewMode) -> FileView {
+        let view = FileView::new(Location::from_local_path(directory));
+        let context = glib::MainContext::default();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let loaded = view
+                .navigation
+                .state
+                .borrow()
+                .directory
+                .as_ref()
+                .is_some_and(|snapshot| !snapshot.entries.is_empty());
+            if loaded {
+                break;
+            }
+            context.iteration(false);
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the directory never finished loading"
+            );
+        }
+        view.set_options(ViewOptions {
+            view_mode,
+            ..ViewOptions::default()
+        });
+        view
+    }
+
+    fn populate(directory: &std::path::Path, folders: usize, files: usize) {
+        for index in 0..folders {
+            fs::create_dir(directory.join(format!("folder-{index}"))).unwrap();
+        }
+        for index in 0..files {
+            fs::write(directory.join(format!("file-{index}.txt")), "file").unwrap();
+        }
+    }
+
+    fn find_flow_box_in(widget: &gtk::Widget) -> Option<gtk::FlowBox> {
+        use glib::prelude::Cast;
+        if let Some(grid) = widget.downcast_ref::<gtk::FlowBox>() {
+            return Some(grid.clone());
+        }
+        let mut child = widget.first_child();
+        while let Some(next) = child {
+            if let Some(grid) = find_flow_box_in(&next) {
+                return Some(grid);
+            }
+            child = next.next_sibling();
+        }
+        None
+    }
+
+    fn find_column_view_in(widget: &gtk::Widget) -> Option<ColumnView> {
+        use glib::prelude::Cast;
+        if let Some(list) = widget.downcast_ref::<ColumnView>() {
+            return Some(list.clone());
+        }
+        let mut child = widget.first_child();
+        while let Some(next) = child {
+            if let Some(list) = find_column_view_in(&next) {
+                return Some(list);
+            }
+            child = next.next_sibling();
+        }
+        None
+    }
+
+    /// A plain click on the item that is already selected, and a plain click on
+    /// empty space, look the same to GTK: both leave the selection exactly as it
+    /// was. That is the signal to drop it.
+    #[test]
+    fn a_click_that_leaves_the_selection_alone_asks_for_no_selection() {
+        let one = vec!["file:///tmp/a".to_owned()];
+        assert!(click_leaves_selection_unchanged(&one, &one));
+
+        let two = vec!["file:///tmp/a".to_owned(), "file:///tmp/b".to_owned()];
+        let reordered = vec!["file:///tmp/b".to_owned(), "file:///tmp/a".to_owned()];
+        assert!(
+            click_leaves_selection_unchanged(&two, &reordered),
+            "selection order is not a change"
+        );
+
+        let other = vec!["file:///tmp/b".to_owned()];
+        assert!(
+            !click_leaves_selection_unchanged(&one, &other),
+            "clicking another item moved the selection"
+        );
+        assert!(
+            !click_leaves_selection_unchanged(&two, &one),
+            "narrowing a multi-selection is GTK's doing, not a request to deselect"
+        );
+        assert!(
+            !click_leaves_selection_unchanged(&[], &[]),
+            "with nothing selected there is nothing to clear"
+        );
+    }
+
+    #[gtk::test]
+    fn clearing_the_selection_releases_the_grid_highlight() {
+        use gtk::prelude::*;
+
+        let directory = tempfile::tempdir().unwrap();
+        populate(directory.path(), 0, 3);
+        let view = loaded_view(directory.path(), ViewMode::IconGrid);
+        let grid = find_flow_box_in(view.widget.upcast_ref::<gtk::Widget>())
+            .expect("icon grid renders a FlowBox");
+        let tile = grid.child_at_index(1).expect("the grid renders tiles");
+        grid.select_child(&tile);
+        assert_eq!(view.selected_items().len(), 1);
+
+        view.clear_selection();
+
+        assert!(view.selected_items().is_empty());
+        assert!(
+            grid.selected_children().is_empty(),
+            "the tile is no longer highlighted"
+        );
+        assert!(
+            view.navigation.state.borrow().selection_keys.is_empty(),
+            "a reload has no selection left to restore"
+        );
+        view.close();
+    }
+
+    /// Hybrid view renders the folders in a FlowBox and the files in a
+    /// ColumnView, each owning a selection of its own. Selecting in one pane
+    /// used to leave the other pane highlighted, so a folder and a file both
+    /// looked selected while the logical selection named only the file.
+    #[gtk::test]
+    fn selecting_in_one_hybrid_pane_clears_the_other() {
+        use gtk::prelude::*;
+
+        let directory = tempfile::tempdir().unwrap();
+        populate(directory.path(), 1, 1);
+        let view = loaded_view(directory.path(), ViewMode::Hybrid);
+        let root = view.widget.upcast_ref::<gtk::Widget>();
+        let grid = find_flow_box_in(root).expect("hybrid renders a folder grid");
+        let list = find_column_view_in(root).expect("hybrid renders a file list");
+        let files = list.model().expect("the file pane has a selection model");
+        let folder = grid
+            .child_at_index(0)
+            .expect("the folder pane renders the folder");
+
+        grid.select_child(&folder);
+        assert_eq!(view.selected_items().len(), 1);
+        assert!(
+            view.selected_items()[0].is_dir(),
+            "the folder pane owns the selection"
+        );
+
+        files.select_item(0, true);
+        assert_eq!(
+            view.selected_items().len(),
+            1,
+            "the file replaced the folder"
+        );
+        assert!(!view.selected_items()[0].is_dir());
+        assert!(
+            grid.selected_children().is_empty(),
+            "the folder pane gave up its highlight"
+        );
+
+        grid.select_child(&folder);
+        assert_eq!(view.selected_items().len(), 1);
+        assert!(view.selected_items()[0].is_dir());
+        assert_eq!(
+            files.selection().size(),
+            0,
+            "the file pane gave up its highlight"
+        );
+        view.close();
+    }
+
+    /// Sorting by a column is not a click on empty space, so it must not cost
+    /// the user their selection. `GtkColumnViewTitle` is private to GTK, so the
+    /// header is recognised by where it sits rather than by its type.
+    #[gtk::test]
+    fn a_click_on_a_column_header_is_not_a_click_on_empty_space() {
+        use gtk::prelude::*;
+
+        let directory = tempfile::tempdir().unwrap();
+        populate(directory.path(), 0, 3);
+        let view = loaded_view(directory.path(), ViewMode::DetailedList);
+        let window = gtk::Window::new();
+        window.set_default_size(640, 480);
+        window.set_child(Some(&view.widget));
+        window.present();
+        let context = glib::MainContext::default();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        // Hit testing needs real allocations, so wait for the list to be laid
+        // out rather than merely mapped.
+        let list = loop {
+            context.iteration(false);
+            let laid_out =
+                find_column_view_in(view.widget.upcast_ref::<gtk::Widget>()).filter(|list| {
+                    list.compute_bounds(&view.widget)
+                        .is_some_and(|bounds| bounds.height() > 60.0)
+                });
+            if let Some(list) = laid_out {
+                break list;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the list was never laid out"
+            );
+        };
+        let bounds = list
+            .compute_bounds(&view.widget)
+            .expect("the list is inside the scrolled window");
+        let x = f64::from(bounds.x()) + 4.0;
+        let header = f64::from(bounds.y()) + 2.0;
+        let rows = f64::from(bounds.y()) + f64::from(bounds.height()) / 2.0;
+
+        assert!(
+            click_is_on_a_control_or_header(&view.widget, x, header),
+            "the column headers sit above the rows"
+        );
+        assert!(
+            !click_is_on_a_control_or_header(&view.widget, x, rows),
+            "the rows and the empty space below them are the click target"
+        );
+        view.close();
     }
 }
 
