@@ -1199,6 +1199,34 @@ fn wire_tab(
                     }
                 }
             }
+            ContextCommand::Extract => {
+                let parent = intent.destination.clone();
+                for source in &intent.selection {
+                    let view_for_failure = command_view.clone();
+                    let name = source.display_name();
+                    let name_for_failure = name.clone();
+                    if crate::application::extraction::extract(
+                        &command_operations,
+                        source,
+                        &parent,
+                        move |message| {
+                            crate::ui::accessibility::AccessibleStatus::announce_for(
+                                &view_for_failure.widget,
+                                &format!("Could not extract {name_for_failure}: {message}"),
+                                crate::ui::accessibility::StatusPriority::Urgent,
+                            );
+                        },
+                    )
+                    .is_none()
+                    {
+                        crate::ui::accessibility::AccessibleStatus::announce_for(
+                            &command_view.widget,
+                            &format!("Could not prepare a folder beside {name}"),
+                            crate::ui::accessibility::StatusPriority::Urgent,
+                        );
+                    }
+                }
+            }
             ContextCommand::Open => {
                 for item in command_view.selected_items() {
                     command_view.open_item(&item);

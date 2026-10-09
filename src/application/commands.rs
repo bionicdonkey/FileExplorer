@@ -9,6 +9,7 @@ use crate::core::{
 pub enum ContextCommand {
     Open,
     OpenWith,
+    Extract,
     OpenInNewTab,
     OpenInNewWindow,
     OpenInTerminal,

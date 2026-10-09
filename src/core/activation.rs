@@ -33,6 +33,12 @@ pub fn activation_for(item: &FileItem) -> Activation {
     Activation::LaunchExternally
 }
 
+/// Whether the application can extract this entry into a folder beside it:
+/// exactly the archives it can browse, and nothing else.
+pub fn is_extractable(item: &FileItem) -> bool {
+    !item.is_dir() && is_browsable_archive(&resolved_content_type(item))
+}
+
 /// The entry's content type, named by the entry itself when GIO has not been
 /// asked for it.
 ///

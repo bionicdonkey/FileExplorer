@@ -3498,6 +3498,7 @@ fn context_command_label(command: ContextCommand) -> &'static str {
         ContextCommand::DuplicateTab => "Duplicate Tab",
         ContextCommand::ToggleQuickAccess => "Pin to Quick access",
         ContextCommand::OpenWith => "Open With",
+        ContextCommand::Extract => "Extract",
     }
 }
 

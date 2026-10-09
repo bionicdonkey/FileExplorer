@@ -26,6 +26,7 @@ pub struct CommandAvailability {
     pub can_open_terminal: bool,
     pub can_trash: bool,
     pub can_delete: bool,
+    pub can_extract: bool,
     pub disabled_reason: Option<&'static str>,
 }
 
@@ -61,6 +62,10 @@ impl CommandAvailability {
         let can_open_terminal = can_use_local_adapter && selection[0].is_dir() && can_open;
         let can_trash = supports_all(Capability::Trash);
         let can_delete = supports_all(Capability::Delete);
+        let can_extract = !selection.is_empty()
+            && selection
+                .iter()
+                .all(|item| crate::core::activation::is_extractable(item));
         let disabled_reason = if !can_trash && !selection.is_empty() {
             Some("This location does not support Trash")
         } else if !can_delete && !selection.is_empty() {
@@ -80,6 +85,7 @@ impl CommandAvailability {
             can_open_terminal,
             can_trash,
             can_delete,
+            can_extract,
             disabled_reason,
         }
     }
@@ -91,6 +97,7 @@ impl CommandAvailability {
             | ContextCommand::OpenInNewWindow
             | ContextCommand::Properties => self.can_open,
             ContextCommand::OpenInTerminal => self.can_open_terminal,
+            ContextCommand::Extract => self.can_extract,
             ContextCommand::Cut | ContextCommand::MoveTo => self.can_cut,
             ContextCommand::Copy
             | ContextCommand::CopyFilename
@@ -145,6 +152,7 @@ impl CommandAvailability {
                 can_open_terminal: true,
                 can_trash: true,
                 can_delete: true,
+                can_extract: true,
                 disabled_reason: None,
             },
         }
@@ -187,19 +195,24 @@ pub fn delete_label(shift_held: bool) -> &'static str {
 
 pub fn item_commands(target: &ContextTarget) -> Vec<ContextCommand> {
     match target {
-        ContextTarget::File(_) => vec![
-            ContextCommand::Open,
-            ContextCommand::OpenWith,
-            ContextCommand::Cut,
-            ContextCommand::Copy,
-            ContextCommand::CopyFilename,
-            ContextCommand::CopyFullPath,
-            ContextCommand::CopyTo,
-            ContextCommand::MoveTo,
-            ContextCommand::Rename,
-            ContextCommand::MoveToTrash,
-            ContextCommand::Properties,
-        ],
+        ContextTarget::File(item) => {
+            let mut commands = vec![ContextCommand::Open, ContextCommand::OpenWith];
+            if crate::core::activation::is_extractable(item) {
+                commands.push(ContextCommand::Extract);
+            }
+            commands.extend([
+                ContextCommand::Cut,
+                ContextCommand::Copy,
+                ContextCommand::CopyFilename,
+                ContextCommand::CopyFullPath,
+                ContextCommand::CopyTo,
+                ContextCommand::MoveTo,
+                ContextCommand::Rename,
+                ContextCommand::MoveToTrash,
+                ContextCommand::Properties,
+            ]);
+            commands
+        }
         ContextTarget::Folder(_) | ContextTarget::SidebarLocation(_) => vec![
             ContextCommand::Open,
             ContextCommand::OpenInNewTab,
@@ -257,6 +270,48 @@ mod tests {
         ));
 
         assert!(commands.contains(&ContextCommand::ToggleQuickAccess));
+    }
+
+    fn file(name: &str) -> FileItem {
+        use crate::core::contracts::{CapabilitySnapshot, EntryKind, EntrySnapshot};
+        use crate::core::Location;
+        FileItem::from_snapshot(&EntrySnapshot {
+            location: Location::from_uri(&format!("file:///tmp/{name}")).unwrap(),
+            display_name: name.to_owned(),
+            kind: EntryKind::File,
+            size: None,
+            modified: None,
+            // No content type yet: recognition must come from the name, the
+            // same situation a row opened straight after appearing is in.
+            content_type: None,
+            capabilities: CapabilitySnapshot::default(),
+        })
+    }
+
+    #[test]
+    fn an_archive_offers_extract_and_an_ordinary_file_does_not() {
+        assert!(
+            item_commands(&ContextTarget::File(file("Trip.zip")))
+                .contains(&ContextCommand::Extract),
+            "an archive's menu must offer Extract"
+        );
+        assert!(
+            !item_commands(&ContextTarget::File(file("notes.txt")))
+                .contains(&ContextCommand::Extract),
+            "a plain file has nothing to extract"
+        );
+    }
+
+    #[test]
+    fn extract_is_available_only_for_a_selection_of_archives() {
+        use super::CommandAvailability;
+        assert!(CommandAvailability::for_selection(&[file("Trip.zip")], None).can_extract);
+        let mixed = vec![file("Trip.zip"), file("notes.txt")];
+        assert!(
+            !CommandAvailability::for_selection(&mixed, None).can_extract,
+            "a mixed selection extracts nothing as a whole"
+        );
+        assert!(!CommandAvailability::for_selection(&[], None).can_extract);
     }
 
     #[test]
