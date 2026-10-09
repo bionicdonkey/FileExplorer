@@ -15,6 +15,7 @@ use crate::application::commands::{
     ApplicationCommand, ClipboardAction, ClipboardPayload, DragProposal, TransferCompletion,
 };
 use crate::application::navigation::NavigationCoordinator;
+use crate::core::contracts::EntryKind;
 use crate::core::directory_model::sort_items;
 use crate::core::file_item::FileItem;
 use crate::core::navigation::{NavigationStatus, TabContent, TabState};
@@ -618,6 +619,17 @@ fn command_availability_for_target(
     CommandAvailability::for_selection(&selection, Some(destination))
 }
 
+/// What the window's status bar shows about the focused tab: whether its
+/// listing is still streaming, and how many folders and files the directory
+/// it is showing holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ViewStatus {
+    pub loading: bool,
+    pub directory: bool,
+    pub folders: usize,
+    pub files: usize,
+}
+
 #[derive(Clone)]
 pub struct FileView {
     pub widget: ScrolledWindow,
@@ -633,6 +645,7 @@ pub struct FileView {
     options: Rc<RefCell<ViewOptions>>,
     selected_target: Rc<RefCell<Option<ContextTarget>>>,
     on_command_availability_changed: Rc<RefCell<Option<Box<dyn Fn(CommandAvailability)>>>>,
+    on_status: Rc<RefCell<Option<Box<dyn Fn(ViewStatus)>>>>,
     pending_cut: Rc<RefCell<Vec<Location>>>,
     is_quick_access_location: Rc<RefCell<Option<Rc<dyn Fn(&Location) -> bool>>>>,
     model_store: Rc<RefCell<Option<gio::ListStore>>>,
@@ -782,6 +795,7 @@ impl FileView {
             stream_selection: Default::default(),
             selection_click_keys: Default::default(),
             syncing_selection: Default::default(),
+            on_status: Default::default(),
             visible_metadata,
             metadata_target,
         };
@@ -996,6 +1010,7 @@ impl FileView {
             self.widget
                 .set_child(Some(&Label::new(Some("Loading folder…"))));
         }
+        self.publish_status();
     }
 
     fn navigation_finished(&self) {
@@ -1374,6 +1389,7 @@ impl FileView {
             }
             self.widget.set_child(Some(&box_));
         }
+        self.publish_status();
     }
 
     pub fn set_navigation_handler<F: Fn(Location) + 'static>(&self, callback: F) {
@@ -1531,6 +1547,57 @@ impl FileView {
                 }
             }
             self.select_items(vec![item.clone()]);
+        }
+    }
+
+    pub fn set_status_handler(&self, callback: impl Fn(ViewStatus) + 'static) {
+        *self.on_status.borrow_mut() = Some(Box::new(callback));
+        self.publish_status();
+    }
+
+    /// Re-sends the status snapshot. The window also asks for one when the
+    /// selected tab changes, since each tab owns its own listing.
+    pub fn publish_status(&self) {
+        let status = self.current_status();
+        if let Some(callback) = self.on_status.borrow().as_ref() {
+            callback(status);
+        }
+    }
+
+    fn current_status(&self) -> ViewStatus {
+        let state = self.navigation.state.borrow();
+        let loading = matches!(state.status, NavigationStatus::Loading(_));
+        let directory =
+            matches!(state.content, TabContent::Directory(_)) && !self.is_showing_search_results();
+        // Counted as displayed: a hidden entry the view is filtering out must
+        // not appear in the totals beside it.
+        let show_hidden = self.options.borrow().show_hidden;
+        let (folders, files) = if directory {
+            state
+                .directory
+                .as_ref()
+                .map(|snapshot| {
+                    snapshot
+                        .entries
+                        .iter()
+                        .filter(|entry| show_hidden || !entry.display_name.starts_with('.'))
+                        .fold((0, 0), |(folders, files), entry| {
+                            if matches!(entry.kind, EntryKind::Directory) {
+                                (folders + 1, files)
+                            } else {
+                                (folders, files + 1)
+                            }
+                        })
+                })
+                .unwrap_or((0, 0))
+        } else {
+            (0, 0)
+        };
+        ViewStatus {
+            loading,
+            directory,
+            folders,
+            files,
         }
     }
 
@@ -1964,6 +2031,7 @@ impl FileView {
         if owned_focus {
             self.widget.child_focus(gtk::DirectionType::TabForward);
         }
+        self.publish_status();
     }
 
     fn reload_content(&self) {
@@ -5823,6 +5891,69 @@ mod tests {
             100,
             "a quiet interval restores the prompt reaction"
         );
+        view.close();
+    }
+
+    /// The status bar snapshot must say "streaming" while the listing is in
+    /// flight and carry the folder/file split of the directory once it lands.
+    #[gtk::test]
+    fn status_reports_loading_then_the_directory_counts() {
+        use crate::core::contracts::{Capability, CapabilitySnapshot, EntryKind, EntrySnapshot};
+        use crate::infrastructure::mock_provider::{MockConfig, MockProvider};
+
+        let context = glib::MainContext::default();
+        let root = Location::from_uri("smb://fixture/share").unwrap();
+        let provider = std::rc::Rc::new(MockProvider::new(context.clone(), MockConfig::default()));
+        let entry = |name: &str, kind: EntryKind| EntrySnapshot {
+            location: Location::from_uri(&format!("{}/{}", root.uri(), name)).unwrap(),
+            display_name: name.into(),
+            kind,
+            size: None,
+            modified: None,
+            content_type: None,
+            capabilities: CapabilitySnapshot {
+                supported: [Capability::List].into_iter().collect(),
+                ..Default::default()
+            },
+        };
+        provider.set_directory(
+            root.clone(),
+            vec![
+                entry("docs", EntryKind::Directory),
+                entry("pics", EntryKind::Directory),
+                entry("a.txt", EntryKind::File),
+                entry("b.txt", EntryKind::File),
+                entry("c.txt", EntryKind::File),
+            ],
+            CapabilitySnapshot {
+                version: 1,
+                supported: [Capability::List].into_iter().collect(),
+                stable_order: true,
+                ..Default::default()
+            },
+        );
+        let view = FileView::new_with_repository(root.clone(), provider.clone());
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let captured = seen.clone();
+        view.set_status_handler(move |status| captured.borrow_mut().push(status));
+        assert!(
+            seen.borrow().first().is_some_and(|status| status.loading),
+            "the first snapshot says the listing is streaming"
+        );
+
+        provider.advance(1);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while seen.borrow().last().is_some_and(|status| status.loading) {
+            context.iteration(false);
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the listing never landed"
+            );
+        }
+        let last = *seen.borrow().last().expect("a snapshot arrived");
+        assert!(!last.loading);
+        assert!(last.directory);
+        assert_eq!((last.folders, last.files), (2, 3));
         view.close();
     }
 }

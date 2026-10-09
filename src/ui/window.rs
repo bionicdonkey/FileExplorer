@@ -252,12 +252,47 @@ impl ExplorerWindow {
         let sidebar_context_tabs = tabs.view.clone();
         let sidebar_context_header = header_controls.clone();
         let sidebar_context_preferences = preferences.clone();
+        let status = Label::new(Some("Ready"));
+        status.set_halign(Align::Start);
+        status.add_css_class("dim-label");
+        status.set_margin_start(8);
+        status.set_margin_end(8);
+        status.set_margin_bottom(6);
+        let activity = gtk::Spinner::new();
+        activity.set_margin_bottom(6);
+        let counts = Label::new(None);
+        counts.add_css_class("dim-label");
+        counts.set_halign(Align::End);
+        counts.set_hexpand(true);
+        counts.set_margin_end(8);
+        counts.set_margin_bottom(6);
+        let status_bar_widget = GtkBox::new(Orientation::Horizontal, 4);
+        status_bar_widget.append(&status);
+        status_bar_widget.append(&activity);
+        status_bar_widget.append(&counts);
+        let status_bar = StatusBar {
+            counts,
+            navigation_busy: Rc::new(std::cell::Cell::new(false)),
+        };
+        // Operations report through the manager rather than a signal, so the
+        // spinner polls them; the listing half of "busy" arrives push-based
+        // through each view's status handler.
+        let activity_widget = activity.clone();
+        let activity_operations = operations.clone();
+        let activity_navigation = status_bar.navigation_busy.clone();
+        glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
+            let busy = activity_navigation.get() || activity_operations.active_count() > 0;
+            activity_widget.set_spinning(busy);
+            glib::ControlFlow::Continue
+        });
+
         let sidebar_context_app = app.clone();
         let sidebar_context_clipboard = clipboard.clone();
         let sidebar_context_operations = operations.clone();
         let sidebar_window = window.clone();
         let sidebar_model_actions = sidebar_model.clone();
         let sidebar_holder_actions = sidebar_holder.clone();
+        let sidebar_status_bar = status_bar.clone();
         let sidebar = Sidebar::new(sidebar_model.clone(), &window, move |action| match action {
             SidebarAction::OpenSection(title) => {
                 let section = sidebar_model_actions
@@ -311,6 +346,7 @@ impl ExplorerWindow {
                         &sidebar_context_clipboard,
                         &sidebar,
                         &sidebar_context_operations,
+                        sidebar_status_bar.clone(),
                     );
                 }
             }
@@ -495,12 +531,6 @@ impl ExplorerWindow {
             .build();
         name_control(&search, "Search this folder (Ctrl+F)");
         let shortcut_search = search.clone();
-        let status = Label::new(Some("Ready"));
-        status.set_halign(Align::Start);
-        status.add_css_class("dim-label");
-        status.set_margin_start(8);
-        status.set_margin_end(8);
-        status.set_margin_bottom(6);
 
         let preferences_tabs = tabs.view.clone();
         let preferences_values = application_preferences.clone();
@@ -548,7 +578,7 @@ impl ExplorerWindow {
             view_controls(&tabs_data, &tabs.view, &preferences),
         ));
         body.append(&content);
-        body.append(&status);
+        body.append(&status_bar_widget);
         let announcements = AccessibleStatus::new();
         announcements.widget.set_margin_start(8);
         announcements.widget.set_margin_end(8);
@@ -600,6 +630,7 @@ impl ExplorerWindow {
                 &clipboard,
                 &sidebar,
                 &operations,
+                status_bar.clone(),
             );
         }
 
@@ -777,6 +808,7 @@ impl ExplorerWindow {
         let new_operations = operations.clone();
         let new_sidebar = sidebar.clone();
         let new_application_preferences = application_preferences.clone();
+        let new_tab_status_bar = status_bar.clone();
         new_tab.connect_clicked(move |_| {
             let path = new_tab_location(&new_application_preferences.borrow());
             let location = Rc::new(RefCell::new(path.clone()));
@@ -801,6 +833,7 @@ impl ExplorerWindow {
                 &new_clipboard,
                 &new_sidebar,
                 &new_operations,
+                new_tab_status_bar.clone(),
             );
             new_tabs.set_selected_page(&page);
         });
@@ -847,6 +880,7 @@ impl ExplorerWindow {
         let tab_context_clipboard = clipboard.clone();
         let tab_context_operations = operations.clone();
         let tab_context_sidebar = sidebar.clone();
+        let tab_context_status_bar = status_bar.clone();
         tabs.set_context_handler(move |command| {
             let Some(page) = tab_context_view.selected_page() else {
                 return;
@@ -871,6 +905,7 @@ impl ExplorerWindow {
                             &tab_context_clipboard,
                             &tab_context_sidebar,
                             &tab_context_operations,
+                            tab_context_status_bar.clone(),
                         );
                     }
                 }
@@ -889,6 +924,7 @@ impl ExplorerWindow {
                     select_sidebar.set_active_section(title);
                 }
                 select_header.set_file_action_availability(&tab.view.command_availability());
+                tab.view.publish_status();
                 if tab.view.section_title().is_none() {
                     select_sidebar.set_active_location(tab.view.current_location());
                 }
@@ -1042,6 +1078,37 @@ fn new_tab_location(preferences: &ApplicationPreferences) -> Location {
         .unwrap_or_else(|_| Location::home())
 }
 
+/// The status bar's per-tab widgets, shared with every tab so whichever tab is
+/// wired last still writes to the same bar.
+#[derive(Clone)]
+struct StatusBar {
+    counts: Label,
+    navigation_busy: Rc<std::cell::Cell<bool>>,
+}
+
+fn counts_text(status: &crate::ui::file_view::ViewStatus) -> String {
+    if !status.directory || status.loading {
+        return String::new();
+    }
+    if status.folders == 0 && status.files == 0 {
+        return "empty".to_owned();
+    }
+    let mut parts = Vec::new();
+    if status.folders > 0 {
+        parts.push(match status.folders {
+            1 => "1 folder".to_owned(),
+            n => format!("{n} folders"),
+        });
+    }
+    if status.files > 0 {
+        parts.push(match status.files {
+            1 => "1 file".to_owned(),
+            n => format!("{n} files"),
+        });
+    }
+    parts.join(", ")
+}
+
 fn wire_tab(
     page: TabPage,
     data: &Rc<RefCell<Vec<TabData>>>,
@@ -1052,6 +1119,7 @@ fn wire_tab(
     clipboard: &Rc<RefCell<Option<FileClipboard>>>,
     sidebar: &Sidebar,
     operations: &OperationManager,
+    status_bar: StatusBar,
 ) {
     let view = data
         .borrow()
@@ -1168,6 +1236,12 @@ fn wire_tab(
     let command_sidebar = sidebar.clone();
     let command_operations = operations.clone();
     let command_view = view.clone();
+    let status_counts = status_bar.counts.clone();
+    let status_busy = status_bar.navigation_busy.clone();
+    view.set_status_handler(move |status| {
+        status_busy.set(status.loading);
+        status_counts.set_text(&counts_text(&status));
+    });
     view.set_application_handler(move |intent| {
         let command = intent.kind;
         let target = command_view
@@ -1244,6 +1318,7 @@ fn wire_tab(
                         &command_clipboard,
                         &command_sidebar,
                         &command_operations,
+                        status_bar.clone(),
                     );
                 }
             }
@@ -1639,6 +1714,7 @@ fn add_tab_at(
     clipboard: &Rc<RefCell<Option<FileClipboard>>>,
     sidebar: &Sidebar,
     operations: &OperationManager,
+    status_bar: StatusBar,
 ) {
     let location = Rc::new(RefCell::new(path.clone()));
     let view = FileView::from_location(path.clone());
@@ -1662,6 +1738,7 @@ fn add_tab_at(
         clipboard,
         sidebar,
         operations,
+        status_bar,
     );
     tabs.set_selected_page(&page);
 }
