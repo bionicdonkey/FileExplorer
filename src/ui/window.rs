@@ -1776,13 +1776,8 @@ fn show_network_location_dialog(
             dialog.close();
             return;
         }
-        match model
-            .borrow_mut()
-            .preferences_mut()
-            .pin_remote(entry.text().to_string())
-        {
+        match pin_remote_location(&model, entry.text().to_string()) {
             Ok(()) => {
-                let _ = model.borrow().preferences().save();
                 if let Some(sidebar) = sidebar.borrow().as_ref() {
                     sidebar.refresh();
                 }
@@ -1792,6 +1787,19 @@ fn show_network_location_dialog(
         }
     });
     dialog.present();
+}
+
+/// Pins a network location and persists the sidebar preferences.
+///
+/// Saving must not happen under the pin's mutable guard: a `match` scrutinee
+/// keeps its temporaries alive through every arm, so calling this inline in the
+/// match would still be borrowing when `save` re-borrows the model.
+fn pin_remote_location(model: &Rc<RefCell<SidebarModel>>, uri: String) -> Result<(), String> {
+    let pinned = model.borrow_mut().preferences_mut().pin_remote(uri);
+    if pinned.is_ok() {
+        let _ = model.borrow().preferences().save();
+    }
+    pinned
 }
 
 fn read_uri_clipboard(
@@ -2635,9 +2643,15 @@ fn update_active_options(
     let Some(index) = selected_index(tabs, data) else {
         return;
     };
-    let mut data = data.borrow_mut();
-    let tab = &mut data[index];
-    let mut options = tab.view.options();
+    // Cloned out of the tabs guard before the view is touched: `set_options`
+    // repaints through `reload`, which re-enters window callbacks that borrow
+    // `data` themselves.
+    let (view, path) = {
+        let data = data.borrow();
+        let tab = &data[index];
+        (tab.view.clone(), tab.view.current_location().local_path())
+    };
+    let mut options = view.options();
     match entry {
         "Sort:Name" => options.sort_field = SortField::Name,
         "Sort:Date modified" => options.sort_field = SortField::DateModified,
@@ -2662,8 +2676,7 @@ fn update_active_options(
         "View:Toggle hidden files" => options.show_hidden = !options.show_hidden,
         _ => return,
     }
-    let path = tab.view.current_location().local_path();
-    tab.view.set_options(options.clone());
+    view.set_options(options.clone());
     if let Some(path) = path {
         persist_options(&mut preferences.borrow_mut(), &path, options);
     }
@@ -2687,7 +2700,10 @@ fn reset_active_options(
         let _ = preferences.save();
         options
     };
-    data.borrow()[index].view.set_options(options);
+    // Same as `update_active_options`: never hold the tabs guard across the
+    // reload this triggers.
+    let view = data.borrow()[index].view.clone();
+    view.set_options(options);
 }
 
 fn persist_options(store: &mut ViewPreferencesStore, path: &Path, options: ViewOptions) {
@@ -3113,8 +3129,8 @@ mod tests {
 
     use super::{
         content_right_inset, file_toolbar, handle_navigation_action, matching_index, menu_button,
-        persist_options, remove_matching, shortcut_command, should_protect_last_file_tab,
-        sidebar_path_for_tab, TabData,
+        persist_options, pin_remote_location, remove_matching, shortcut_command,
+        should_protect_last_file_tab, sidebar_path_for_tab, TabData,
     };
     use crate::core::sidebar_model::SidebarSection;
     use crate::core::{
@@ -3462,5 +3478,42 @@ mod tests {
             None,
             "with no file tabs there is nothing to act on"
         );
+    }
+
+    /// The dialog saves preferences in the same arm that pinned the location.
+    /// A `match` scrutinee keeps its temporaries alive through the arms, so
+    /// pinning inline left a mutable guard borrowed across the save and aborted
+    /// the process on every successful "Add Network Location".
+    #[test]
+    fn pinning_a_network_location_saves_without_reborrowing_the_model() {
+        let model = Rc::new(RefCell::new(SidebarModel::new(
+            SidebarPreferences::in_memory(),
+            PathBuf::from("/home/tester"),
+        )));
+
+        let pinned = pin_remote_location(&model, "smb://nas.local/media".to_string());
+
+        assert_eq!(pinned, Ok(()));
+        assert_eq!(
+            model.borrow().preferences().remote_pins(),
+            ["smb://nas.local/media"],
+            "the pin survives the save that re-borrows the model"
+        );
+    }
+
+    #[test]
+    fn pinning_a_local_path_reports_the_dialog_error_and_saves_nothing() {
+        let model = Rc::new(RefCell::new(SidebarModel::new(
+            SidebarPreferences::in_memory(),
+            PathBuf::from("/home/tester"),
+        )));
+
+        let pinned = pin_remote_location(&model, "file:///home/tester/share".to_string());
+
+        assert_eq!(
+            pinned,
+            Err("Choose a provider address rather than a local file".to_owned())
+        );
+        assert!(model.borrow().preferences().remote_pins().is_empty());
     }
 }

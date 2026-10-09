@@ -620,7 +620,7 @@ pub struct FileView {
     search: crate::application::search::SearchCoordinator,
     on_location_committed: Rc<RefCell<Option<Box<dyn Fn(Location)>>>>,
     on_navigate: Rc<RefCell<Option<Box<dyn Fn(Location)>>>>,
-    on_close: Rc<RefCell<Option<Box<dyn Fn()>>>>,
+    on_close: Rc<RefCell<Option<Rc<dyn Fn()>>>>,
     on_context_command: Rc<RefCell<Option<Box<dyn Fn(ContextTarget, ContextCommand)>>>>,
     on_application_command: Rc<RefCell<Option<Box<dyn Fn(ApplicationCommand)>>>>,
     selection: Rc<RefCell<Vec<FileItem>>>,
@@ -911,7 +911,7 @@ impl FileView {
     }
 
     pub fn set_close_handler(&self, callback: impl Fn() + 'static) {
-        *self.on_close.borrow_mut() = Some(Box::new(callback));
+        *self.on_close.borrow_mut() = Some(Rc::new(callback));
     }
 
     pub fn mark_unavailable(&self, root: &Location) {
@@ -1812,18 +1812,23 @@ impl FileView {
                     || focused.is_ancestor(&self.widget)
             });
         self.reload_content();
-        let state = self.navigation.state.borrow();
-        if matches!(state.content, TabContent::Directory(_)) && self.model_store.borrow().is_some()
         {
-            self.rendered_generation
-                .set(Some(state.navigation_generation));
-            self.rendered_count.set(
-                state
-                    .directory
-                    .as_ref()
-                    .map_or(0, |snapshot| snapshot.entries.len()),
-            );
+            let state = self.navigation.state.borrow();
+            if matches!(state.content, TabContent::Directory(_))
+                && self.model_store.borrow().is_some()
+            {
+                self.rendered_generation
+                    .set(Some(state.navigation_generation));
+                self.rendered_count.set(
+                    state
+                        .directory
+                        .as_ref()
+                        .map_or(0, |snapshot| snapshot.entries.len()),
+                );
+            }
         }
+        // The remaining calls re-enter GTK signal handlers (child_focus emits
+        // selected-children-changed), which borrow this state mutably.
         self.reapply_cached_visible_metadata();
         if owned_focus {
             self.widget.child_focus(gtk::DirectionType::TabForward);
@@ -1852,7 +1857,11 @@ impl FileView {
                 let close = Button::with_label("Close");
                 let handler = self.on_close.clone();
                 close.connect_clicked(move |_| {
-                    if let Some(callback) = handler.borrow().as_ref() {
+                    // Cloned into a binding first: a scrutinee temporary would
+                    // keep the guard alive through the body, and the callback
+                    // re-enters `FileView::close`, which clears this handler.
+                    let callback = handler.borrow().clone();
+                    if let Some(callback) = callback {
                         callback();
                     }
                 });
@@ -5088,6 +5097,160 @@ mod tests {
         let view = FileView::new(Location::from_uri("file:///tmp").unwrap());
 
         assert_eq!(view.widget.margin_end(), 0);
+    }
+
+    /// `reload` restores keyboard focus, and GTK emits `selected-children-changed`
+    /// synchronously while doing so. The handler writes the selection back into
+    /// the navigation state, so a state guard left alive across the focus restore
+    /// aborts the process with "RefCell already borrowed".
+    #[gtk::test]
+    fn reload_restoring_focus_does_not_reborrow_navigation_state() {
+        use gtk::prelude::*;
+
+        fn find_flow_box(widget: &gtk::Widget) -> Option<gtk::FlowBox> {
+            if let Some(grid) = widget.downcast_ref::<gtk::FlowBox>() {
+                return Some(grid.clone());
+            }
+            let mut child = widget.first_child();
+            while let Some(next) = child {
+                if let Some(grid) = find_flow_box(&next) {
+                    return Some(grid);
+                }
+                child = next.next_sibling();
+            }
+            None
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        for index in 0..3 {
+            fs::write(directory.path().join(format!("item-{index}.txt")), "item").unwrap();
+        }
+        let view = FileView::new(Location::from_local_path(directory.path()));
+        let context = glib::MainContext::default();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let loaded = view
+                .navigation
+                .state
+                .borrow()
+                .directory
+                .as_ref()
+                .is_some_and(|snapshot| !snapshot.entries.is_empty());
+            if loaded {
+                break;
+            }
+            context.iteration(false);
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the directory never finished loading"
+            );
+        }
+        view.set_options(ViewOptions {
+            view_mode: ViewMode::IconGrid,
+            ..ViewOptions::default()
+        });
+
+        let window = gtk::Window::new();
+        window.set_child(Some(&view.widget));
+        window.present();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !view.widget.is_mapped() {
+            context.iteration(false);
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the view never mapped"
+            );
+        }
+
+        let grid = find_flow_box(view.widget.upcast_ref::<gtk::Widget>())
+            .expect("icon grid renders a FlowBox");
+        let first = grid.child_at_index(0).expect("the grid renders tiles");
+        first.grab_focus();
+        grid.select_child(&first);
+        let focused = gtk::prelude::GtkWindowExt::focus(&window)
+            .expect("the window keeps focus inside the presented view");
+        assert!(
+            focused == view.widget.clone().upcast::<gtk::Widget>()
+                || focused.is_ancestor(&view.widget),
+            "reload only restores focus that already sits inside the view"
+        );
+
+        // Any option change repaints through `reload`, the path that crashed
+        // when the navigation state guard outlived the focus restore.
+        view.set_options(ViewOptions {
+            view_mode: ViewMode::IconGrid,
+            show_hidden: true,
+            ..ViewOptions::default()
+        });
+        for _ in 0..10 {
+            context.iteration(false);
+        }
+
+        assert!(view.options().show_hidden, "the reload applied the options");
+        assert!(
+            find_flow_box(view.widget.upcast_ref::<gtk::Widget>()).is_some(),
+            "the reload repainted the icon grid"
+        );
+        assert_eq!(
+            view.navigation.state.borrow().selection_keys.len(),
+            1,
+            "the focus restore kept the selection the grid reported"
+        );
+        view.close();
+    }
+    /// The unavailable-location banner's Close button runs the close handler,
+    /// which in a window closes the tab page; that handler re-enters
+    /// `FileView::close`, and `close` clears the handler cell. Invoking the
+    /// callback under a guard on that cell aborted the process with
+    /// "RefCell already borrowed".
+    #[gtk::test]
+    fn unavailable_banner_close_survives_the_handler_reentering_close() {
+        use crate::core::navigation::{NavigationStatus, TabContent};
+        use gtk::prelude::*;
+
+        fn find_button(widget: &gtk::Widget, label: &str) -> Option<gtk::Button> {
+            if let Some(button) = widget.downcast_ref::<gtk::Button>() {
+                if button.label().as_deref() == Some(label) {
+                    return Some(button.clone());
+                }
+            }
+            let mut child = widget.first_child();
+            while let Some(next) = child {
+                if let Some(button) = find_button(&next, label) {
+                    return Some(button);
+                }
+                child = next.next_sibling();
+            }
+            None
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = Location::from_local_path(directory.path());
+        let view = FileView::new(root.clone());
+        {
+            let mut state = view.navigation.state.borrow_mut();
+            state.content = TabContent::Unavailable(root.clone());
+            state.status = NavigationStatus::Idle;
+        }
+        view.reload();
+        let close = find_button(view.widget.upcast_ref::<gtk::Widget>(), "Close")
+            .expect("the unavailable banner offers Close");
+
+        let closed = std::rc::Rc::new(std::cell::Cell::new(false));
+        let flag = closed.clone();
+        let handler_view = view.clone();
+        view.set_close_handler(move || {
+            flag.set(true);
+            handler_view.close();
+        });
+
+        close.emit_clicked();
+
+        assert!(closed.get(), "the banner ran the close handler");
+        assert!(
+            view.on_close.borrow().is_none(),
+            "close() finished clearing the handler the callback was invoked from"
+        );
     }
 }
 
