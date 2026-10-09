@@ -598,6 +598,11 @@ fn filesystem_space(path: &Path) -> Option<(u64, u64)> {
         .filter(|(total, _)| *total > 0)
 }
 
+/// How soon a monitor-driven refresh may follow the previous one, and how far
+/// that delay grows while a directory keeps changing.
+const MONITOR_REFRESH_BASE_MS: u64 = 100;
+const MONITOR_REFRESH_MAX_MS: u64 = 10_000;
+
 /// Produces the one availability snapshot used by the toolbar while retaining
 /// the displayed location as the Paste destination even when an item is
 /// selected.
@@ -646,6 +651,11 @@ pub struct FileView {
     >,
     visible_metadata_generation: Rc<std::cell::Cell<Option<u64>>>,
     monitor_refresh_pending: Rc<std::cell::Cell<bool>>,
+    /// Delay before the next monitor-driven refresh, doubled per consecutive
+    /// refresh so a directory that never stops changing cannot keep the view
+    /// cycling forever; a quiet interval resets it.
+    monitor_backoff_ms: Rc<std::cell::Cell<u64>>,
+    last_monitor_change: Rc<std::cell::Cell<std::time::Instant>>,
     controllers: Rc<RefCell<Vec<gtk::EventController>>>,
     stream_selection: Rc<RefCell<Option<Vec<String>>>>,
     /// Identity keys of the selection when a plain left click was pressed, so
@@ -766,6 +776,8 @@ impl FileView {
             pending_visible_metadata,
             visible_metadata_generation,
             monitor_refresh_pending: Default::default(),
+            monitor_backoff_ms: Rc::new(std::cell::Cell::new(MONITOR_REFRESH_BASE_MS)),
+            last_monitor_change: Rc::new(std::cell::Cell::new(std::time::Instant::now())),
             controllers: Default::default(),
             stream_selection: Default::default(),
             selection_click_keys: Default::default(),
@@ -1279,6 +1291,8 @@ impl FileView {
         }) {
             *self.directory_monitor.borrow_mut() = Some((location, monitor));
         }
+        // A different directory has its own churn; start reacting promptly again.
+        self.monitor_backoff_ms.set(MONITOR_REFRESH_BASE_MS);
     }
 
     /// Coalesces directory-monitor churn into one debounced refresh. A busy
@@ -1287,6 +1301,14 @@ impl FileView {
     /// the view over and over and never lets it settle, so a refresh requested
     /// during a listing is held back and re-armed once that listing completes.
     fn arm_monitor_refresh(&self) {
+        let now = std::time::Instant::now();
+        let quiet_for = now.duration_since(self.last_monitor_change.get());
+        self.last_monitor_change.set(now);
+        if quiet_for >= std::time::Duration::from_millis(self.monitor_backoff_ms.get()) {
+            // The directory stayed quiet for a whole cycle: whatever churns it
+            // has stopped, so react promptly again.
+            self.monitor_backoff_ms.set(MONITOR_REFRESH_BASE_MS);
+        }
         if self.monitor_refresh_pending.replace(true) {
             return;
         }
@@ -1297,8 +1319,9 @@ impl FileView {
     }
 
     fn schedule_monitor_refresh(&self) {
+        let delay = std::time::Duration::from_millis(self.monitor_backoff_ms.get());
         let view = self.clone();
-        glib::timeout_add_local_once(std::time::Duration::from_millis(100), move || {
+        glib::timeout_add_local_once(delay, move || {
             view.run_monitor_refresh();
         });
     }
@@ -1318,6 +1341,8 @@ impl FileView {
             self.monitor_refresh_pending.set(true);
             return;
         }
+        self.monitor_backoff_ms
+            .set((self.monitor_backoff_ms.get() * 2).min(MONITOR_REFRESH_MAX_MS));
         self.refresh();
     }
 
@@ -5755,7 +5780,52 @@ mod tests {
         );
         view.close();
     }
+
+    /// A directory that never stops changing must not refresh at a constant
+    /// cadence forever: each monitor-driven refresh doubles the wait for the
+    /// next, and a quiet interval restores the prompt one.
+    #[gtk::test]
+    fn consecutive_monitor_refreshes_back_off_and_quiet_resets() {
+        use crate::infrastructure::mock_provider::{MockConfig, MockProvider};
+
+        let context = glib::MainContext::default();
+        let root = Location::from_uri("smb://fixture/share").unwrap();
+        let provider = std::rc::Rc::new(MockProvider::new(context.clone(), MockConfig::default()));
+        let view = FileView::new_with_repository(root.clone(), provider.clone());
+        provider.advance(1);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while view.has_pending_navigation() {
+            context.iteration(false);
+            assert!(std::time::Instant::now() < deadline);
+        }
+
+        for expected in [200u64, 400] {
+            view.run_monitor_refresh();
+            assert_eq!(
+                view.monitor_backoff_ms.get(),
+                expected,
+                "each executed refresh doubles the wait for the next"
+            );
+            provider.advance(1);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            while view.has_pending_navigation() {
+                context.iteration(false);
+                assert!(std::time::Instant::now() < deadline);
+            }
+        }
+
+        view.last_monitor_change
+            .set(std::time::Instant::now() - std::time::Duration::from_secs(1));
+        view.arm_monitor_refresh();
+        assert_eq!(
+            view.monitor_backoff_ms.get(),
+            100,
+            "a quiet interval restores the prompt reaction"
+        );
+        view.close();
+    }
 }
+
 fn file_icon(item: &FileItem) -> Image {
     if item.is_dir() {
         let icon_name = match item.name() {
