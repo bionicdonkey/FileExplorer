@@ -12,6 +12,12 @@ fn main() {
     if let Some(code) = zorin_explorer::core::elevated_operations::run_from_args(&args) {
         std::process::exit(code);
     }
+    // A stale binary from an older source tree behaves differently enough to
+    // mislead bug reports, so builds identify themselves on request.
+    if args.iter().any(|arg| arg == "--version" || arg == "-V") {
+        println!("zorin-explorer {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
 
     let app = Application::builder()
         .application_id("com.zorin.Explorer")
