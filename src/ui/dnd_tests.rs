@@ -177,6 +177,12 @@ impl X11 {
             pid
         }
     }
+    /// Every window in the tree carrying this WM_NAME.
+    ///
+    /// A reparenting window manager wraps a decorated client in a frame window
+    /// that copies the client's title, so scanning only the root's children can
+    /// match the frame -- or match frame and client at once -- and the frame
+    /// reports the window manager's pid rather than the test's.
     fn windows_named(&self, title: &str) -> Vec<X11Window> {
         unsafe {
             let root: unsafe extern "C" fn(*mut c_void) -> c_ulong =
@@ -192,56 +198,101 @@ impl X11 {
             let fetch: unsafe extern "C" fn(*mut c_void, c_ulong, *mut *mut c_char) -> c_int =
                 self.symbol("XFetchName");
             let free: unsafe extern "C" fn(*mut c_void) -> c_int = self.symbol("XFree");
-            let (mut r, mut parent, mut count) = (0, 0, 0);
-            let mut children = std::ptr::null_mut();
-            query(
-                self.display,
-                root(self.display),
-                &mut r,
-                &mut parent,
-                &mut children,
-                &mut count,
-            );
             let mut found = Vec::new();
-            for i in 0..count as usize {
-                let window = *children.add(i);
-                let mut name = std::ptr::null_mut();
-                if fetch(self.display, window, &mut name) != 0 && !name.is_null() {
-                    if std::ffi::CStr::from_ptr(name).to_string_lossy() == title {
-                        found.push(X11Window {
-                            id: window,
-                            map_state: self.map_state(window),
-                            pid: self.pid(window),
-                        });
+            let mut pending = vec![root(self.display)];
+            while let Some(window) = pending.pop() {
+                let (mut r, mut parent, mut count) = (0, 0, 0);
+                let mut children = std::ptr::null_mut();
+                query(
+                    self.display,
+                    window,
+                    &mut r,
+                    &mut parent,
+                    &mut children,
+                    &mut count,
+                );
+                for i in 0..count as usize {
+                    let child = *children.add(i);
+                    let mut name = std::ptr::null_mut();
+                    if fetch(self.display, child, &mut name) != 0 && !name.is_null() {
+                        if std::ffi::CStr::from_ptr(name).to_string_lossy() == title {
+                            found.push(X11Window {
+                                id: child,
+                                map_state: self.map_state(child),
+                                pid: self.pid(child),
+                            });
+                        }
+                        free(name.cast());
                     }
-                    free(name.cast());
+                    pending.push(child);
                 }
-            }
-            if !children.is_null() {
-                free(children.cast());
+                if !children.is_null() {
+                    free(children.cast());
+                }
             }
             found
         }
     }
     fn window(&self, title: &str, expected_pid: Option<u32>) -> Option<c_ulong> {
-        let windows = self.windows_named(title);
+        let owned: Vec<_> = self
+            .windows_named(title)
+            .into_iter()
+            .filter(|window| match (expected_pid, window.pid) {
+                (Some(expected), Some(actual)) => actual == expected,
+                _ => true,
+            })
+            .collect();
         assert!(
-            windows.len() <= 1,
-            "X11 root scan found multiple toplevels titled {title:?}: {windows:?}; window selection is ambiguous"
+            owned.len() <= 1,
+            "X11 scan found several windows titled {title:?} owned by {expected_pid:?}: {owned:?}; window selection is ambiguous"
         );
-        let window = windows.into_iter().next()?;
+        let window = owned.into_iter().next()?;
         if let Some(map_state) = window.map_state {
             if map_state != 2 {
                 return None;
             }
         }
-        if let (Some(expected), Some(actual)) = (expected_pid, window.pid) {
-            assert_eq!(
-                actual, expected,
-                "X11 title match {title:?} had _NET_WM_PID {actual}, expected {expected}"
-            );
-        }
         Some(window.id)
+    }
+
+    /// The ancestor of `window` that is a direct child of the root: the window a
+    /// window manager positions in root coordinates, which is the one the
+    /// test's synthetic pointer events are aimed at.
+    fn root_level(&self, window: c_ulong) -> c_ulong {
+        unsafe {
+            let root: unsafe extern "C" fn(*mut c_void) -> c_ulong =
+                self.symbol("XDefaultRootWindow");
+            let query: unsafe extern "C" fn(
+                *mut c_void,
+                c_ulong,
+                *mut c_ulong,
+                *mut c_ulong,
+                *mut *mut c_ulong,
+                *mut c_uint,
+            ) -> c_int = self.symbol("XQueryTree");
+            let free: unsafe extern "C" fn(*mut c_void) -> c_int = self.symbol("XFree");
+            let root = root(self.display);
+            let mut current = window;
+            loop {
+                let (mut r, mut parent, mut count) = (0, 0, 0);
+                let mut children = std::ptr::null_mut();
+                query(
+                    self.display,
+                    current,
+                    &mut r,
+                    &mut parent,
+                    &mut children,
+                    &mut count,
+                );
+                if !children.is_null() {
+                    free(children.cast());
+                }
+                if parent == root || parent == 0 {
+                    return current;
+                }
+                current = parent;
+            }
+        }
     }
     fn place(&self, window: c_ulong, x: i32) {
         unsafe {
@@ -253,7 +304,7 @@ impl X11 {
                 c_uint,
                 c_uint,
             ) -> c_int = self.symbol("XMoveResizeWindow");
-            place(self.display, window, x, 100, 300, 300);
+            place(self.display, self.root_level(window), x, 100, 300, 300);
         }
         self.flush();
     }
@@ -303,6 +354,9 @@ fn external_source(root: &Path) {
         .default_width(300)
         .default_height(300)
         .build();
+    // Undecorated so a reparenting window manager leaves the window where the
+    // test places it; a frame would also copy this title under another pid.
+    window.set_decorated(false);
     let label = gtk::Label::new(Some("External MOVE source"));
     window.set_child(Some(&label));
     let source = gtk::DragSource::new();
@@ -398,6 +452,7 @@ fn slice3_external_move_waits_for_terminal_ack_over_real_x11() {
             .default_width(300)
             .default_height(300)
             .build();
+        window.set_decorated(false);
         window.set_child(Some(&view.widget));
         window.present();
         let pending = Rc::new(RefCell::new(None));
