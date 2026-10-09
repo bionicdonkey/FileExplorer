@@ -739,14 +739,34 @@ impl ExplorerWindow {
         });
         window.add_controller(shortcuts);
 
+        // The window outlives its own destruction: closures keep it referenced
+        // after the application quits, so `destroy` never runs on the ordinary
+        // close path and a session saved only there is never written. Save where
+        // closing is actually decided, and again at shutdown as a backstop.
+        let session_save = {
+            let data = tabs_data.clone();
+            let prefs = application_preferences.clone();
+            Rc::new(move || {
+                let locations = data
+                    .borrow()
+                    .iter()
+                    .map(|tab| tab.view.current_location())
+                    .collect::<Vec<_>>();
+                let _ = prefs.borrow().save_session(&locations);
+            })
+        };
         let close_operations = operations.clone();
+        let close_session_save = session_save.clone();
         window.connect_close_request(move |window| {
             if close_operations.active_count() == 0 {
+                close_session_save();
                 return glib::Propagation::Proceed;
             }
             show_close_operations_dialog(window, close_operations.clone());
             glib::Propagation::Stop
         });
+        let shutdown_session_save = session_save.clone();
+        app.connect_shutdown(move |_| shutdown_session_save());
 
         let new_data = tabs_data.clone();
         let new_tabs = tabs.view.clone();
@@ -785,18 +805,13 @@ impl ExplorerWindow {
             new_tabs.set_selected_page(&page);
         });
 
-        let session_preferences = application_preferences.clone();
+        let destroy_session_save = session_save.clone();
         let session_data = tabs_data.clone();
         window.connect_destroy(move |_| {
             for tab in session_data.borrow().iter() {
                 tab.view.close();
             }
-            let locations = session_data
-                .borrow()
-                .iter()
-                .map(|tab| tab.view.current_location())
-                .collect::<Vec<_>>();
-            let _ = session_preferences.borrow().save_session(&locations);
+            destroy_session_save();
         });
 
         let close_data = tabs_data.clone();
