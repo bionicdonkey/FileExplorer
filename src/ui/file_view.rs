@@ -1275,26 +1275,50 @@ impl FileView {
         }
         let view = self.clone();
         if let Some(monitor) = self.navigation.watch(&location, move || {
-            if view.monitor_refresh_pending.replace(true) {
-                return;
-            }
-            invalidate_thumbnails();
-            view.visible_metadata.borrow_mut().invalidate();
-            view.visible_metadata_generation.set(None);
-            let view = view.clone();
-            glib::timeout_add_local_once(std::time::Duration::from_millis(100), move || {
-                view.monitor_refresh_pending.set(false);
-                if !matches!(
-                    view.navigation.state.borrow().status,
-                    NavigationStatus::Closed
-                ) && !view.is_showing_search_results()
-                {
-                    view.refresh();
-                }
-            });
+            view.arm_monitor_refresh();
         }) {
             *self.directory_monitor.borrow_mut() = Some((location, monitor));
         }
+    }
+
+    /// Coalesces directory-monitor churn into one debounced refresh. A busy
+    /// directory such as `/tmp` changes continuously; starting a new listing
+    /// while the previous one is still streaming thousands of entries rebuilds
+    /// the view over and over and never lets it settle, so a refresh requested
+    /// during a listing is held back and re-armed once that listing completes.
+    fn arm_monitor_refresh(&self) {
+        if self.monitor_refresh_pending.replace(true) {
+            return;
+        }
+        invalidate_thumbnails();
+        self.visible_metadata.borrow_mut().invalidate();
+        self.visible_metadata_generation.set(None);
+        self.schedule_monitor_refresh();
+    }
+
+    fn schedule_monitor_refresh(&self) {
+        let view = self.clone();
+        glib::timeout_add_local_once(std::time::Duration::from_millis(100), move || {
+            view.run_monitor_refresh();
+        });
+    }
+
+    fn run_monitor_refresh(&self) {
+        self.monitor_refresh_pending.set(false);
+        if matches!(
+            self.navigation.state.borrow().status,
+            NavigationStatus::Closed
+        ) || self.is_showing_search_results()
+        {
+            return;
+        }
+        if self.has_pending_navigation() {
+            // The listing in flight already predates these changes; refresh
+            // once it completes instead of starting a competing one.
+            self.monitor_refresh_pending.set(true);
+            return;
+        }
+        self.refresh();
     }
 
     fn show_error(&self) {
@@ -2580,6 +2604,11 @@ impl FileView {
         }
         self.metadata_target.flush();
         self.flush_visible_metadata();
+        if self.monitor_refresh_pending.get() {
+            // Changes arrived while this listing was streaming; one follow-up
+            // refresh, not one per change.
+            self.schedule_monitor_refresh();
+        }
     }
 
     fn schedule_directory_page_append(&self, generation: u64, model: &SortListModel) {
@@ -5678,8 +5707,55 @@ mod tests {
         );
         view.close();
     }
-}
+    /// A directory that keeps changing must not start a second listing on top
+    /// of the one still streaming. `/tmp`-scale directories change continuously,
+    /// and refreshing over an in-flight listing rebuilds the view forever
+    /// instead of ever rendering it.
+    #[gtk::test]
+    fn monitor_changes_wait_for_an_in_flight_listing() {
+        use crate::infrastructure::mock_provider::{MockConfig, MockProvider};
 
+        let context = glib::MainContext::default();
+        let root = Location::from_uri("smb://fixture/share").unwrap();
+        let provider = std::rc::Rc::new(MockProvider::new(context.clone(), MockConfig::default()));
+        let view = FileView::new_with_repository(root.clone(), provider.clone());
+        // The constructor starts the first listing and the mock completes
+        // nothing until it is advanced, so a listing is in flight.
+        assert!(
+            view.has_pending_navigation(),
+            "the initial listing must still be in flight"
+        );
+
+        view.arm_monitor_refresh();
+        view.run_monitor_refresh();
+        assert!(
+            view.monitor_refresh_pending.get(),
+            "a change during a listing is held back, not refreshed over it"
+        );
+
+        provider.advance(1);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while view.has_pending_navigation() {
+            context.iteration(false);
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the listing never completed"
+            );
+        }
+        assert!(
+            view.monitor_refresh_pending.get(),
+            "completing a listing must re-arm the held-back refresh"
+        );
+
+        view.run_monitor_refresh();
+        assert!(!view.monitor_refresh_pending.get());
+        assert!(
+            view.has_pending_navigation(),
+            "the held-back refresh started exactly one listing"
+        );
+        view.close();
+    }
+}
 fn file_icon(item: &FileItem) -> Image {
     if item.is_dir() {
         let icon_name = match item.name() {
