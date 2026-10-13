@@ -11,6 +11,13 @@
   <!-- Keep in step with `version` in Cargo.toml: the About page reads the crate
        version, and the CI release job refuses a tag that disagrees with it. -->
   <releases>
+    <release version="0.3.1" date="2026-10-13">
+      <description>
+        <p>A large folder such as /tmp no longer freezes the window. Rows the view had bound were evicting each other from a metadata cache that was too small, and each eviction re-asked for the same files, spinning the main loop at full CPU.</p>
+        <p>File icons match their file type again in small folders and in the icon grid; they had stayed on the generic icon because resolved types never reached those rows.</p>
+        <p>A refresh of a folder already on screen updates the list or grid in place instead of rebuilding it, so scroll position, focus and selection survive a busy directory.</p>
+      </description>
+    </release>
     <release version="0.3.0" date="2026-10-04">
       <description>
         <p>Archives open in the window. Activating a zip, tar, 7z or rar browses it like a folder, with the archive itself in the path, instead of handing it to another file manager. Zip-based documents such as .docx and .epub still open in the application that owns them.</p>

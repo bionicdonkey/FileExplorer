@@ -7,8 +7,8 @@ use glib::prelude::ToValue;
 use gtk::prelude::*;
 use gtk::{
     Box as GtkBox, Button, ColumnView, ColumnViewColumn, CustomFilter, CustomSorter,
-    FilterListModel, FlowBox, GestureClick, Image, Label, MultiSelection, Orientation, Popover,
-    ScrolledWindow, Separator, SignalListItemFactory, SortListModel,
+    FilterListModel, FlowBox, FlowBoxChild, GestureClick, Image, Label, MultiSelection,
+    Orientation, Popover, ScrolledWindow, Separator, SignalListItemFactory, SortListModel,
 };
 
 use crate::application::commands::{
@@ -231,7 +231,7 @@ impl VisibleMetadataTarget {
         let generation = self.prepare_generation();
         let cached = self.cache.borrow_mut().get(item.location());
         if let Some(VisibleMetadataCacheEntry::Resolved(metadata)) = cached.as_ref() {
-            apply_thumbnail(image, &item.with_visible_metadata(metadata), thumbnails);
+            apply_resolved_item(image, &item.with_visible_metadata(metadata), thumbnails);
             return;
         }
 
@@ -292,7 +292,7 @@ impl VisibleMetadataTarget {
             let Some(image) = waiter.image.upgrade() else {
                 continue;
             };
-            apply_thumbnail(
+            apply_resolved_item(
                 &image,
                 &waiter.item.with_visible_metadata(metadata),
                 waiter.thumbnails,
@@ -491,6 +491,7 @@ impl VisibleMetadataTarget {
             return Default::default();
         };
         let mut applied = std::collections::HashSet::new();
+        let mut updates = Vec::new();
         for (location, entry) in metadata {
             let Some(&index) = row_index.get(location) else {
                 continue;
@@ -504,15 +505,13 @@ impl VisibleMetadataTarget {
             if item.location() != location {
                 continue;
             }
-            store.splice(
+            updates.push((
                 index,
-                1,
-                &[glib::BoxedAnyObject::new(ListRow::File(
-                    item.with_visible_metadata(entry),
-                ))],
-            );
+                glib::BoxedAnyObject::new(ListRow::File(item.with_visible_metadata(entry))),
+            ));
             applied.insert(location.clone());
         }
+        splice_updated_rows(store, updates);
         applied
     }
 }
@@ -619,6 +618,91 @@ fn command_availability_for_target(
     CommandAvailability::for_selection(&selection, Some(destination))
 }
 
+/// Replaces rows of `store` in place, one splice per cluster of nearby rows
+/// instead of one per row. Every splice makes the sort and filter models above
+/// the store reprocess, which on a large directory costs milliseconds each; the
+/// rows a refresh touches are mostly neighbours, so a few splices cover them.
+/// Rows between two updates are re-inserted unchanged.
+fn splice_updated_rows(store: &gio::ListStore, mut updates: Vec<(u32, glib::BoxedAnyObject)>) {
+    const MAX_GAP: u32 = 8;
+    updates.sort_unstable_by_key(|(index, _)| *index);
+    let mut clusters: Vec<Vec<(u32, glib::BoxedAnyObject)>> = Vec::new();
+    for update in updates {
+        match clusters.last_mut() {
+            Some(cluster)
+                if cluster
+                    .last()
+                    .is_some_and(|(last, _)| update.0 - *last <= MAX_GAP + 1) =>
+            {
+                cluster.push(update)
+            }
+            _ => clusters.push(vec![update]),
+        }
+    }
+    for cluster in clusters.into_iter().rev() {
+        let start = cluster[0].0;
+        let end = cluster[cluster.len() - 1].0;
+        let mut updated: std::collections::HashMap<u32, glib::BoxedAnyObject> =
+            cluster.into_iter().collect();
+        let mut rows = Vec::with_capacity((end - start + 1) as usize);
+        for index in start..=end {
+            match updated.remove(&index) {
+                Some(row) => rows.push(row),
+                None => match store.item(index).and_downcast::<glib::BoxedAnyObject>() {
+                    Some(row) => rows.push(row),
+                    None => return,
+                },
+            }
+        }
+        store.splice(start, end - start + 1, &rows);
+    }
+}
+
+/// How many separate row changes an in-place refresh applies before a rebuild
+/// is cheaper, before allowing for the size of the directory.
+const MAX_IN_PLACE_SPLICES: usize = 8;
+
+/// A rendered list pane: the widget on screen and the backing store a refresh
+/// can splice in place instead of rebuilding the widget.
+#[derive(Clone)]
+struct ListPane {
+    store: gio::ListStore,
+    recycled: bool,
+}
+
+/// A rendered `FlowBox` pane, with the live item vector its closures index into
+/// and the options its tiles were built with.
+/// The grid is held weakly: its closures reach back into the view, so a strong
+/// handle here would keep the whole view alive forever.
+#[derive(Clone)]
+struct FlowPane {
+    grid: glib::WeakRef<FlowBox>,
+    items: Rc<RefCell<Vec<FileItem>>>,
+    options: ViewOptions,
+}
+
+#[derive(Clone)]
+enum Pane {
+    List(ListPane),
+    Flow(FlowPane),
+}
+
+#[derive(Clone)]
+enum RenderedPanes {
+    Single(Pane),
+    Hybrid(Option<Pane>, Option<Pane>),
+}
+
+/// What is on screen now: enough to decide whether a refresh can update the
+/// existing widgets in place rather than tearing them down.
+#[derive(Clone)]
+struct RenderedView {
+    location: Location,
+    options: ViewOptions,
+    search: bool,
+    panes: RenderedPanes,
+}
+
 /// What the window's status bar shows about the focused tab: whether its
 /// listing is still streaming, and how many folders and files the directory
 /// it is showing holds.
@@ -646,6 +730,11 @@ pub struct FileView {
     selected_target: Rc<RefCell<Option<ContextTarget>>>,
     on_command_availability_changed: Rc<RefCell<Option<Box<dyn Fn(CommandAvailability)>>>>,
     on_status: Rc<RefCell<Option<Box<dyn Fn(ViewStatus)>>>>,
+    rendered_view: Rc<RefCell<Option<RenderedView>>>,
+    /// Set when a monitor event invalidates cached thumbnails and content
+    /// types: rows an in-place refresh keeps must re-request theirs, since
+    /// only freshly bound widgets ask on their own.
+    metadata_stale: Rc<std::cell::Cell<bool>>,
     pending_cut: Rc<RefCell<Vec<Location>>>,
     is_quick_access_location: Rc<RefCell<Option<Rc<dyn Fn(&Location) -> bool>>>>,
     model_store: Rc<RefCell<Option<gio::ListStore>>>,
@@ -653,6 +742,10 @@ pub struct FileView {
     model_row_index: Rc<RefCell<std::collections::HashMap<Location, u32>>>,
     folder_row_index: Rc<RefCell<std::collections::HashMap<Location, u32>>>,
     rendered_generation: Rc<std::cell::Cell<Option<u64>>>,
+    /// The list on screen is a plain store built in one go, not a paged
+    /// stream: its rows take metadata, but the stream machinery must not
+    /// treat it as a partially appended model.
+    plain_list: Rc<std::cell::Cell<bool>>,
     rendered_count: Rc<std::cell::Cell<usize>>,
     stream_append_waiter: Rc<RefCell<Option<StreamAppendWaiter>>>,
     stream_append_model: Rc<RefCell<Option<SortListModel>>>,
@@ -782,6 +875,7 @@ impl FileView {
             model_row_index,
             folder_row_index,
             rendered_generation: Default::default(),
+            plain_list: Default::default(),
             rendered_count: Default::default(),
             stream_append_waiter: Default::default(),
             stream_append_model,
@@ -796,6 +890,8 @@ impl FileView {
             selection_click_keys: Default::default(),
             syncing_selection: Default::default(),
             on_status: Default::default(),
+            rendered_view: Default::default(),
+            metadata_stale: Default::default(),
             visible_metadata,
             metadata_target,
         };
@@ -907,6 +1003,9 @@ impl FileView {
     }
 
     pub fn navigate(&self, location: Location) {
+        // An explicit request is a fresh render; only refreshes of the folder
+        // already shown may splice into the widgets on screen.
+        *self.rendered_view.borrow_mut() = None;
         self.clear_search_results();
         self.cancel_stream_append_waiter();
         self.metadata_target.cancel_metadata_sort_waiter();
@@ -1095,7 +1194,9 @@ impl FileView {
     /// ListModel row. Its rendered file tiles are therefore the visible-range
     /// boundary for metadata needed to promote a deferred thumbnail.
     fn request_flowbox_thumbnail_metadata(&self, image: &Image, item: &FileItem, thumbnails: bool) {
-        if !thumbnails || item.is_dir() || item.content_type_resolved() {
+        // The listing carries no content type, so the icon needs this answer
+        // whether or not thumbnails are enabled.
+        if item.is_dir() || item.content_type_resolved() {
             return;
         }
         self.metadata_target
@@ -1255,6 +1356,7 @@ impl FileView {
             return Default::default();
         };
         let mut applied = std::collections::HashSet::new();
+        let mut updates = Vec::new();
         for (location, entry) in metadata {
             let Some(&index) = row_index.get(location) else {
                 continue;
@@ -1270,15 +1372,13 @@ impl FileView {
             if item.location() != location {
                 continue;
             }
-            store.splice(
+            updates.push((
                 index,
-                1,
-                &[glib::BoxedAnyObject::new(ListRow::File(
-                    item.with_visible_metadata(entry),
-                ))],
-            );
+                glib::BoxedAnyObject::new(ListRow::File(item.with_visible_metadata(entry))),
+            ));
             applied.insert(location.clone());
         }
+        splice_updated_rows(store, updates);
         applied
     }
 
@@ -1330,6 +1430,7 @@ impl FileView {
         invalidate_thumbnails();
         self.visible_metadata.borrow_mut().invalidate();
         self.visible_metadata_generation.set(None);
+        self.metadata_stale.set(true);
         self.schedule_monitor_refresh();
     }
 
@@ -1923,6 +2024,7 @@ impl FileView {
 
     pub fn refresh(&self) {
         invalidate_thumbnails();
+        self.metadata_stale.set(true);
         self.clear_search_results();
         self.cancel_stream_append_waiter();
         self.metadata_target.cancel_metadata_sort_waiter();
@@ -1995,6 +2097,7 @@ impl FileView {
         self.metadata_target.cancel_requests();
         self.stream_append_model.borrow_mut().take();
         self.model_store.borrow_mut().take();
+        self.plain_list.set(false);
         self.prepare_visible_metadata_generation();
         self.folder_store.borrow_mut().take();
         self.model_row_index.borrow_mut().clear();
@@ -2014,6 +2117,7 @@ impl FileView {
             let state = self.navigation.state.borrow();
             if matches!(state.content, TabContent::Directory(_))
                 && self.model_store.borrow().is_some()
+                && !self.plain_list.get()
             {
                 self.rendered_generation
                     .set(Some(state.navigation_generation));
@@ -2066,10 +2170,12 @@ impl FileView {
                 });
                 content.append(&close);
                 self.widget.set_child(Some(&content));
+                *self.rendered_view.borrow_mut() = None;
                 return;
             }
             TabContent::SectionOverview { section, .. } => {
                 self.render_section_overview(&section);
+                *self.rendered_view.borrow_mut() = None;
                 self.show_error();
                 return;
             }
@@ -2219,22 +2325,358 @@ impl FileView {
                 "This folder is empty"
             };
             self.widget.set_child(Some(&Label::new(Some(message))));
+            *self.rendered_view.borrow_mut() = None;
             return;
         }
+        let location = self.navigation.state.borrow().location.clone();
+        let search = self.is_showing_search_results();
+        if let Some(rendered) = self.rendered_view.borrow().clone() {
+            if rendered.location == location
+                && rendered.options == *options
+                && rendered.search == search
+                && self.apply_in_place(&rendered.panes, &items, options)
+            {
+                // The widgets on screen absorbed the new listing; rebuilding
+                // them would flash an empty view and drop scroll and focus.
+                self.metadata_stale.set(false);
+                let plain = |pane: &Pane| matches!(pane, Pane::List(list) if !list.recycled);
+                self.plain_list.set(match &rendered.panes {
+                    RenderedPanes::Single(pane) => plain(pane),
+                    RenderedPanes::Hybrid(_, files) => files.as_ref().is_some_and(plain),
+                });
+                return;
+            }
+        }
+        // Fresh widgets request their own thumbnails and content types.
+        self.metadata_stale.set(false);
+        let recycled = self.use_recycled_model(items.len());
         match options.view_mode {
-            ViewMode::DetailedList | ViewMode::CompactList => self
-                .widget
-                .set_child(Some(&self.column_view_for(&items, options))),
-            ViewMode::IconGrid if self.use_recycled_model(items.len()) => self
-                .widget
-                .set_child(Some(&self.recycled_grid(&items, options, true, true))),
-            ViewMode::IconGrid => self
-                .widget
-                .set_child(Some(&self.grid_view(&items, options))),
-            ViewMode::Hybrid => self
-                .widget
-                .set_child(Some(&self.hybrid_view(&items, options))),
+            ViewMode::DetailedList | ViewMode::CompactList => {
+                let view = self.column_view_for(&items, options);
+                self.remember_rendered(RenderedView {
+                    location,
+                    options: options.clone(),
+                    search,
+                    panes: RenderedPanes::Single(self.list_pane(recycled)),
+                });
+                self.widget.set_child(Some(&view));
+            }
+            ViewMode::IconGrid if recycled => {
+                let grid = self.recycled_grid(&items, options, true, true);
+                self.remember_rendered(RenderedView {
+                    location,
+                    options: options.clone(),
+                    search,
+                    panes: RenderedPanes::Single(self.list_pane(true)),
+                });
+                self.widget.set_child(Some(&grid));
+            }
+            ViewMode::IconGrid => {
+                let (grid, pane) = self.grid_view(&items, options);
+                self.remember_rendered(RenderedView {
+                    location,
+                    options: options.clone(),
+                    search,
+                    panes: RenderedPanes::Single(Pane::Flow(pane)),
+                });
+                self.widget.set_child(Some(&grid));
+            }
+            ViewMode::Hybrid => {
+                let (root, panes) = self.hybrid_view(&items, options);
+                self.remember_rendered(RenderedView {
+                    location,
+                    options: options.clone(),
+                    search,
+                    panes,
+                });
+                self.widget.set_child(Some(&root));
+            }
         };
+    }
+
+    fn remember_rendered(&self, rendered: RenderedView) {
+        *self.rendered_view.borrow_mut() = Some(rendered);
+    }
+
+    fn list_pane(&self, recycled: bool) -> Pane {
+        let store = self
+            .model_store
+            .borrow()
+            .clone()
+            .expect("a list render stores its backing model");
+        Pane::List(ListPane { store, recycled })
+    }
+
+    /// Splices a fresh listing into the widgets already on screen. Returns
+    /// false when the change is structural -- grouped rows, a mode flip, a
+    /// reordered grid -- and the caller must rebuild instead.
+    fn apply_in_place(
+        &self,
+        panes: &RenderedPanes,
+        items: &[FileItem],
+        options: &ViewOptions,
+    ) -> bool {
+        match panes {
+            RenderedPanes::Single(Pane::List(pane)) => {
+                pane.recycled == self.use_recycled_model(items.len())
+                    && self.diff_list(pane, items, options, false)
+            }
+            RenderedPanes::Single(Pane::Flow(pane)) => {
+                !self.use_recycled_model(items.len()) && self.diff_flow(pane, items)
+            }
+            RenderedPanes::Hybrid(folders, files) => {
+                let folder_items: Vec<_> =
+                    items.iter().filter(|item| item.is_dir()).cloned().collect();
+                let file_items: Vec<_> = items
+                    .iter()
+                    .filter(|item| !item.is_dir())
+                    .cloned()
+                    .collect();
+                let recycled = self.use_recycled_model(items.len());
+                let folders_ok = match (folders, folder_items.is_empty()) {
+                    (None, true) => true,
+                    (Some(Pane::Flow(pane)), false) => {
+                        !recycled && self.diff_flow(pane, &folder_items)
+                    }
+                    (Some(Pane::List(pane)), false) => {
+                        pane.recycled == recycled
+                            && self.diff_list(pane, &folder_items, options, true)
+                    }
+                    _ => false,
+                };
+                let file_options = ViewOptions {
+                    view_mode: ViewMode::DetailedList,
+                    folders_first: false,
+                    ..options.clone()
+                };
+                let files_ok = match (files, file_items.is_empty()) {
+                    (None, true) => true,
+                    (Some(Pane::List(pane)), false) => {
+                        pane.recycled == self.use_recycled_model(file_items.len())
+                            && self.diff_list(pane, &file_items, &file_options, false)
+                    }
+                    _ => false,
+                };
+                folders_ok && files_ok
+            }
+        }
+    }
+
+    fn diff_list(
+        &self,
+        pane: &ListPane,
+        items: &[FileItem],
+        options: &ViewOptions,
+        folder_pane: bool,
+    ) -> bool {
+        if options.group_field != GroupField::None {
+            return false;
+        }
+        let store = &pane.store;
+        let mut current: std::collections::HashMap<String, (u32, FileItem)> =
+            std::collections::HashMap::new();
+        for index in 0..store.n_items() {
+            let Some(object) = store.item(index).and_downcast::<glib::BoxedAnyObject>() else {
+                return false;
+            };
+            let row = object.borrow::<ListRow>();
+            match &*row {
+                ListRow::File(item) => {
+                    current.insert(item.identity_key().to_owned(), (index, item.clone()));
+                }
+                ListRow::Group(_) => return false,
+            }
+        }
+        let new_keys: std::collections::HashSet<&str> =
+            items.iter().map(|item| item.identity_key()).collect();
+        if new_keys.len() != items.len() {
+            return false;
+        }
+        let mut removals: Vec<u32> = current
+            .values()
+            .filter(|(_, item)| !new_keys.contains(item.identity_key()))
+            .map(|(index, _)| *index)
+            .collect();
+        removals.sort_unstable();
+        // Contiguous removals are one splice. Every separate splice makes the
+        // sort and filter models above the store reprocess, which on a large
+        // directory costs far more than rebuilding once.
+        let mut runs: Vec<(u32, u32)> = Vec::new();
+        for index in removals {
+            match runs.last_mut() {
+                Some((start, len)) if *start + *len == index => *len += 1,
+                _ => runs.push((index, 1)),
+            }
+        }
+        let changed: Vec<&FileItem> = items
+            .iter()
+            .filter(|item| {
+                current.get(item.identity_key()).is_some_and(|(_, old)| {
+                    old.size() != item.size()
+                        || old.modified() != item.modified()
+                        || old.name() != item.name()
+                })
+            })
+            .collect();
+        let appended: Vec<glib::BoxedAnyObject> = items
+            .iter()
+            .filter(|item| !current.contains_key(item.identity_key()))
+            .map(|item| glib::BoxedAnyObject::new(ListRow::File((*item).clone())))
+            .collect();
+        let splices = runs.len() + changed.len() + usize::from(!appended.is_empty());
+        if splices > MAX_IN_PLACE_SPLICES + store.n_items() as usize / 64 {
+            return false;
+        }
+        for (start, len) in runs.into_iter().rev() {
+            store.splice(start, len, &[] as &[glib::BoxedAnyObject]);
+        }
+        if !changed.is_empty() {
+            let mut positions: std::collections::HashMap<String, u32> =
+                std::collections::HashMap::new();
+            for index in 0..store.n_items() {
+                if let Some(object) = store.item(index).and_downcast::<glib::BoxedAnyObject>() {
+                    if let ListRow::File(item) = &*object.borrow::<ListRow>() {
+                        positions.insert(item.identity_key().to_owned(), index);
+                    }
+                }
+            }
+            let updates = changed
+                .into_iter()
+                .filter_map(|item| {
+                    positions.get(item.identity_key()).map(|&index| {
+                        (
+                            index,
+                            glib::BoxedAnyObject::new(ListRow::File(item.clone())),
+                        )
+                    })
+                })
+                .collect();
+            splice_updated_rows(store, updates);
+        }
+        if !appended.is_empty() {
+            store.splice(store.n_items(), 0, &appended);
+        }
+        // The backing store is whole again; repoint the stream and metadata
+        // bookkeeping at it, wherever the pane lives.
+        let mut row_index = if folder_pane {
+            *self.folder_store.borrow_mut() = Some(store.clone());
+            self.folder_row_index.borrow_mut()
+        } else {
+            *self.model_store.borrow_mut() = Some(store.clone());
+            self.model_row_index.borrow_mut()
+        };
+        row_index.clear();
+        for index in 0..store.n_items() {
+            if let Some(object) = store.item(index).and_downcast::<glib::BoxedAnyObject>() {
+                let row = object.borrow::<ListRow>();
+                if let ListRow::File(item) = &*row {
+                    row_index.insert(item.location().clone(), index);
+                }
+            }
+        }
+        self.rendered_count.set(items.len());
+        true
+    }
+
+    fn diff_flow(&self, pane: &FlowPane, items: &[FileItem]) -> bool {
+        // Children come and go while the position-indexed vector is stale, so
+        // the grid's own selection signals would publish the wrong items.
+        // Hold them back and publish once from the settled vector.
+        let owned_keys: std::collections::HashSet<String> = pane
+            .items
+            .borrow()
+            .iter()
+            .map(|item| item.identity_key().to_owned())
+            .collect();
+        let owned_selection = {
+            let selection = self.selection.borrow();
+            !selection.is_empty()
+                && selection
+                    .iter()
+                    .all(|item| owned_keys.contains(item.identity_key()))
+        };
+        let was_syncing = self.syncing_selection.replace(true);
+        let applied = self.splice_flow(pane, items);
+        self.syncing_selection.set(was_syncing);
+        if applied && !was_syncing {
+            if let Some(grid) = pane.grid.upgrade() {
+                let selected = grid
+                    .selected_children()
+                    .iter()
+                    .filter_map(|child| pane.items.borrow().get(child.index() as usize).cloned())
+                    .collect::<Vec<_>>();
+                // A sibling hybrid pane may hold the selection; leave it be.
+                if owned_selection || !selected.is_empty() {
+                    self.select_items(selected);
+                }
+            }
+        }
+        applied
+    }
+
+    fn splice_flow(&self, pane: &FlowPane, items: &[FileItem]) -> bool {
+        let Some(grid) = pane.grid.upgrade() else {
+            return false;
+        };
+        let old_items = pane.items.borrow().clone();
+        let children: Vec<FlowBoxChild> = {
+            let mut collected = Vec::new();
+            let mut index = 0;
+            while let Some(child) = grid.child_at_index(index) {
+                collected.push(child);
+                index += 1;
+            }
+            collected
+        };
+        if children.len() != old_items.len() {
+            return false;
+        }
+        let new_keys: std::collections::HashSet<&str> =
+            items.iter().map(|item| item.identity_key()).collect();
+        if new_keys.len() != items.len() {
+            return false;
+        }
+        for (index, child) in children.iter().enumerate().rev() {
+            if !new_keys.contains(old_items[index].identity_key()) {
+                grid.remove(child);
+            }
+        }
+        let mut live: Vec<FileItem> = old_items
+            .into_iter()
+            .filter(|item| new_keys.contains(item.identity_key()))
+            .collect();
+        for (position, item) in items.iter().enumerate() {
+            match live.get(position) {
+                Some(existing) if existing.identity_key() == item.identity_key() => {
+                    let Some(child) = grid.child_at_index(position as i32) else {
+                        return false;
+                    };
+                    if self.metadata_stale.get()
+                        || existing.size() != item.size()
+                        || existing.modified() != item.modified()
+                        || existing.name() != item.name()
+                    {
+                        child.set_child(Some(&self.grid_tile_widget(item, &pane.options)));
+                    }
+                }
+                Some(_) => return false, // reordered: rebuild rather than shuffle
+                None => {
+                    let tile = self.grid_tile_widget(item, &pane.options);
+                    grid.insert(&tile, position as i32);
+                    if let Some(child) = tile.parent().and_downcast::<FlowBoxChild>() {
+                        child.update_property(&[gtk::accessible::Property::Label(item.name())]);
+                    }
+                    live.insert(position, item.clone());
+                }
+            }
+        }
+        while grid.child_at_index(items.len() as i32).is_some() {
+            if let Some(child) = grid.child_at_index(items.len() as i32) {
+                grid.remove(&child);
+            }
+        }
+        *pane.items.borrow_mut() = items.to_vec();
+        true
     }
 
     fn column_view_for(&self, items: &[FileItem], options: &ViewOptions) -> ColumnView {
@@ -2242,6 +2684,10 @@ impl FileView {
             return self.large_column_view(items, options, true, true);
         }
         let store = gio::ListStore::new::<glib::BoxedAnyObject>();
+        *self.model_store.borrow_mut() = Some(store.clone());
+        self.plain_list.set(true);
+        let mut row_index = self.model_row_index.borrow_mut();
+        row_index.clear();
         let mut last_group = None;
         for item in items {
             let group = crate::core::directory_model::group_label(
@@ -2255,8 +2701,10 @@ impl FileView {
                 }
                 last_group = group;
             }
+            row_index.insert(item.location().clone(), store.n_items());
             store.append(&glib::BoxedAnyObject::new(ListRow::File(item.clone())));
         }
+        drop(row_index);
 
         // Group headings are part of this model. Applying a second GTK sort would
         // move the file rows independently and detach them from their headings.
@@ -2413,6 +2861,7 @@ impl FileView {
         use crate::application::performance::PagedSnapshot;
         let store = gio::ListStore::new::<glib::BoxedAnyObject>();
         *self.model_store.borrow_mut() = Some(store.clone());
+        self.plain_list.set(false);
         self.model_row_index.borrow_mut().clear();
         let mut pages = PagedSnapshot::new(items.to_vec());
         if let Some(page) = pages.next_page() {
@@ -2935,7 +3384,62 @@ impl FileView {
         }
     }
 
-    fn grid_view(&self, items: &[FileItem], options: &ViewOptions) -> FlowBox {
+    /// One icon-grid tile. It reaches its grid through its own parents, so
+    /// tiles built later by an in-place refresh behave like the originals.
+    fn grid_tile_widget(&self, item: &FileItem, options: &ViewOptions) -> GtkBox {
+        let layout = options.grid_size.grid_layout();
+        let tile = GtkBox::new(Orientation::Vertical, layout.gap / 2);
+        tile.add_css_class("icon-grid-tile");
+        if self.pending_cut.borrow().contains(item.location()) {
+            tile.add_css_class("cut-pending");
+        }
+        tile.set_size_request(layout.tile_width, -1);
+        tile.set_halign(gtk::Align::Center);
+        tile.set_valign(gtk::Align::Start);
+        tile.set_vexpand(false);
+        tile.set_tooltip_text(Some(item.name()));
+        tile.set_margin_top(layout.vertical_padding);
+        tile.set_margin_bottom(layout.vertical_padding);
+        let icon = item_image(item, options.thumbnails);
+        icon.set_pixel_size(options.grid_size.icon_size());
+        self.request_flowbox_thumbnail_metadata(&icon, item, options.thumbnails);
+        tile.append(&icon);
+        tile.append(&grid_tile_label(item.name(), layout.label_width_chars));
+        attach_drag_source(&tile, item.clone(), self.clone());
+        let target = file_target(item);
+        let view = self.clone();
+        let menu_tile = tile.downgrade();
+        let gesture = GestureClick::new();
+        gesture.set_button(3);
+        gesture.connect_pressed(move |gesture, _, x, y| {
+            let Some(menu_tile) = menu_tile.upgrade() else {
+                return;
+            };
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+            if let Some(child) = menu_tile.parent().and_downcast::<FlowBoxChild>() {
+                if let Some(grid) = child.parent().and_downcast::<FlowBox>() {
+                    if !child.is_selected() {
+                        grid.unselect_all();
+                        grid.select_child(&child);
+                    }
+                }
+            }
+            show_item_context_menu(
+                &menu_tile,
+                x,
+                y,
+                target.clone(),
+                &view,
+                gesture
+                    .current_event_state()
+                    .contains(gtk::gdk::ModifierType::SHIFT_MASK),
+            )
+        });
+        tile.add_controller(gesture);
+        tile
+    }
+
+    fn grid_view(&self, items: &[FileItem], options: &ViewOptions) -> (FlowBox, FlowPane) {
         let selected_keys = self.navigation.state.borrow().selection_keys.clone();
         let layout = options.grid_size.grid_layout();
         let grid = FlowBox::new();
@@ -2951,73 +3455,33 @@ impl FileView {
         grid.set_margin_top(12);
         grid.set_margin_start(12);
         grid.set_margin_end(12);
-        let activation_items = items.to_vec();
+        // The closures below index children by position, so they read a live
+        // vector that an in-place refresh keeps in step with the grid.
+        let grid_items: Rc<RefCell<Vec<FileItem>>> = Rc::new(RefCell::new(items.to_vec()));
+        let activation_items = grid_items.clone();
         let activation_view = self.clone();
         grid.connect_child_activated(move |_, child| {
-            if let Some(item) = activation_items.get(child.index() as usize) {
+            if let Some(item) = activation_items.borrow().get(child.index() as usize) {
                 activate_item(&activation_view, item.clone());
             }
         });
-        let grid_selection_items = items.to_vec();
+        let grid_selection_items = grid_items.clone();
         let availability_view = self.clone();
         grid.connect_selected_children_changed(move |grid| {
             let items = grid
                 .selected_children()
                 .iter()
-                .filter_map(|child| grid_selection_items.get(child.index() as usize).cloned())
+                .filter_map(|child| {
+                    grid_selection_items
+                        .borrow()
+                        .get(child.index() as usize)
+                        .cloned()
+                })
                 .collect();
             availability_view.select_items(items);
         });
         for item in items {
-            let tile = GtkBox::new(Orientation::Vertical, layout.gap / 2);
-            tile.add_css_class("icon-grid-tile");
-            if self.pending_cut.borrow().contains(item.location()) {
-                tile.add_css_class("cut-pending");
-            }
-            tile.set_size_request(layout.tile_width, -1);
-            tile.set_halign(gtk::Align::Center);
-            tile.set_valign(gtk::Align::Start);
-            tile.set_vexpand(false);
-            tile.set_tooltip_text(Some(item.name()));
-            tile.set_margin_top(layout.vertical_padding);
-            tile.set_margin_bottom(layout.vertical_padding);
-            let icon = item_image(item, options.thumbnails);
-            icon.set_pixel_size(options.grid_size.icon_size());
-            self.request_flowbox_thumbnail_metadata(&icon, item, options.thumbnails);
-            tile.append(&icon);
-            tile.append(&grid_tile_label(item.name(), layout.label_width_chars));
-            attach_drag_source(&tile, item.clone(), self.clone());
-            let target = file_target(item);
-            let view = self.clone();
-            let grid_context = grid.downgrade();
-            let menu_tile = tile.downgrade();
-            let gesture = GestureClick::new();
-            gesture.set_button(3);
-            gesture.connect_pressed(move |gesture, _, x, y| {
-                let (Some(grid_context), Some(menu_tile)) =
-                    (grid_context.upgrade(), menu_tile.upgrade())
-                else {
-                    return;
-                };
-                gesture.set_state(gtk::EventSequenceState::Claimed);
-                if let Some(child) = menu_tile.parent().and_downcast::<gtk::FlowBoxChild>() {
-                    if !child.is_selected() {
-                        grid_context.unselect_all();
-                        grid_context.select_child(&child);
-                    }
-                }
-                show_item_context_menu(
-                    &menu_tile,
-                    x,
-                    y,
-                    target.clone(),
-                    &view,
-                    gesture
-                        .current_event_state()
-                        .contains(gtk::gdk::ModifierType::SHIFT_MASK),
-                )
-            });
-            tile.add_controller(gesture);
+            let tile = self.grid_tile_widget(item, options);
             grid.append(&tile);
             if let Some(child) = tile.parent().and_downcast::<gtk::FlowBoxChild>() {
                 child.update_property(&[gtk::accessible::Property::Label(item.name())]);
@@ -3036,7 +3500,7 @@ impl FileView {
         // GTK initially focuses a tile when this renderer is mapped and may
         // replace a restored multi-selection with that tile. Restore the URI
         // set after mapping, without changing the user's later selections.
-        let map_items: Vec<_> = items.iter().map(|i| i.identity_key().to_owned()).collect();
+        let map_items = grid_items.clone();
         let map_view = self.clone();
         let first_map = std::cell::Cell::new(true);
         grid.connect_map(move |grid| {
@@ -3053,8 +3517,8 @@ impl FileView {
             glib::idle_add_local_once(move || {
                 if let Some(grid) = weak.upgrade().filter(|grid| grid.is_mapped()) {
                     grid.unselect_all();
-                    for (index, key) in items.iter().enumerate() {
-                        if keys.contains(key) {
+                    for (index, key) in items.borrow().iter().enumerate() {
+                        if keys.iter().any(|stored| stored == key.identity_key()) {
                             if let Some(child) = grid.child_at_index(index as i32) {
                                 grid.select_child(&child);
                             }
@@ -3063,10 +3527,15 @@ impl FileView {
                 }
             });
         });
-        grid
+        let pane = FlowPane {
+            grid: grid.downgrade(),
+            items: grid_items,
+            options: options.clone(),
+        };
+        (grid, pane)
     }
 
-    fn hybrid_view(&self, items: &[FileItem], options: &ViewOptions) -> GtkBox {
+    fn hybrid_view(&self, items: &[FileItem], options: &ViewOptions) -> (GtkBox, RenderedPanes) {
         let root = GtkBox::new(Orientation::Vertical, 8);
         root.set_margin_start(12);
         root.set_margin_top(12);
@@ -3101,20 +3570,35 @@ impl FileView {
                 folders_view.upcast_ref::<gtk::Widget>(),
                 files_view.upcast_ref::<gtk::Widget>(),
             );
+            let folders_pane = self.folder_store.borrow().clone().map(|store| {
+                Pane::List(ListPane {
+                    store,
+                    recycled: true,
+                })
+            });
+            let files_pane = self.model_store.borrow().clone().map(|store| {
+                Pane::List(ListPane {
+                    store,
+                    recycled: true,
+                })
+            });
             // The outer viewport must allocate these two bounded scrollers,
             // rather than measuring an unbounded list's natural height.
             root.set_vexpand(true);
-            return root;
+            return (root, RenderedPanes::Hybrid(folders_pane, files_pane));
         }
         let mut folder_pane = None;
         let mut file_pane = None;
+        let mut folder_widget = None;
+        let mut file_widget = None;
         if !folders.is_empty() {
             let heading = Label::new(Some("Folders"));
             heading.add_css_class("heading");
             heading.set_xalign(0.0);
             root.append(&heading);
-            let grid = self.grid_view(&folders, options);
-            folder_pane = Some(grid.clone().upcast::<gtk::Widget>());
+            let (grid, pane) = self.grid_view(&folders, options);
+            folder_pane = Some(Pane::Flow(pane));
+            folder_widget = Some(grid.clone().upcast::<gtk::Widget>());
             root.append(&grid);
         }
         if !files.is_empty() {
@@ -3129,13 +3613,14 @@ impl FileView {
                 ..options.clone()
             };
             let list = self.column_view_for(&files, &file_options);
-            file_pane = Some(list.clone().upcast::<gtk::Widget>());
+            file_pane = Some(self.list_pane(self.use_recycled_model(files.len())));
+            file_widget = Some(list.clone().upcast::<gtk::Widget>());
             root.append(&list);
         }
-        if let (Some(folders), Some(files)) = (folder_pane, file_pane) {
+        if let (Some(folders), Some(files)) = (folder_widget, file_widget) {
             self.link_hybrid_panes(&folders, &files);
         }
-        root
+        (root, RenderedPanes::Hybrid(folder_pane, file_pane))
     }
 }
 
@@ -5391,7 +5876,7 @@ mod tests {
     fn icon_grid_requires_double_click_to_activate_an_item() {
         gtk::init().expect("GTK should initialize for widget tests");
         let view = FileView::new(Location::from_uri("file:///tmp").unwrap());
-        let grid = view.grid_view(&[], &ViewOptions::default());
+        let (grid, _pane) = view.grid_view(&[], &ViewOptions::default());
 
         assert!(!grid.activates_on_single_click());
     }
@@ -5956,6 +6441,151 @@ mod tests {
         assert_eq!((last.folders, last.files), (2, 3));
         view.close();
     }
+
+    /// A refresh of a directory whose listing changed must update the widgets
+    /// already on screen rather than replacing them: rebuilding flashes an
+    /// empty view and drops scroll position, focus and selection, which on a
+    /// busy directory reads as the folder reloading itself over and over.
+    #[gtk::test]
+    fn a_changed_listing_splices_into_the_view_already_on_screen() {
+        use crate::core::contracts::{Capability, CapabilitySnapshot, EntryKind, EntrySnapshot};
+        use crate::infrastructure::mock_provider::{MockConfig, MockProvider};
+
+        let context = glib::MainContext::default();
+        let root = Location::from_uri("smb://fixture/share").unwrap();
+        let provider = std::rc::Rc::new(MockProvider::new(context.clone(), MockConfig::default()));
+        let entry = |name: &str| EntrySnapshot {
+            location: Location::from_uri(&format!("{}/{}", root.uri(), name)).unwrap(),
+            display_name: name.into(),
+            kind: EntryKind::File,
+            size: Some(4),
+            modified: None,
+            content_type: None,
+            capabilities: CapabilitySnapshot {
+                supported: [Capability::List].into_iter().collect(),
+                ..Default::default()
+            },
+        };
+        let caps = CapabilitySnapshot {
+            version: 1,
+            supported: [Capability::List].into_iter().collect(),
+            stable_order: true,
+            ..Default::default()
+        };
+        provider.set_directory(
+            root.clone(),
+            vec![entry("a.txt"), entry("b.txt")],
+            caps.clone(),
+        );
+        let view = FileView::new_with_repository(root.clone(), provider.clone());
+        let settle = || {
+            provider.advance(1);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            while view.has_pending_navigation() {
+                context.iteration(false);
+                assert!(std::time::Instant::now() < deadline);
+            }
+        };
+        settle();
+        let rendered = view.widget.child().expect("the directory is rendered");
+
+        view.refresh();
+        settle();
+        assert_eq!(
+            view.widget.child(),
+            Some(rendered.clone()),
+            "an unchanged listing must not rebuild the view"
+        );
+
+        provider.set_directory(
+            root.clone(),
+            vec![entry("a.txt"), entry("b.txt"), entry("c.txt")],
+            caps,
+        );
+        view.refresh();
+        settle();
+        assert_eq!(
+            view.widget.child(),
+            Some(rendered),
+            "a listing that gained a file splices into the same view"
+        );
+        assert_eq!(view.selected_items().len(), 0);
+        view.close();
+    }
+
+    /// The icon grid indexes its children by position, so a splice that drops
+    /// and adds tiles must keep the selection on the same files, not on
+    /// whatever now sits at the old index.
+    #[gtk::test]
+    fn a_changed_grid_keeps_its_tiles_and_its_selection() {
+        use crate::core::contracts::{Capability, CapabilitySnapshot, EntryKind, EntrySnapshot};
+        use crate::infrastructure::mock_provider::{MockConfig, MockProvider};
+
+        let context = glib::MainContext::default();
+        let root = Location::from_uri("smb://fixture/share").unwrap();
+        let provider = std::rc::Rc::new(MockProvider::new(context.clone(), MockConfig::default()));
+        let entry = |name: &str| EntrySnapshot {
+            location: Location::from_uri(&format!("{}/{}", root.uri(), name)).unwrap(),
+            display_name: name.into(),
+            kind: EntryKind::File,
+            size: Some(4),
+            modified: None,
+            content_type: None,
+            capabilities: CapabilitySnapshot {
+                supported: [Capability::List].into_iter().collect(),
+                ..Default::default()
+            },
+        };
+        let caps = CapabilitySnapshot {
+            version: 1,
+            supported: [Capability::List].into_iter().collect(),
+            stable_order: true,
+            ..Default::default()
+        };
+        provider.set_directory(
+            root.clone(),
+            vec![entry("a.txt"), entry("b.txt"), entry("c.txt")],
+            caps.clone(),
+        );
+        let view = FileView::new_with_repository(root.clone(), provider.clone());
+        view.set_options(ViewOptions {
+            view_mode: ViewMode::IconGrid,
+            ..ViewOptions::default()
+        });
+        let settle = || {
+            provider.advance(1);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            while view.has_pending_navigation() {
+                context.iteration(false);
+                assert!(std::time::Instant::now() < deadline);
+            }
+        };
+        settle();
+        let grid = find_flow_box_in(&view.widget.child().expect("rendered"))
+            .expect("icon grid renders a FlowBox");
+        let kept = grid.child_at_index(2).expect("c.txt has a tile");
+        grid.select_child(&kept);
+        assert_eq!(view.selected_items()[0].name(), "c.txt");
+
+        // a.txt goes and d.txt arrives: c.txt moves from index 2 to 1.
+        provider.set_directory(
+            root.clone(),
+            vec![entry("b.txt"), entry("c.txt"), entry("d.txt")],
+            caps,
+        );
+        view.refresh();
+        settle();
+
+        let after =
+            find_flow_box_in(&view.widget.child().expect("rendered")).expect("still a grid");
+        assert_eq!(after, grid, "the grid itself is not rebuilt");
+        assert_eq!(after.child_at_index(1).as_ref(), Some(&kept));
+        assert!(after.child_at_index(3).is_none());
+        let selected = view.selected_items();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].name(), "c.txt");
+        view.close();
+    }
 }
 
 fn file_icon(item: &FileItem) -> Image {
@@ -5980,6 +6610,16 @@ fn item_image(item: &FileItem, thumbnails: bool) -> Image {
     let image = file_icon(item);
     apply_thumbnail(&image, item, thumbnails);
     image
+}
+
+/// A tile built from an unresolved listing row shows the generic fallback
+/// icon; once its content type arrives, show the icon that type maps to, then
+/// promote to a thumbnail where those are on.
+fn apply_resolved_item(image: &Image, item: &FileItem, thumbnails: bool) {
+    if item.content_type_resolved() && !item.is_dir() {
+        image.set_from_gicon(&gio::content_type_get_icon(item.content_type()));
+    }
+    apply_thumbnail(image, item, thumbnails);
 }
 
 fn apply_thumbnail(image: &Image, item: &FileItem, thumbnails: bool) {

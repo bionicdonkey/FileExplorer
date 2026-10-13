@@ -44,8 +44,12 @@ pub struct CachePolicy {
     pub max_entries: usize,
 }
 impl Default for CachePolicy {
+    /// Must comfortably exceed the rows a window keeps bound at once, with the
+    /// transient overshoot of a re-sort. Below that, bound rows evict each
+    /// other, each eviction re-requests on the next bind, and a large
+    /// directory spins the main loop at 100% re-asking for the same files.
     fn default() -> Self {
-        Self { max_entries: 256 }
+        Self { max_entries: 2048 }
     }
 }
 
