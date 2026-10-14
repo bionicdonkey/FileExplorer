@@ -4,7 +4,8 @@ A native Linux file manager with a Windows 11 Explorer-inspired interaction mode
 GTK 4, libadwaita and GIO. Aimed at Zorin OS and GNOME.
 
 Status: pre-release (`0.3.3`). The core browsing, file-operation, search and preferences paths are
-implemented and covered by tests, and tagged versions are published as Flatpak bundles.
+implemented and covered by tests, and tagged versions are published as a Debian package (the primary package) and as a Flatpak
+bundle.
 
 ## Features
 
@@ -106,7 +107,24 @@ cargo run            # debug
 cargo build --release
 ```
 
+### Debian package
+
+The primary package. It uses the host's applications, GVfs, polkit and terminal directly, which a
+Flatpak sandbox cannot offer a file manager. Built for Ubuntu 24.04 and newer, including Zorin OS 18.
+
+```bash
+packaging/deb/build-deb.sh          # writes dist/zorin-explorer_<version>_<arch>.deb
+sudo apt install ./dist/zorin-explorer_*.deb
+```
+
+The `Depends` line is computed from the libraries the binary links, so build on the oldest release
+the package should install on. `.gitea/workflows/deb.yml` builds it in an Ubuntu 24.04 container for
+every push to `main` and attaches it to the release for every `v*` tag.
+
 ### Flatpak
+
+Secondary. The sandbox hides the host's applications, so Open With has to go through the desktop
+portal, and features that launch host programs are limited.
 
 ```bash
 flatpak install flathub org.gnome.Platform//50 org.gnome.Sdk//50 \
