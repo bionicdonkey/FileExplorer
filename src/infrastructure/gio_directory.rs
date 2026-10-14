@@ -847,9 +847,12 @@ fn enumerate_with_pages(
     };
     // Fast content type comes from directory/name metadata. Do not sniff every
     // file's contents just to populate a model; image decoding is visible-only.
+    // The access rights are not advisory: `FileItem::from_gio` turns them into
+    // the capabilities that gate Copy, Move, Rename, Trash and Delete, and an
+    // entry listed without them has none of those commands available.
     let enumerator = file
         .enumerate_children(
-            "standard::name,standard::display-name,standard::type,standard::target-uri",
+            "standard::name,standard::display-name,standard::type,standard::target-uri,access::can-read,access::can-write,access::can-rename,access::can-trash,access::can-delete",
             gio::FileQueryInfoFlags::NONE,
             Some(&request.cancellable),
         )

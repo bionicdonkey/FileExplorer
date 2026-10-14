@@ -529,16 +529,43 @@ fn directory_listing_returns_owned_uri_identity_without_eager_advisory_metadata(
         file.location,
         Location::from_local_path(&dir.path().join("data.txt"))
     );
-    assert!(!file.capabilities.supports(Capability::Copy));
+    // Advisory metadata is deferred, but the access rights are not: every
+    // command that mutates or copies an entry is gated on them, so a listing
+    // without them leaves Copy, Move, Rename, Trash and Delete permanently off.
+    for capability in [
+        Capability::Open,
+        Capability::Copy,
+        Capability::Move,
+        Capability::Rename,
+        Capability::Trash,
+        Capability::Delete,
+    ] {
+        assert!(
+            file.capabilities.supports(capability),
+            "a writable local file must list {capability:?} as supported"
+        );
+    }
     // Exercise the active repository projection, not a hand-built FileInfo.
     let item = zorin_explorer::core::FileItem::from_snapshot(file);
     let availability = zorin_explorer::ui::context_menu::CommandAvailability::for_capabilities(
         &[item],
         Some(&snapshot.capabilities),
     );
-    assert!(!availability.can_cut);
-    assert!(!availability.allows(zorin_explorer::application::commands::ContextCommand::MoveTo));
-    assert!(!availability.allows(zorin_explorer::application::commands::ContextCommand::Rename));
+    use zorin_explorer::application::commands::ContextCommand;
+    for command in [
+        ContextCommand::Copy,
+        ContextCommand::Cut,
+        ContextCommand::CopyTo,
+        ContextCommand::MoveTo,
+        ContextCommand::Rename,
+        ContextCommand::MoveToTrash,
+        ContextCommand::DeletePermanently,
+    ] {
+        assert!(
+            availability.allows(command),
+            "{command:?} must be available for a file in a writable folder"
+        );
+    }
     assert!(snapshot.capabilities.supports(Capability::Rename));
     assert!(snapshot.capabilities.supports(Capability::List));
     assert!(!snapshot.capabilities.stable_order);

@@ -11,6 +11,11 @@
   <!-- Keep in step with `version` in Cargo.toml: the About page reads the crate
        version, and the CI release job refuses a tag that disagrees with it. -->
   <releases>
+    <release version="0.3.2" date="2026-10-14">
+      <description>
+        <p>Copy, Move, Rename, Move to Trash and Delete work again from the context menu, toolbar and keyboard shortcuts. Folder listings had stopped reporting which actions each file allows, so every one of those commands was disabled.</p>
+      </description>
+    </release>
     <release version="0.3.1" date="2026-10-13">
       <description>
         <p>A large folder such as /tmp no longer freezes the window. Rows the view had bound were evicting each other from a metadata cache that was too small, and each eviction re-asked for the same files, spinning the main loop at full CPU.</p>

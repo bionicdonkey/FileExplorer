@@ -3,7 +3,7 @@
 A native Linux file manager with a Windows 11 Explorer-inspired interaction model, built with Rust,
 GTK 4, libadwaita and GIO. Aimed at Zorin OS and GNOME.
 
-Status: pre-release (`0.3.1`). The core browsing, file-operation, search and preferences paths are
+Status: pre-release (`0.3.2`). The core browsing, file-operation, search and preferences paths are
 implemented and covered by tests, and tagged versions are published as Flatpak bundles.
 
 ## Features
