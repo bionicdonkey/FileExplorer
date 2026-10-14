@@ -11,6 +11,11 @@
   <!-- Keep in step with `version` in Cargo.toml: the About page reads the crate
        version, and the CI release job refuses a tag that disagrees with it. -->
   <releases>
+    <release version="0.3.3" date="2026-10-14">
+      <description>
+        <p>The Flatpak no longer crashes when the window is maximised or resized. It was built without access to the GPU, so the renderer could not start inside the sandbox and the app crashed on the first resize.</p>
+      </description>
+    </release>
     <release version="0.3.2" date="2026-10-14">
       <description>
         <p>Copy, Move, Rename, Move to Trash and Delete work again from the context menu, toolbar and keyboard shortcuts. Folder listings had stopped reporting which actions each file allows, so every one of those commands was disabled.</p>

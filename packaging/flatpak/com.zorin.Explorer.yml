@@ -14,6 +14,9 @@ finish-args:
   - --share=ipc
   - --socket=wayland
   - --socket=fallback-x11
+  # Without GPU access GTK's GL renderer cannot initialise, and the app
+  # segfaults when the window is resized, e.g. maximised.
+  - --device=dri
   - --filesystem=host
   - --talk-name=org.freedesktop.FileManager1
   # GVfs. Without these the sandbox cannot reach the gvfs daemons at all, and
