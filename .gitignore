@@ -9,3 +9,5 @@
 .worktrees/
 .superpowers/
 docs/superpowers/
+.env
+.aider*
