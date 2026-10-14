@@ -202,6 +202,19 @@ impl FileItem {
         self.content_type_resolved
     }
 
+    /// The content type to act on: the resolved one when GIO has supplied it,
+    /// otherwise a guess from the name. Content types are fetched for visible
+    /// rows only, so an unresolved entry carries `application/octet-stream`,
+    /// which matches no application.
+    pub fn effective_content_type(&self) -> String {
+        if self.content_type_resolved {
+            return self.content_type.clone();
+        }
+        gio::content_type_guess(Some(self.name()), &[])
+            .0
+            .to_string()
+    }
+
     pub fn uri(&self) -> &str {
         self.location.uri()
     }

@@ -48,12 +48,7 @@ pub fn is_extractable(item: &FileItem) -> bool {
 /// extension -- and an archive without one is a file the desktop should handle
 /// anyway, because nothing on the system would recognise it either.
 fn resolved_content_type(item: &FileItem) -> String {
-    if item.content_type_resolved() {
-        return item.content_type().to_owned();
-    }
-    gio::content_type_guess(Some(item.name()), &[])
-        .0
-        .to_string()
+    item.effective_content_type()
 }
 
 /// Whether `gvfsd-archive` should be asked to open this as a folder.
@@ -135,6 +130,18 @@ mod tests {
                 "{name} must open in the application that owns it"
             );
         }
+    }
+
+    #[test]
+    fn an_unresolved_entry_is_offered_applications_for_its_guessed_type() {
+        let pending = entry("report.docx", EntryKind::File, None);
+        assert_eq!(pending.content_type(), "application/octet-stream");
+        assert_eq!(
+            pending.effective_content_type(),
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        );
+        let resolved = entry("photo.png", EntryKind::File, Some("image/jpeg"));
+        assert_eq!(resolved.effective_content_type(), "image/jpeg");
     }
 
     #[test]

@@ -3944,8 +3944,8 @@ fn open_with_submenu(
     let target = target.clone();
     let view = view.clone();
     button.connect_clicked(move |_| {
-        let content_type = match &target {
-            ContextTarget::File(item) => item.content_type().to_owned(),
+        let (content_type, location) = match &target {
+            ContextTarget::File(item) => (item.effective_content_type(), item.location().clone()),
             _ => return,
         };
         let menu = GtkBox::new(Orientation::Vertical, 2);
@@ -3964,7 +3964,7 @@ fn open_with_submenu(
         let parent = submenu_parent.clone();
         let view = view.clone();
         other.connect_clicked(move |_| {
-            show_application_chooser(&parent, content_type.clone(), view.clone())
+            show_application_chooser(&parent, content_type.clone(), &location, view.clone())
         });
         menu.append(&other);
         show_submenu(&submenu_parent, &menu);
@@ -3981,14 +3981,41 @@ fn show_submenu(parent: &Button, menu: &GtkBox) {
     submenu.popup();
 }
 
+/// Inside a Flatpak sandbox GIO sees only the sandbox's own applications, so a
+/// chooser built from it lists almost nothing. The desktop portal shows the
+/// host's chooser instead.
+fn running_in_flatpak() -> bool {
+    std::path::Path::new("/.flatpak-info").exists()
+}
+
 #[allow(deprecated)]
-fn show_application_chooser(parent: &Button, content_type: String, view: FileView) {
+fn show_application_chooser(
+    parent: &Button,
+    content_type: String,
+    location: &Location,
+    view: FileView,
+) {
     let window = parent.root().and_downcast::<gtk::Window>();
+    if running_in_flatpak() {
+        let launcher = gtk::FileLauncher::new(Some(&gio::File::for_uri(location.uri())));
+        launcher.set_always_ask(true);
+        launcher.launch(window.as_ref(), gio::Cancellable::NONE, |result| {
+            if let Err(error) = result {
+                if !error.matches(gtk::DialogError::Dismissed) {
+                    eprintln!("Open With failed: {error}");
+                }
+            }
+        });
+        return;
+    }
     let dialog = gtk::AppChooserDialog::for_content_type(
         window.as_ref(),
         gtk::DialogFlags::MODAL,
         &content_type,
     );
+    if let Some(chooser) = dialog.widget().downcast_ref::<gtk::AppChooserWidget>() {
+        chooser.set_show_other(true);
+    }
     dialog.connect_response(move |dialog, response| {
         if response == gtk::ResponseType::Ok {
             if let Some(app) = dialog.app_info() {
