@@ -756,6 +756,13 @@ pub struct FileView {
         >,
     >,
     visible_metadata_generation: Rc<std::cell::Cell<Option<u64>>>,
+    /// The listing carries no size, date or type, so sorting by one of them
+    /// needs those fetched for every entry. Holds the navigation generation
+    /// that has already been asked, so an entry the provider cannot answer for
+    /// is not requested again on every repaint.
+    sort_metadata_generation: Rc<std::cell::Cell<Option<u64>>>,
+    /// Characters typed to find an item by name, and when the last arrived.
+    type_ahead: Rc<RefCell<(String, std::time::Instant)>>,
     monitor_refresh_pending: Rc<std::cell::Cell<bool>>,
     /// Delay before the next monitor-driven refresh, doubled per consecutive
     /// refresh so a directory that never stops changing cannot keep the view
@@ -882,6 +889,8 @@ impl FileView {
             directory_monitor: Default::default(),
             pending_visible_metadata,
             visible_metadata_generation,
+            sort_metadata_generation: Default::default(),
+            type_ahead: Rc::new(RefCell::new((String::new(), std::time::Instant::now()))),
             monitor_refresh_pending: Default::default(),
             monitor_backoff_ms: Rc::new(std::cell::Cell::new(MONITOR_REFRESH_BASE_MS)),
             last_monitor_change: Rc::new(std::cell::Cell::new(std::time::Instant::now())),
@@ -956,6 +965,9 @@ impl FileView {
         let keyboard_view = view.clone();
         let keys = gtk::EventControllerKey::new();
         keys.connect_key_pressed(move |_, key, _, modifiers| {
+            if keyboard_view.handle_type_ahead_key(key, modifiers) {
+                return glib::Propagation::Stop;
+            }
             if !crate::ui::accessibility::context_menu_key(key, modifiers)
                 || keyboard_view.section_title().is_some()
             {
@@ -986,6 +998,170 @@ impl FileView {
         view.controllers.borrow_mut().push(drop_controller.upcast());
         view.refresh();
         view
+    }
+
+    /// Typing a name selects the first matching item and scrolls to it. A
+    /// pause of a second starts a new search; Backspace shortens the current
+    /// one and Escape abandons it. Returns whether the key was used.
+    pub fn handle_type_ahead_key(
+        &self,
+        key: gtk::gdk::Key,
+        modifiers: gtk::gdk::ModifierType,
+    ) -> bool {
+        const RESET_AFTER: std::time::Duration = std::time::Duration::from_secs(1);
+        if self.section_title().is_some()
+            || modifiers.intersects(
+                gtk::gdk::ModifierType::CONTROL_MASK
+                    | gtk::gdk::ModifierType::ALT_MASK
+                    | gtk::gdk::ModifierType::SUPER_MASK
+                    | gtk::gdk::ModifierType::META_MASK,
+            )
+        {
+            return false;
+        }
+        let editing = self
+            .widget
+            .root()
+            .and_downcast::<gtk::Window>()
+            .and_then(|window| gtk::prelude::GtkWindowExt::focus(&window))
+            .is_some_and(|focused| {
+                focused.is::<gtk::Editable>()
+                    || focused.ancestor(gtk::Text::static_type()).is_some()
+            });
+        if editing {
+            return false;
+        }
+        let query = {
+            let mut typed = self.type_ahead.borrow_mut();
+            if typed.1.elapsed() > RESET_AFTER {
+                typed.0.clear();
+            }
+            let active = !typed.0.is_empty();
+            if key == gtk::gdk::Key::Escape && active {
+                typed.0.clear();
+                return true;
+            }
+            if key == gtk::gdk::Key::BackSpace && active {
+                typed.0.pop();
+            } else {
+                let Some(character) = key.to_unicode().filter(|c| !c.is_control()) else {
+                    return false;
+                };
+                if character.is_whitespace() && !active {
+                    return false;
+                }
+                typed.0.push(character);
+            }
+            typed.1 = std::time::Instant::now();
+            typed.0.to_lowercase()
+        };
+        if !query.is_empty() {
+            self.select_by_name(&query);
+        }
+        true
+    }
+
+    /// Selects the first item, in display order, whose name starts with the
+    /// query, or failing that contains it.
+    fn select_by_name(&self, query: &str) {
+        enum Pane {
+            Column(ColumnView),
+            Grid(gtk::GridView),
+            Flow(FlowBox),
+        }
+        fn collect(widget: &gtk::Widget, panes: &mut Vec<Pane>) {
+            if let Some(view) = widget.downcast_ref::<ColumnView>() {
+                panes.push(Pane::Column(view.clone()));
+                return;
+            }
+            if let Some(view) = widget.downcast_ref::<gtk::GridView>() {
+                panes.push(Pane::Grid(view.clone()));
+                return;
+            }
+            if let Some(grid) = widget.downcast_ref::<FlowBox>() {
+                panes.push(Pane::Flow(grid.clone()));
+                return;
+            }
+            let mut child = widget.first_child();
+            while let Some(next) = child {
+                collect(&next, panes);
+                child = next.next_sibling();
+            }
+        }
+        fn model_names(model: Option<gtk::SelectionModel>) -> Vec<Option<String>> {
+            let Some(model) = model else {
+                return Vec::new();
+            };
+            (0..model.n_items())
+                .map(|index| {
+                    let object = model.item(index).and_downcast::<glib::BoxedAnyObject>()?;
+                    let name = match &*object.borrow::<ListRow>() {
+                        ListRow::File(item) => Some(item.name().to_lowercase()),
+                        ListRow::Group(_) => None,
+                    };
+                    name
+                })
+                .collect()
+        }
+        let mut panes = Vec::new();
+        collect(self.widget.upcast_ref(), &mut panes);
+        let flow_items = |grid: &FlowBox| -> Vec<Option<String>> {
+            let rendered = self.rendered_view.borrow();
+            let Some(rendered) = rendered.as_ref() else {
+                return Vec::new();
+            };
+            let candidates = match &rendered.panes {
+                RenderedPanes::Single(pane) => vec![Some(pane)],
+                RenderedPanes::Hybrid(folders, files) => vec![folders.as_ref(), files.as_ref()],
+            };
+            candidates
+                .into_iter()
+                .flatten()
+                .find_map(|pane| match pane {
+                    self::Pane::Flow(pane) if pane.grid.upgrade().as_ref() == Some(grid) => Some(
+                        pane.items
+                            .borrow()
+                            .iter()
+                            .map(|item| Some(item.name().to_lowercase()))
+                            .collect(),
+                    ),
+                    _ => None,
+                })
+                .unwrap_or_default()
+        };
+        let names: Vec<Vec<Option<String>>> = panes
+            .iter()
+            .map(|pane| match pane {
+                Pane::Column(view) => model_names(view.model()),
+                Pane::Grid(view) => model_names(view.model()),
+                Pane::Flow(grid) => flow_items(grid),
+            })
+            .collect();
+        let find = |matches: &dyn Fn(&str) -> bool| {
+            names.iter().enumerate().find_map(|(pane, names)| {
+                names
+                    .iter()
+                    .position(|name| name.as_deref().is_some_and(matches))
+                    .map(|index| (pane, index as u32))
+            })
+        };
+        let Some((pane, index)) =
+            find(&|name| name.starts_with(query)).or_else(|| find(&|name| name.contains(query)))
+        else {
+            return;
+        };
+        let flags = gtk::ListScrollFlags::FOCUS | gtk::ListScrollFlags::SELECT;
+        match &panes[pane] {
+            Pane::Column(view) => view.scroll_to(index, None, flags, None),
+            Pane::Grid(view) => view.scroll_to(index, flags, None),
+            Pane::Flow(grid) => {
+                if let Some(child) = grid.child_at_index(index as i32) {
+                    grid.unselect_all();
+                    grid.select_child(&child);
+                    child.grab_focus();
+                }
+            }
+        }
     }
 
     pub fn tab_state(&self) -> Rc<RefCell<TabState>> {
@@ -1118,6 +1294,7 @@ impl FileView {
         // widget here would repeatedly reset scrolling, focus and cell caches.
         if self.append_directory_page() {
             self.complete_directory_stream();
+            self.ensure_sort_metadata();
             return;
         }
         let state = self.navigation.state.borrow();
@@ -2136,6 +2313,88 @@ impl FileView {
             self.widget.child_focus(gtk::DirectionType::TabForward);
         }
         self.publish_status();
+        self.ensure_sort_metadata();
+    }
+
+    /// Size, date and type are not part of a listing, so a sort on one of them
+    /// has nothing to order by until they are fetched. Asks for every entry
+    /// once the listing is complete, records the answers in the snapshot, and
+    /// repaints.
+    fn ensure_sort_metadata(&self) {
+        if self.options().sort_field == SortField::Name {
+            return;
+        }
+        let (generation, locations) = {
+            let state = self.navigation.state.borrow();
+            if state.has_pending_navigation()
+                || !matches!(state.status, NavigationStatus::Ready)
+                || !matches!(state.content, TabContent::Directory(_))
+                || self.sort_metadata_generation.get() == Some(state.navigation_generation)
+            {
+                return;
+            }
+            let Some(snapshot) = &state.directory else {
+                return;
+            };
+            let locations: Vec<Location> = snapshot
+                .entries
+                .iter()
+                .filter(|entry| {
+                    entry.size.is_none() && entry.modified.is_none() && entry.content_type.is_none()
+                })
+                .map(|entry| entry.location.clone())
+                .collect();
+            (state.navigation_generation, locations)
+        };
+        if locations.is_empty() {
+            return;
+        }
+        self.sort_metadata_generation.set(Some(generation));
+        let request = crate::core::contracts::VisibleMetadataRequest {
+            id: crate::core::contracts::RequestId::allocate(),
+            locations,
+            cancellable: gio::Cancellable::new(),
+        };
+        let request_id = request.id;
+        let view = self.clone();
+        self.navigation.inspect_visible_metadata(
+            request,
+            Box::new(move |result| {
+                let crate::core::contracts::RequestOutcome::Succeeded(metadata) = result.outcome
+                else {
+                    return;
+                };
+                if result.id != request_id {
+                    return;
+                }
+                {
+                    let mut state = view.navigation.state.borrow_mut();
+                    if state.navigation_generation != generation
+                        || matches!(state.status, NavigationStatus::Closed)
+                    {
+                        return;
+                    }
+                    let Some(snapshot) = &mut state.directory else {
+                        return;
+                    };
+                    let mut by_location: std::collections::HashMap<_, _> = metadata
+                        .into_iter()
+                        .map(|entry| (entry.location.clone(), entry))
+                        .collect();
+                    for entry in &mut snapshot.entries {
+                        if let Some(found) = by_location.remove(&entry.location) {
+                            entry.size = found.size;
+                            entry.modified = found.modified;
+                            entry.content_type = found.content_type;
+                        }
+                    }
+                }
+                // The rows on screen are in the old order and an in-place
+                // refresh would keep them there.
+                *view.rendered_view.borrow_mut() = None;
+                view.reload();
+            }),
+        );
     }
 
     fn reload_content(&self) {
@@ -2815,6 +3074,9 @@ impl FileView {
             if !uses_native_row_sorting(options_state.borrow().group_field) {
                 let file_view = file_view.clone();
                 glib::idle_add_local_once(move || file_view.reload());
+            } else {
+                let file_view = file_view.clone();
+                glib::idle_add_local_once(move || file_view.ensure_sort_metadata());
             }
         });
 
@@ -4438,7 +4700,9 @@ mod tests {
     };
     use crate::core::navigation::{TabContent, TabState};
     use crate::core::sidebar_model::SidebarSection;
-    use crate::core::{FileItem, GroupField, Location, ViewMode, ViewOptions};
+    use crate::core::{
+        FileItem, GroupField, Location, SortDirection, SortField, ViewMode, ViewOptions,
+    };
     use crate::ui::context_menu::{CommandAvailability, ContextCommand, ContextTarget};
 
     #[gtk::test]
@@ -6212,6 +6476,108 @@ mod tests {
             "a reload has no selection left to restore"
         );
         view.close();
+    }
+
+    fn listed_file_names(view: &FileView) -> Vec<String> {
+        use gtk::prelude::*;
+        let list = find_column_view_in(view.widget.upcast_ref::<gtk::Widget>())
+            .expect("the view renders a file list");
+        let model = list.model().expect("the file list has a model");
+        (0..model.n_items())
+            .filter_map(|position| model.item(position).and_downcast::<glib::BoxedAnyObject>())
+            .filter_map(|object| match &*object.borrow::<super::ListRow>() {
+                super::ListRow::File(item) => Some(item.name().to_owned()),
+                super::ListRow::Group(_) => None,
+            })
+            .collect()
+    }
+
+    /// A listing carries no size, date or type, so sorting on one of them used
+    /// to fall back to name order and appear to do nothing.
+    #[gtk::test]
+    fn sorting_hybrid_files_by_size_orders_them_by_size() {
+        for files in [5usize, 200] {
+            let directory = tempfile::tempdir().unwrap();
+            for index in 0..files {
+                // Sizes run opposite to names, so a name-order fallback is visible.
+                fs::write(
+                    directory.path().join(format!("file-{index:03}.txt")),
+                    "x".repeat(files - index),
+                )
+                .unwrap();
+            }
+            let view = loaded_view(directory.path(), ViewMode::Hybrid);
+            let expected: Vec<String> = (0..files)
+                .rev()
+                .map(|index| format!("file-{index:03}.txt"))
+                .collect();
+
+            let mut options = view.options();
+            options.sort_field = SortField::Size;
+            options.sort_direction = SortDirection::Ascending;
+            view.set_options(options.clone());
+            let context = glib::MainContext::default();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while listed_file_names(&view).first() != expected.first() {
+                context.iteration(false);
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "{files} files never sorted by size: {:?}",
+                    &listed_file_names(&view)[..3]
+                );
+            }
+            assert_eq!(listed_file_names(&view), expected);
+
+            options.sort_direction = SortDirection::Descending;
+            view.set_options(options);
+            while context.iteration(false) {}
+            let mut reversed = expected;
+            reversed.reverse();
+            assert_eq!(listed_file_names(&view), reversed);
+            view.close();
+        }
+    }
+
+    /// Typing a name finds it in whichever pane holds it, and a pause starts a
+    /// new search.
+    #[gtk::test]
+    fn typing_a_name_selects_the_first_matching_item() {
+        use gtk::gdk::{Key, ModifierType};
+
+        for mode in [ViewMode::DetailedList, ViewMode::IconGrid, ViewMode::Hybrid] {
+            let directory = tempfile::tempdir().unwrap();
+            for name in ["apple.txt", "banana.txt", "blueberry.txt", "cherry.txt"] {
+                fs::write(directory.path().join(name), "x").unwrap();
+            }
+            fs::create_dir(directory.path().join("books")).unwrap();
+            let view = loaded_view(directory.path(), mode);
+            let none = ModifierType::empty();
+            let selected = |view: &FileView| -> Vec<String> {
+                view.selected_items()
+                    .iter()
+                    .map(|item| item.name().to_owned())
+                    .collect()
+            };
+
+            assert!(view.handle_type_ahead_key(Key::c, none));
+            assert_eq!(selected(&view), ["cherry.txt"], "{mode:?}");
+
+            assert!(view.handle_type_ahead_key(Key::BackSpace, none));
+            assert!(view.handle_type_ahead_key(Key::b, none));
+            assert!(view.handle_type_ahead_key(Key::l, none));
+            assert_eq!(selected(&view), ["blueberry.txt"], "{mode:?}");
+
+            view.type_ahead.borrow_mut().1 -= std::time::Duration::from_secs(2);
+            assert!(view.handle_type_ahead_key(Key::b, none));
+            assert!(view.handle_type_ahead_key(Key::o, none));
+            assert_eq!(selected(&view), ["books"], "{mode:?}");
+
+            assert!(
+                !view.handle_type_ahead_key(Key::a, ModifierType::CONTROL_MASK),
+                "shortcuts are not searches"
+            );
+            view.close();
+        }
     }
 
     /// Hybrid view renders the folders in a FlowBox and the files in a

@@ -755,6 +755,21 @@ impl ExplorerWindow {
                 );
                 return glib::Propagation::Stop;
             }
+            // Typing with nothing focused, or with focus on the tab strip, finds
+            // an item in the folder, as it does when the file list has focus.
+            let focused = shortcut_window
+                .upgrade()
+                .and_then(|w| gtk::prelude::GtkWindowExt::focus(&w));
+            if focused
+                .as_ref()
+                .map_or(true, |focused| focused.is_ancestor(&shortcut_tabs))
+            {
+                let view = selected_index(&shortcut_tabs, &shortcut_data)
+                    .map(|index| shortcut_data.borrow()[index].view.clone());
+                if view.is_some_and(|view| view.handle_type_ahead_key(key, modifiers)) {
+                    return glib::Propagation::Stop;
+                }
+            }
             let command = shortcut_command(
                 key.to_unicode().map(|key| key.to_ascii_lowercase()),
                 key == gtk::gdk::Key::Delete,
