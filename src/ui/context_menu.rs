@@ -27,6 +27,7 @@ pub struct CommandAvailability {
     pub can_trash: bool,
     pub can_delete: bool,
     pub can_extract: bool,
+    pub can_compress: bool,
     pub disabled_reason: Option<&'static str>,
 }
 
@@ -66,6 +67,8 @@ impl CommandAvailability {
             && selection
                 .iter()
                 .all(|item| crate::core::activation::is_extractable(item));
+        let can_compress = !selection.is_empty()
+            && selection.iter().all(|item| item.local_path().is_some());
         let disabled_reason = if !can_trash && !selection.is_empty() {
             Some("This location does not support Trash")
         } else if !can_delete && !selection.is_empty() {
@@ -86,6 +89,7 @@ impl CommandAvailability {
             can_trash,
             can_delete,
             can_extract,
+            can_compress,
             disabled_reason,
         }
     }
@@ -98,6 +102,9 @@ impl CommandAvailability {
             | ContextCommand::Properties => self.can_open,
             ContextCommand::OpenInTerminal => self.can_open_terminal,
             ContextCommand::Extract => self.can_extract,
+            ContextCommand::CompressZip
+            | ContextCommand::Compress7z
+            | ContextCommand::CompressTarGz => self.can_compress,
             ContextCommand::Cut | ContextCommand::MoveTo => self.can_cut,
             ContextCommand::Copy
             | ContextCommand::CopyFilename
@@ -130,6 +137,9 @@ impl CommandAvailability {
             ContextCommand::OpenInTerminal => {
                 Some("Open in Terminal is available for local folders only")
             }
+            ContextCommand::CompressZip
+            | ContextCommand::Compress7z
+            | ContextCommand::CompressTarGz => Some("Compress is available for local files only"),
             _ => Some("This location does not support this action"),
         }
     }
@@ -153,6 +163,7 @@ impl CommandAvailability {
                 can_trash: true,
                 can_delete: true,
                 can_extract: true,
+                can_compress: true,
                 disabled_reason: None,
             },
         }
@@ -201,6 +212,9 @@ pub fn item_commands(target: &ContextTarget) -> Vec<ContextCommand> {
                 commands.push(ContextCommand::Extract);
             }
             commands.extend([
+                ContextCommand::CompressZip,
+                ContextCommand::Compress7z,
+                ContextCommand::CompressTarGz,
                 ContextCommand::Cut,
                 ContextCommand::Copy,
                 ContextCommand::CopyFilename,
@@ -218,6 +232,9 @@ pub fn item_commands(target: &ContextTarget) -> Vec<ContextCommand> {
             ContextCommand::OpenInNewTab,
             ContextCommand::OpenInNewWindow,
             ContextCommand::OpenInTerminal,
+            ContextCommand::CompressZip,
+            ContextCommand::Compress7z,
+            ContextCommand::CompressTarGz,
             ContextCommand::Cut,
             ContextCommand::Copy,
             ContextCommand::CopyFilename,
@@ -312,6 +329,29 @@ mod tests {
             "a mixed selection extracts nothing as a whole"
         );
         assert!(!CommandAvailability::for_selection(&[], None).can_extract);
+    }
+
+    #[test]
+    fn compress_is_offered_for_local_items_in_three_formats() {
+        use super::CommandAvailability;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("report.txt");
+        std::fs::write(&path, "report").unwrap();
+        let item = FileItem::from_path(&path).unwrap();
+
+        let commands = item_commands(&ContextTarget::File(item.clone()));
+        for command in [
+            ContextCommand::CompressZip,
+            ContextCommand::Compress7z,
+            ContextCommand::CompressTarGz,
+        ] {
+            assert!(commands.contains(&command));
+            assert!(CommandAvailability::for_selection(&[item.clone()], None).allows(command));
+        }
+        assert!(
+            !CommandAvailability::for_selection(&[], None).can_compress,
+            "nothing selected, nothing to compress"
+        );
     }
 
     #[test]

@@ -80,7 +80,9 @@ pub fn is_eligible_for_retry(record: &OperationRecord) -> bool {
     if !looks_like_permission_error(message) {
         return false;
     }
-    if record.sources.len() != 1 {
+    if record.sources.len() != 1
+        || matches!(record.kind, OperationKind::Compress | OperationKind::Extract)
+    {
         return false;
     }
     if !record
@@ -105,6 +107,8 @@ fn verb_for(kind: OperationKind) -> &'static str {
         OperationKind::Rename => "move",
         OperationKind::Trash => "trash",
         OperationKind::Delete => "delete",
+        // Never retried: archives are not a single-item operation to elevate.
+        OperationKind::Compress | OperationKind::Extract => "copy",
     }
 }
 
@@ -224,6 +228,8 @@ mod tests {
             total: 1,
             state: OperationState::Failed(message.into()),
             finished_at: None,
+            hidden: false,
+            shown_as: None,
         }
     }
 
@@ -314,6 +320,8 @@ mod tests {
             total: 1,
             state: OperationState::Completed,
             finished_at: None,
+            hidden: false,
+            shown_as: None,
         };
         assert!(!is_eligible_for_retry(&record));
     }

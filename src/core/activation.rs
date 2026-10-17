@@ -34,9 +34,20 @@ pub fn activation_for(item: &FileItem) -> Activation {
 }
 
 /// Whether the application can extract this entry into a folder beside it:
-/// exactly the archives it can browse, and nothing else.
+/// the archives it can browse, plus 7-Zip, which it extracts with the `7z`
+/// program instead.
 pub fn is_extractable(item: &FileItem) -> bool {
-    !item.is_dir() && is_browsable_archive(&resolved_content_type(item))
+    let content_type = resolved_content_type(item);
+    !item.is_dir() && (is_browsable_archive(&content_type) || is_seven_zip(&content_type))
+}
+
+/// 7-Zip archives cannot be browsed: gvfsd-archive hands libarchive a stream
+/// it cannot seek, and libarchive's 7-Zip reader needs to.
+pub fn is_seven_zip(content_type: &str) -> bool {
+    matches!(
+        content_type,
+        "application/x-7z-compressed" | "application/x-7z-compressed-tar"
+    )
 }
 
 /// The entry's content type, named by the entry itself when GIO has not been
@@ -64,7 +75,6 @@ fn is_browsable_archive(content_type: &str) -> bool {
         content_type,
         "application/zip"
             | "application/x-zip-compressed"
-            | "application/x-7z-compressed"
             | "application/vnd.rar"
             | "application/x-rar"
             | "application/x-rar-compressed"
@@ -106,6 +116,16 @@ mod tests {
         };
         assert!(location.is_inside_archive());
         assert_eq!(location.display_name(), "holiday.zip");
+    }
+
+    #[test]
+    fn a_seven_zip_archive_is_extracted_but_not_browsed() {
+        let archive = entry("backup.7z", EntryKind::File, Some("application/x-7z-compressed"));
+        assert_eq!(activation_for(&archive), Activation::LaunchExternally);
+        assert!(is_extractable(&archive));
+        let pending = entry("backup.7z", EntryKind::File, None);
+        assert!(is_extractable(&pending));
+        assert!(!is_extractable(&entry("notes.txt", EntryKind::File, Some("text/plain"))));
     }
 
     #[test]

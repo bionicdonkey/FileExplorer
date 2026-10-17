@@ -778,6 +778,9 @@ pub struct FileView {
     /// Set while a selection change is programmatic rather than a click, so the
     /// pane it came from does not write an emptied selection back.
     syncing_selection: Rc<std::cell::Cell<bool>>,
+    /// The drag source whose drag is currently in flight, so Escape can cancel
+    /// it. GTK itself does not abort a DND operation on Escape.
+    active_drag_source: Rc<RefCell<Option<glib::WeakRef<gtk::DragSource>>>>,
     visible_metadata:
         Rc<RefCell<crate::application::performance::VisibleCache<VisibleMetadataCacheEntry>>>,
     metadata_target: Rc<VisibleMetadataTarget>,
@@ -898,6 +901,7 @@ impl FileView {
             stream_selection: Default::default(),
             selection_click_keys: Default::default(),
             syncing_selection: Default::default(),
+            active_drag_source: Default::default(),
             on_status: Default::default(),
             rendered_view: Default::default(),
             metadata_stale: Default::default(),
@@ -965,6 +969,9 @@ impl FileView {
         let keyboard_view = view.clone();
         let keys = gtk::EventControllerKey::new();
         keys.connect_key_pressed(move |_, key, _, modifiers| {
+            if key == gtk::gdk::Key::Escape && keyboard_view.cancel_active_drag() {
+                return glib::Propagation::Stop;
+            }
             if keyboard_view.handle_type_ahead_key(key, modifiers) {
                 return glib::Propagation::Stop;
             }
@@ -1367,6 +1374,17 @@ impl FileView {
         );
     }
 
+    /// A reload cancels the metadata requests its predecessor's tiles were
+    /// waiting on. A tile kept in place would then show the placeholder icon
+    /// for good, so it is rebuilt to ask again.
+    fn flow_tile_awaits_metadata(&self, item: &FileItem) -> bool {
+        !item.is_dir()
+            && !matches!(
+                self.metadata_target.cache.borrow_mut().get(item.location()),
+                Some(VisibleMetadataCacheEntry::Resolved(_))
+            )
+    }
+
     /// The compact FlowBox grid owns concrete image widgets instead of a
     /// ListModel row. Its rendered file tiles are therefore the visible-range
     /// boundary for metadata needed to promote a deferred thumbnail.
@@ -1702,6 +1720,21 @@ impl FileView {
     fn clear_selection(&self) {
         clear_pane_selection(self.widget.upcast_ref::<gtk::Widget>());
         self.select_items(Vec::new());
+    }
+
+    /// Aborts an in-flight drag, if one is active, and reports whether there
+    /// was a drag to cancel. GTK does not treat Escape as a DND cancellation,
+    /// so the key controllers call this when Escape is pressed.
+    pub fn cancel_active_drag(&self) -> bool {
+        let Some(source) = self.active_drag_source.borrow_mut().take() else {
+            return false;
+        };
+        let Some(source) = source.upgrade() else {
+            return false;
+        };
+        DRAG_CANCELLED.store(true, std::sync::atomic::Ordering::SeqCst);
+        source.drag_cancel();
+        true
     }
 
     /// Hybrid view renders two panes that own their selections independently.
@@ -2569,6 +2602,19 @@ impl FileView {
     }
 
     fn render(&self, items: Vec<FileItem>, options: &ViewOptions) {
+        // The list models filter hidden rows themselves; the FlowBox grids
+        // render exactly what they are given.
+        let items = if !options.show_hidden
+            && matches!(options.view_mode, ViewMode::IconGrid | ViewMode::Hybrid)
+            && !self.use_recycled_model(items.len())
+        {
+            items
+                .into_iter()
+                .filter(|item| !item.name().starts_with('.'))
+                .collect()
+        } else {
+            items
+        };
         if items.is_empty() {
             let message = if self.is_showing_search_results() {
                 match self.search.outcome() {
@@ -2911,6 +2957,7 @@ impl FileView {
                         return false;
                     };
                     if self.metadata_stale.get()
+                        || self.flow_tile_awaits_metadata(item)
                         || existing.size() != item.size()
                         || existing.modified() != item.modified()
                         || existing.name() != item.name()
@@ -3710,6 +3757,11 @@ impl FileView {
             gtk::accessible::Property::MultiSelectable(true),
         ]);
         grid.set_selection_mode(gtk::SelectionMode::Multiple);
+        // Rubberband selection autoscrolls through these; without them it
+        // reports a critical on every frame once the pointer leaves the view.
+        grid.set_hadjustment(&self.widget.hadjustment());
+        grid.set_vadjustment(&self.widget.vadjustment());
+        pressing_an_item_drags_it(&grid);
         grid.set_activate_on_single_click(false);
         grid.set_valign(gtk::Align::Start);
         grid.set_column_spacing(layout.gap.try_into().expect("grid gaps are positive"));
@@ -4058,9 +4110,26 @@ fn show_item_context_menu(
             ));
             continue;
         }
+        if command == ContextCommand::CompressZip {
+            menu.append(&command_submenu(
+                "Compress ›",
+                &target,
+                view,
+                &[
+                    ContextCommand::CompressZip,
+                    ContextCommand::Compress7z,
+                    ContextCommand::CompressTarGz,
+                ],
+                popover.clone(),
+                &availability,
+            ));
+            continue;
+        }
         if matches!(
             command,
-            ContextCommand::CopyFilename
+            ContextCommand::Compress7z
+                | ContextCommand::CompressTarGz
+                | ContextCommand::CopyFilename
                 | ContextCommand::CopyFullPath
                 | ContextCommand::CopyTo
                 | ContextCommand::MoveTo
@@ -4341,6 +4410,9 @@ fn context_command_label(command: ContextCommand) -> &'static str {
         ContextCommand::ToggleQuickAccess => "Pin to Quick access",
         ContextCommand::OpenWith => "Open With",
         ContextCommand::Extract => "Extract",
+        ContextCommand::CompressZip => "ZIP archive (.zip)",
+        ContextCommand::Compress7z => "7-Zip archive (.7z)",
+        ContextCommand::CompressTarGz => "Compressed tar (.tar.gz)",
     }
 }
 
@@ -4521,7 +4593,7 @@ fn column_factory_layout(
             let drag_source = gtk::DragSource::new();
             drag_source.set_actions(gtk::gdk::DragAction::COPY | gtk::gdk::DragAction::MOVE);
             drag_source.connect_prepare(move |source, _, _| {
-                let object = drag_item
+                        let object = drag_item
                     .upgrade()?
                     .item()
                     .and_downcast::<glib::BoxedAnyObject>()?;
@@ -4533,6 +4605,7 @@ fn column_factory_layout(
                 source.set_actions(drag_actions(&drag_view));
                 drag_selection_provider(&drag_view)
             });
+            track_active_drag(&drag_source, &view);
             line.add_controller(drag_source);
             list_item.set_child(Some(&line));
         } else {
@@ -4704,6 +4777,25 @@ mod tests {
         FileItem, GroupField, Location, SortDirection, SortField, ViewMode, ViewOptions,
     };
     use crate::ui::context_menu::{CommandAvailability, ContextCommand, ContextTarget};
+
+    #[gtk::test]
+    fn escape_without_a_drag_is_not_a_cancellation() {
+        let directory = tempfile::tempdir().unwrap();
+        let view = FileView::new(Location::from_local_path(directory.path()));
+        assert!(!view.cancel_active_drag());
+    }
+
+    #[gtk::test]
+    fn a_drag_source_is_only_tracked_while_a_drag_is_in_flight() {
+        let directory = tempfile::tempdir().unwrap();
+        let view = FileView::new(Location::from_local_path(directory.path()));
+        let source = gtk::DragSource::new();
+        super::track_active_drag(&source, &view);
+        // Wiring the source is not itself a drag; nothing is cancellable until
+        // the source reports a drag-begin.
+        assert!(view.active_drag_source.borrow().is_none());
+        assert!(!view.cancel_active_drag());
+    }
 
     #[gtk::test]
     fn slice4_reused_list_cells_clear_cut_descriptions_for_files_and_groups() {
@@ -7175,6 +7267,43 @@ fn thumbnail_cache_paths(cache_home: &Path, uri: &str) -> Vec<PathBuf> {
         .collect()
 }
 
+/// A press on a tile starts dragging that tile, not a rubberband selection.
+///
+/// The grid's own rubberband gesture runs in the capture phase, ahead of the
+/// tile's drag source, and starts after 32 pixels. A quick flick out of the
+/// window passes that in a single motion event, so the rubberband won and the
+/// file never left; only a slow start got the drag. Rubberbanding still starts
+/// from the empty space between tiles.
+fn pressing_an_item_drags_it(grid: &FlowBox) {
+    let controllers = grid.observe_controllers();
+    for index in 0..controllers.n_items() {
+        let Some(rubberband) = controllers
+            .item(index)
+            .and_downcast::<gtk::GestureDrag>()
+            .filter(|gesture| gesture.propagation_phase() == gtk::PropagationPhase::Capture)
+        else {
+            continue;
+        };
+        let grid = grid.downgrade();
+        rubberband.connect_drag_begin(move |gesture, x, y| {
+            let Some(grid) = grid.upgrade() else {
+                return;
+            };
+            let mut widget = grid.pick(x, y, gtk::PickFlags::DEFAULT);
+            while let Some(current) = widget {
+                if current == grid {
+                    break;
+                }
+                if current.has_css_class("icon-grid-tile") {
+                    gesture.set_state(gtk::EventSequenceState::Denied);
+                    break;
+                }
+                widget = current.parent();
+            }
+        });
+    }
+}
+
 fn attach_drag_source(widget: &impl IsA<gtk::Widget>, item: FileItem, view: FileView) {
     let drop_item = item.clone();
     attach_folder_drop(widget, view.clone(), move || Some(drop_item.clone()));
@@ -7182,12 +7311,28 @@ fn attach_drag_source(widget: &impl IsA<gtk::Widget>, item: FileItem, view: File
     attach_touch_menu(widget, view.clone(), move || Some(touch_item.clone()));
     let drag_source = gtk::DragSource::new();
     drag_source.set_actions(gtk::gdk::DragAction::COPY | gtk::gdk::DragAction::MOVE);
+    let prepare_view = view.clone();
     drag_source.connect_prepare(move |source, _, _| {
-        view.select_context_item(&item);
-        source.set_actions(drag_actions(&view));
-        drag_selection_provider(&view)
+        prepare_view.select_context_item(&item);
+        source.set_actions(drag_actions(&prepare_view));
+        drag_selection_provider(&prepare_view)
     });
+    track_active_drag(&drag_source, &view);
     widget.add_controller(drag_source);
+}
+
+/// Remembers the drag source whose drag is in flight, so a key controller can
+/// cancel it with Escape. GTK's own DND machinery has no Escape handling.
+fn track_active_drag(drag_source: &gtk::DragSource, view: &FileView) {
+    let begun = view.clone();
+    drag_source.connect_drag_begin(move |source, _| {
+        DRAG_CANCELLED.store(false, std::sync::atomic::Ordering::SeqCst);
+        *begun.active_drag_source.borrow_mut() = Some(source.downgrade());
+    });
+    let ended = view.clone();
+    drag_source.connect_drag_end(move |_, _, _| {
+        ended.active_drag_source.borrow_mut().take();
+    });
 }
 
 fn attach_folder_drop(
@@ -7227,6 +7372,12 @@ fn drop_action(
     }
 }
 
+/// Set when Escape cancels an in-flight drag. The source side ends immediately,
+/// but GTK's X11 backend still delivers the drop to the target, so targets
+/// consult and clear this flag to decline that trailing drop.
+static DRAG_CANCELLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 fn attach_async_drop(
     widget: &impl IsA<gtk::Widget>,
     view: FileView,
@@ -7249,26 +7400,42 @@ fn attach_async_drop(
             leaving.borrow_mut().take();
         }
     });
-    for enter in [true, false] {
+    let negotiate = {
         let destination = destination.clone();
         let negotiated = negotiated.clone();
-        let negotiate =
-            move |target: &gtk::DropTargetAsync, drop: &gtk::gdk::Drop, _: f64, _: f64| {
-                let action = if destination().is_some() {
-                    drop_action(drop.actions(), target.current_event_state())
-                } else {
-                    DragAction::empty()
-                };
-                *negotiated.borrow_mut() = Some((drop.clone(), action));
-                action
+        move |target: &gtk::DropTargetAsync, drop: &gtk::gdk::Drop, _: f64, _: f64| {
+            let action = if destination().is_some() {
+                drop_action(drop.actions(), target.current_event_state())
+            } else {
+                DragAction::empty()
             };
-        if enter {
-            target.connect_drag_enter(negotiate);
-        } else {
-            target.connect_drag_motion(negotiate);
+            *negotiated.borrow_mut() = Some((drop.clone(), action));
+            action
         }
-    }
-    target.connect_drop(move |_, drop, _, _| {
+    };
+    // A fresh enter starts a new drag session, so a cancellation recorded by the
+    // previous one no longer applies.
+    let enter_negotiate = {
+        let negotiate = negotiate.clone();
+        move |target: &gtk::DropTargetAsync, drop: &gtk::gdk::Drop, _: f64, _: f64| {
+            DRAG_CANCELLED.store(false, std::sync::atomic::Ordering::SeqCst);
+            negotiate(target, drop, 0.0, 0.0)
+        }
+    };
+    target.connect_drag_enter(enter_negotiate);
+    target.connect_drag_motion(negotiate);
+    target.connect_drop(move |target, drop, _, _| {
+        // GTK lights the target while a drag is over it and darkens it again
+        // when the drag leaves, but a drop is not followed by a leave. The
+        // highlight would stay on, as a blue border round the whole view.
+        target.widget().unset_state_flags(gtk::StateFlags::DROP_ACTIVE);
+        // Escape ended the source side of the drag, but GTK's X11 backend still
+        // delivers the drop to the target afterwards, so decline it here. It
+        // may deliver it to several targets; all stay declined until the next
+        // drag enters.
+        if DRAG_CANCELLED.load(std::sync::atomic::Ordering::SeqCst) {
+            return false;
+        }
         let Some(destination) = destination() else {
             return false;
         };

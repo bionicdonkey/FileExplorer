@@ -19,9 +19,21 @@ bundle.
   before enumeration finishes
 - Thumbnails and file metadata fetched lazily for visible rows only, and cancelled when you
   navigate away
-- Archives (`.zip`, `.tar` and its compressed forms, `.7z`, `.rar`, …) open in the window like
+- Archives (`.zip`, `.tar` and its compressed forms, `.rar`, …) open in the window like
   folders, through the GVfs archive backend. Zip-based documents such as `.docx` and `.epub` are
   not archives for this purpose and still open in the application that owns them.
+  `.7z` is the exception: GVfs cannot read it, so a `.7z` opens in the default application and
+  **Extract** unpacks it with the `7z` program instead.
+- **Extract** puts an archive's contents in a new folder named after it -- unless the archive is a
+  single folder, which lands beside the archive as it is.
+- **Compress** (right-click ▸ Compress) packs the selected local files and folders into a `.zip`,
+  `.7z` or `.tar.gz` beside them, using the `zip`, `7z` and `tar` programs. The Debian package
+  recommends `zip` and `p7zip-full`; a missing one is reported when you use it. The Flatpak
+  runtime has `tar` but not `zip` or `7z`, so only `.tar.gz` works there for now.
+- Everything running -- compressing, extracting, copies and moves -- shows in the status bar as a
+  label and bar beside the spinner. Click it to expand the list of running operations, each with
+  its own progress and Cancel button. The Operations tab keeps the full history. Extracting first shows "Preparing…" while
+  GVfs opens the archive -- slow for a large `.tar.gz` -- then the bytes copied.
 
 **Files**
 - Copy, move, rename, delete, trash and create, with conflict resolution (replace, keep both, skip)

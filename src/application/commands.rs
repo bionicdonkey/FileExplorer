@@ -10,6 +10,9 @@ pub enum ContextCommand {
     Open,
     OpenWith,
     Extract,
+    CompressZip,
+    Compress7z,
+    CompressTarGz,
     OpenInNewTab,
     OpenInNewWindow,
     OpenInTerminal,
@@ -71,6 +74,85 @@ pub fn named_child(parent: &Location, name: &str) -> std::io::Result<Location> {
     }
     Location::try_from_file(gio::File::for_uri(parent.uri()).child(name))
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid location"))
+}
+
+/// What a transfer to `destination` can do with each source.
+///
+/// An item moved to the folder it is already in, or anything dropped on itself
+/// or inside itself, has nowhere to go and is left out. A copy into the folder
+/// it came from stays in: it becomes a duplicate (see `copy_sibling`).
+pub fn transfer_sources(
+    sources: Vec<Location>,
+    destination: &Location,
+    action: ClipboardAction,
+) -> Vec<Location> {
+    sources
+        .into_iter()
+        .filter(|source| {
+            !destination.is_within(source)
+                && (action == ClipboardAction::Copy || source.parent().as_ref() != Some(destination))
+        })
+        .collect()
+}
+
+/// A name beside `source` for a duplicate of it: `report (copy).txt`, then
+/// `report (copy 2).txt`. Folders and archives keep their whole name, and a
+/// duplicate of a duplicate numbers on from the original.
+pub fn copy_sibling(source: &Location) -> std::io::Result<Location> {
+    let parent = source.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "Nothing to copy beside")
+    })?;
+    let name = source.display_name();
+    let is_dir = gio::File::for_uri(source.uri()).query_file_type(
+        gio::FileQueryInfoFlags::NONE,
+        gio::Cancellable::NONE,
+    ) == gio::FileType::Directory;
+    let (stem, extension) = if is_dir {
+        (name.as_str(), "")
+    } else {
+        split_extension(&name)
+    };
+    let stem = strip_copy_suffix(stem);
+    let mut number = 1;
+    loop {
+        let label = if number == 1 {
+            "(copy)".to_owned()
+        } else {
+            format!("(copy {number})")
+        };
+        let candidate = named_child(&parent, &format!("{stem} {label}{extension}"))?;
+        if !gio::File::for_uri(candidate.uri()).query_exists(gio::Cancellable::NONE) {
+            return Ok(candidate);
+        }
+        number += 1;
+    }
+}
+
+/// `("report", ".txt")`; a compressed tar keeps both parts as its extension.
+fn split_extension(name: &str) -> (&str, &str) {
+    let Some(dot) = name.rfind('.').filter(|dot| *dot > 0) else {
+        return (name, "");
+    };
+    let dot = match name[..dot].strip_suffix(".tar") {
+        Some(_) => dot - ".tar".len(),
+        None => dot,
+    };
+    (&name[..dot], &name[dot..])
+}
+
+fn strip_copy_suffix(stem: &str) -> &str {
+    let Some(open) = stem.rfind(" (copy") else {
+        return stem;
+    };
+    let tail = &stem[open + " (copy".len()..];
+    let numbered = tail
+        .strip_prefix(' ')
+        .map_or(false, |n| n.strip_suffix(')').is_some_and(|n| n.parse::<u32>().is_ok()));
+    if tail == ")" || numbered {
+        &stem[..open]
+    } else {
+        stem
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -266,5 +348,91 @@ impl DragProposal {
             ApplicationCommand::route(ContextCommand::Paste, self.sources, self.destination);
         command.transfer = Some(self.action);
         command
+    }
+}
+
+#[cfg(test)]
+mod transfer_tests {
+    use super::{
+        copy_sibling, split_extension, strip_copy_suffix, transfer_sources, ClipboardAction,
+    };
+    use crate::core::Location;
+
+    fn location(uri: &str) -> Location {
+        Location::from_uri(uri).unwrap()
+    }
+
+    #[test]
+    fn a_move_to_the_folder_it_is_in_does_nothing_but_a_copy_duplicates() {
+        let folder = location("file:///home/user/Downloads");
+        let inside = location("file:///home/user/Downloads/shot.png");
+        let elsewhere = location("file:///home/user/Pictures/other.png");
+
+        assert!(transfer_sources(vec![inside.clone()], &folder, ClipboardAction::Cut).is_empty());
+        assert_eq!(
+            transfer_sources(vec![inside.clone()], &folder, ClipboardAction::Copy),
+            vec![inside.clone()]
+        );
+        assert_eq!(
+            transfer_sources(
+                vec![inside.clone(), elsewhere.clone()],
+                &folder,
+                ClipboardAction::Cut
+            ),
+            vec![elsewhere],
+            "only what is not already there still moves"
+        );
+    }
+
+    #[test]
+    fn nothing_is_dropped_on_itself_or_inside_itself() {
+        let folder = location("file:///home/user/Downloads");
+        let sub = location("file:///home/user/Downloads/sub");
+        for action in [ClipboardAction::Copy, ClipboardAction::Cut] {
+            assert!(transfer_sources(vec![sub.clone()], &sub, action).is_empty());
+            assert!(transfer_sources(
+                vec![folder.clone()],
+                &location("file:///home/user/Downloads/sub/deeper"),
+                action
+            )
+            .is_empty());
+        }
+    }
+
+    #[test]
+    fn a_duplicate_keeps_the_extension_and_a_compressed_tar_keeps_both() {
+        assert_eq!(split_extension("report.txt"), ("report", ".txt"));
+        assert_eq!(split_extension("logs.tar.gz"), ("logs", ".tar.gz"));
+        assert_eq!(split_extension(".bashrc"), (".bashrc", ""));
+        assert_eq!(split_extension("README"), ("README", ""));
+        assert_eq!(strip_copy_suffix("report (copy)"), "report");
+        assert_eq!(strip_copy_suffix("report (copy 3)"), "report");
+        assert_eq!(strip_copy_suffix("report (copying)"), "report (copying)");
+    }
+
+    #[test]
+    fn duplicates_are_named_beside_the_original_and_number_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("report.txt");
+        std::fs::write(&file, "x").unwrap();
+        std::fs::create_dir(dir.path().join("v1.2")).unwrap();
+        let name = |location: &Location| location.local_path().unwrap();
+
+        let first = copy_sibling(&Location::from_local_path(&file)).unwrap();
+        assert_eq!(name(&first), dir.path().join("report (copy).txt"));
+
+        std::fs::write(name(&first), "x").unwrap();
+        let second = copy_sibling(&Location::from_local_path(&file)).unwrap();
+        assert_eq!(name(&second), dir.path().join("report (copy 2).txt"));
+
+        let of_a_copy = copy_sibling(&first).unwrap();
+        assert_eq!(
+            name(&of_a_copy),
+            dir.path().join("report (copy 2).txt"),
+            "a duplicate of a duplicate numbers on from the original"
+        );
+
+        let folder = copy_sibling(&Location::from_local_path(&dir.path().join("v1.2"))).unwrap();
+        assert_eq!(name(&folder), dir.path().join("v1.2 (copy)"));
     }
 }

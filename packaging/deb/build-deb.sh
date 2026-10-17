@@ -65,7 +65,9 @@ fi
 # locations; shared-mime-info names the file types the context menu offers
 # applications for.
 depends="$shlibs, pkexec | policykit-1, gvfs, shared-mime-info"
-recommends="gvfs-backends"
+# zip and 7z are the archivers behind the Compress menu; tar and gzip are
+# always present.
+recommends="gvfs-backends, zip, p7zip-full | 7zip"
 
 install -d "$pkg/DEBIAN"
 cat > "$pkg/DEBIAN/control" <<EOF

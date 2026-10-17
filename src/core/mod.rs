@@ -23,7 +23,9 @@ pub use elevated_operations::ElevatedOperations;
 pub use file_item::FileItem;
 pub use location::{Location, LocationError, ResolvedLocation};
 pub use navigation::NavigationHistory;
-pub use operation_manager::{OperationKind, OperationManager, OperationRecord, OperationState};
+pub use operation_manager::{
+    JobHandle, OperationKind, OperationManager, OperationRecord, OperationState,
+};
 pub use properties::{PermissionBits, PropertyDetails};
 pub use search::{SearchHistory, SearchResult};
 pub use sidebar_model::{SidebarLocation, SidebarModel, SidebarNode, SidebarPreferences};

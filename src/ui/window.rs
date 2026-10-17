@@ -13,6 +13,7 @@ use gtk::{
 use crate::application::commands::{
     route, ClipboardAction, ClipboardPayload, ClipboardState, Shortcut, TransferCompletion,
 };
+use crate::application::compression::ArchiveFormat;
 use crate::core::contracts::{ConflictDecision, MutationKind};
 use crate::core::location::Location;
 use crate::core::SearchHistory;
@@ -254,6 +255,7 @@ impl ExplorerWindow {
         let sidebar_context_preferences = preferences.clone();
         let status = Label::new(Some("Ready"));
         status.set_halign(Align::Start);
+        status.set_ellipsize(gtk::pango::EllipsizeMode::End);
         status.add_css_class("dim-label");
         status.set_margin_start(8);
         status.set_margin_end(8);
@@ -266,9 +268,41 @@ impl ExplorerWindow {
         counts.set_hexpand(true);
         counts.set_margin_end(8);
         counts.set_margin_bottom(6);
+        let progress_label = Label::new(None);
+        progress_label.add_css_class("dim-label");
+        progress_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        progress_label.set_max_width_chars(40);
+        let progress_bar = gtk::ProgressBar::new();
+        progress_bar.set_valign(Align::Center);
+        progress_bar.set_size_request(140, -1);
+        let progress_content = GtkBox::new(Orientation::Horizontal, 8);
+        progress_content.append(&progress_label);
+        progress_content.append(&progress_bar);
+        // Clicking the summary opens the full list of what is running.
+        let progress_button = gtk::MenuButton::new();
+        progress_button.set_child(Some(&progress_content));
+        progress_button.set_has_frame(false);
+        progress_button.add_css_class("flat");
+        progress_button.set_margin_bottom(2);
+        progress_button.set_visible(false);
+        progress_button.set_direction(gtk::ArrowType::Up);
+        progress_button.set_tooltip_text(Some("Show running operations"));
+        let running_popover = gtk::Popover::new();
+        let show_all_tabs = tabs.view.clone();
+        let show_all_operations = operations.clone();
+        let show_all_popover = running_popover.clone();
+        running_popover.set_child(Some(&operations_page::build_running_list(
+            operations.clone(),
+            move || {
+                show_all_popover.popdown();
+                open_operations_tab(&show_all_tabs, show_all_operations.clone());
+            },
+        )));
+        progress_button.set_popover(Some(&running_popover));
         let status_bar_widget = GtkBox::new(Orientation::Horizontal, 4);
         status_bar_widget.append(&status);
         status_bar_widget.append(&activity);
+        status_bar_widget.append(&progress_button);
         status_bar_widget.append(&counts);
         let status_bar = StatusBar {
             counts,
@@ -280,9 +314,30 @@ impl ExplorerWindow {
         let activity_widget = activity.clone();
         let activity_operations = operations.clone();
         let activity_navigation = status_bar.navigation_busy.clone();
-        glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
+        glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
             let busy = activity_navigation.get() || activity_operations.active_count() > 0;
             activity_widget.set_spinning(busy);
+            match operations_page::footer_progress(&activity_operations.records()) {
+                Some((text, fraction)) => {
+                    progress_label.set_text(&text);
+                    progress_button.set_visible(true);
+                    match fraction {
+                        Some(fraction) => progress_bar.set_fraction(fraction),
+                        None => progress_bar.pulse(),
+                    }
+                    progress_bar.update_property(&[
+                        gtk::accessible::Property::Label(&text),
+                        gtk::accessible::Property::ValueText(&match fraction {
+                            Some(fraction) => format!("{:.0}%", fraction * 100.0),
+                            None => "In progress".to_owned(),
+                        }),
+                    ]);
+                }
+                None => {
+                    progress_button.popdown();
+                    progress_button.set_visible(false);
+                }
+            }
             glib::ControlFlow::Continue
         });
 
@@ -300,18 +355,16 @@ impl ExplorerWindow {
                     .sections()
                     .into_iter()
                     .find(|section| section.title == title);
-                let sidebar = sidebar_holder_actions.borrow().clone();
                 let target = sidebar_target(
                     selected_index(&sidebar_context_tabs, &sidebar_context_data),
                     sidebar_context_data.borrow().len(),
                 );
-                if let (Some(index), Some(section), Some(sidebar)) = (target, section, sidebar) {
+                if let (Some(index), Some(section)) = (target, section) {
                     show_file_tab(&sidebar_context_tabs, &sidebar_context_data, index);
                     let tab = &sidebar_context_data.borrow()[index];
                     tab.view.show_section_overview(section.clone());
                     tab.page.set_title(&section.title);
                     sidebar_context_header.set_section(&section.title);
-                    sidebar.set_active_section(section.title);
                 }
             }
             SidebarAction::Open(path) => {
@@ -490,13 +543,6 @@ impl ExplorerWindow {
                 open_operations_tab(&sidebar_context_tabs, sidebar_context_operations.clone())
             }
         });
-        sidebar.set_active_location(
-            tabs_data
-                .borrow()
-                .first()
-                .map(|tab| tab.view.current_location())
-                .unwrap_or(initial),
-        );
         let mounted_tabs = Rc::downgrade(&tabs_data);
         // The sidebar's retained monitor, not a fresh `VolumeMonitor::get()`:
         // GIO finalizes the monitor when the last reference drops, so a handler
@@ -578,12 +624,18 @@ impl ExplorerWindow {
             view_controls(&tabs_data, &tabs.view, &preferences),
         ));
         body.append(&content);
-        body.append(&status_bar_widget);
+        // Announcements stay in the accessibility tree but are not drawn, so
+        // the footer remains a single line.
         let announcements = AccessibleStatus::new();
-        announcements.widget.set_margin_start(8);
-        announcements.widget.set_margin_end(8);
+        announcements.widget.set_opacity(0.0);
+        announcements.widget.set_can_target(false);
+        announcements.widget.set_valign(Align::Start);
         announcements.watch_operations(operations.clone());
-        body.append(&announcements.widget);
+        let status_overlay = gtk::Overlay::new();
+        status_overlay.set_child(Some(&status_bar_widget));
+        status_overlay.add_overlay(&announcements.widget);
+        status_overlay.set_clip_overlay(&announcements.widget, true);
+        body.append(&status_overlay);
         let toolbar = ToolbarView::new();
         toolbar.add_top_bar(&header);
         toolbar.set_content(Some(&body));
@@ -654,6 +706,16 @@ impl ExplorerWindow {
         let shortcut_window = window.downgrade();
         let shortcut_navigation_sidebar = sidebar.clone();
         shortcuts.connect_key_pressed(move |_, key, _, modifiers| {
+            // GTK has no built-in Escape handling for DND, and key events do
+            // not reach the view's own controller while a drag is in flight, so
+            // cancelling the active tab's drag happens here on the window.
+            if key == gtk::gdk::Key::Escape {
+                let view = selected_index(&shortcut_tabs, &shortcut_data)
+                    .map(|index| shortcut_data.borrow()[index].view.clone());
+                if view.is_some_and(|view| view.cancel_active_drag()) {
+                    return glib::Propagation::Stop;
+                }
+            }
             let navigation = if key == gtk::gdk::Key::F5 {
                 Some(NavigationAction::Refresh)
             } else if modifiers.contains(gtk::gdk::ModifierType::ALT_MASK) {
@@ -930,19 +992,12 @@ impl ExplorerWindow {
 
         let select_data = tabs_data.clone();
         let select_header = header_controls.clone();
-        let select_sidebar = sidebar.clone();
         tabs.view.connect_selected_page_notify(move |view| {
             if let Some(index) = selected_index(view, &select_data) {
                 let tab = &select_data.borrow()[index];
                 select_header.set_tab_content(&tab.view.tab_state().borrow().content);
-                if let Some(title) = tab.view.section_title() {
-                    select_sidebar.set_active_section(title);
-                }
                 select_header.set_file_action_availability(&tab.view.command_availability());
                 tab.view.publish_status();
-                if tab.view.section_title().is_none() {
-                    select_sidebar.set_active_location(tab.view.current_location());
-                }
             }
         });
 
@@ -1057,7 +1112,7 @@ fn handle_navigation_action(
         match action {
             NavigationAction::Back => {
                 if view.clear_section_overview() {
-                    restore_underlying_location(index, data, tabs, header, sidebar);
+                    restore_underlying_location(index, data, tabs, header);
                 }
                 return;
             }
@@ -1149,7 +1204,6 @@ fn wire_tab(
     let committed_page = page.clone();
     let committed_tabs = tabs.clone();
     let committed_header = header.clone();
-    let committed_sidebar = sidebar.clone();
     let committed_preferences = preferences.clone();
     view.set_location_committed_handler(move |location| {
         let Some(data) = committed_data.upgrade() else {
@@ -1176,10 +1230,8 @@ fn wire_tab(
         {
             if let Some(path) = location.local_path() {
                 committed_header.set_location(&path);
-                committed_sidebar.set_active_path(&path);
             } else {
                 committed_header.set_uri(location.uri());
-                committed_sidebar.set_active_location(location.clone());
             }
         }
     });
@@ -1294,27 +1346,66 @@ fn wire_tab(
                     let view_for_failure = command_view.clone();
                     let name = source.display_name();
                     let name_for_failure = name.clone();
-                    if crate::application::extraction::extract(
+                    if !crate::application::extraction::extract(
                         &command_operations,
                         source,
                         &parent,
                         move |message| {
-                            crate::ui::accessibility::AccessibleStatus::announce_for(
-                                &view_for_failure.widget,
+                            show_operation_error(
+                                &view_for_failure,
                                 &format!("Could not extract {name_for_failure}: {message}"),
-                                crate::ui::accessibility::StatusPriority::Urgent,
                             );
                         },
-                    )
-                    .is_none()
-                    {
-                        crate::ui::accessibility::AccessibleStatus::announce_for(
-                            &command_view.widget,
-                            &format!("Could not prepare a folder beside {name}"),
-                            crate::ui::accessibility::StatusPriority::Urgent,
-                        );
+                    ) {
+                        show_operation_error(&command_view, &format!("Could not open {name}"));
                     }
                 }
+            }
+            ContextCommand::CompressZip
+            | ContextCommand::Compress7z
+            | ContextCommand::CompressTarGz => {
+                let format = match command {
+                    ContextCommand::CompressZip => ArchiveFormat::Zip,
+                    ContextCommand::Compress7z => ArchiveFormat::SevenZip,
+                    _ => ArchiveFormat::TarGz,
+                };
+                let sources: Vec<_> = intent
+                    .selection
+                    .iter()
+                    .filter_map(|location| location.local_path())
+                    .collect();
+                let view = command_view.clone();
+                let job = command_operations.begin_job(
+                    crate::core::OperationKind::Compress,
+                    intent.selection.clone(),
+                    sources
+                        .first()
+                        .and_then(|source| source.parent())
+                        .map(Location::from_local_path),
+                );
+                crate::application::compression::compress(sources, format, job, move |result| {
+                    view.refresh();
+                    match result {
+                        Ok(archive) => {
+                            AccessibleStatus::announce_for(
+                                &view.widget,
+                                &format!(
+                                    "Created {}",
+                                    archive
+                                        .file_name()
+                                        .map(|name| name.to_string_lossy().into_owned())
+                                        .unwrap_or_default()
+                                ),
+                                StatusPriority::Polite,
+                            );
+                        }
+                        Err(crate::application::compression::ArchiveError::Cancelled) => {}
+                        Err(error) => show_operation_error(
+                            &view,
+                            &format!("Could not compress: {}", error.message()),
+                        ),
+                    }
+                });
             }
             ContextCommand::Open => {
                 for item in command_view.selected_items() {
@@ -2053,6 +2144,22 @@ fn start_uri_transfer_with_completion(
         let generation = owner.borrow().as_ref().map(|c| c.state.generation())?;
         Some(ClipboardLease { owner, generation })
     });
+    let payload = ClipboardPayload {
+        locations: crate::application::commands::transfer_sources(
+            payload.locations,
+            &destination,
+            payload.action,
+        ),
+        ..payload
+    };
+    if payload.locations.is_empty() {
+        // Everything is already where it is being sent: nothing to do, and
+        // not an error. Declining also tells a drag that it did not land.
+        if let Some(completion) = completion {
+            completion.complete(false);
+        }
+        return;
+    }
     transfer_next(
         view.clone(),
         payload,
@@ -2092,15 +2199,23 @@ fn transfer_next(
     } else {
         MutationKind::Copy
     };
+    let sources = if decision == Some(ConflictDecision::CancelRemaining) {
+        payload.locations[index..].to_vec()
+    } else {
+        vec![source]
+    };
+    // A copy into the folder it came from is a duplicate beside the original.
+    let duplicate = match sources.as_slice() {
+        [only] if kind == MutationKind::Copy && only.parent().as_ref() == Some(&destination) => {
+            crate::application::commands::copy_sibling(only).ok()
+        }
+        _ => None,
+    };
     let id = operations.submit_locations(
         kind,
-        if decision == Some(ConflictDecision::CancelRemaining) {
-            payload.locations[index..].to_vec()
-        } else {
-            vec![source]
-        },
+        sources,
         Some(destination.clone()),
-        None,
+        duplicate,
         decision,
         false,
     );
@@ -2408,7 +2523,6 @@ fn restore_underlying_location(
     data: &Rc<RefCell<Vec<TabData>>>,
     tabs: &TabView,
     header: &HeaderControls,
-    sidebar: &Sidebar,
 ) {
     let data_ref = data.borrow();
     let Some(tab) = data_ref.get(index) else {
@@ -2422,13 +2536,7 @@ fn restore_underlying_location(
         .is_some_and(|page| *page == tab.page)
     {
         header.set_uri(location.uri());
-        sidebar.set_active_location(location);
     }
-}
-
-#[cfg(test)]
-fn sidebar_path_for_tab(path: &Path, is_remote: bool) -> Option<PathBuf> {
-    (!is_remote).then(|| path.to_path_buf())
 }
 
 /// Brings a file tab to the front, so a sidebar action taken while Preferences
@@ -3265,7 +3373,7 @@ mod tests {
     use super::{
         content_right_inset, file_toolbar, handle_navigation_action, matching_index, menu_button,
         persist_options, pin_remote_location, remove_matching, shortcut_command,
-        should_protect_last_file_tab, sidebar_path_for_tab, TabData,
+        should_protect_last_file_tab, TabData,
     };
     use crate::core::sidebar_model::SidebarSection;
     use crate::core::{
@@ -3336,7 +3444,6 @@ mod tests {
             &window,
             |_| {},
         );
-        sidebar.set_active_section("Network & online");
 
         handle_navigation_action(
             0,
@@ -3352,7 +3459,6 @@ mod tests {
         assert_eq!(view.uri().as_deref(), Some("smb://server/share"));
         assert_eq!(page.title(), "smb://server/…");
         assert_eq!(header.displayed_location_text(), "smb://server/share");
-        assert_eq!(sidebar.active_navigation_selection(), (None, None));
     }
 
     #[test]
@@ -3512,17 +3618,6 @@ mod tests {
     #[test]
     fn content_right_inset_matches_toolbar() {
         assert_eq!(content_right_inset(), 8);
-    }
-
-    #[test]
-    fn sidebar_selection_follows_the_selected_tabs_local_location() {
-        let documents = PathBuf::from("/home/user/Documents");
-
-        assert_eq!(sidebar_path_for_tab(&documents, false), Some(documents));
-        assert_eq!(
-            sidebar_path_for_tab(PathBuf::from("/unused").as_path(), true),
-            None
-        );
     }
 
     #[test]

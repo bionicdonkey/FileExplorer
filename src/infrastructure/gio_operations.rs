@@ -1023,7 +1023,10 @@ fn execute_inner_mode(
             .map(|l| gio::File::for_uri(l.uri()))
             .or_else(|| {
                 request.destination.as_ref().and_then(|l| {
+                    // A root such as an archive's has the name "/", which is
+                    // not a name a child can be given.
                     file.basename()
+                        .filter(|name| name.is_relative())
                         .map(|name| gio::File::for_uri(l.uri()).child(name))
                 })
             });

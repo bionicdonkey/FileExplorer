@@ -71,6 +71,43 @@ fn navigable_entries(state: &TabState) -> Vec<EntrySnapshot> {
     entries
 }
 
+/// Where the files are headed, as the user thinks of it: a path under the home
+/// folder starts with `~`, and anything that is not local is shown as its URI.
+fn destination_text(location: &Location) -> String {
+    let shown = match location.local_path() {
+        Some(path) => match std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .and_then(|home| path.strip_prefix(&home).ok().map(|rest| rest.to_owned()))
+        {
+            Some(rest) if rest.as_os_str().is_empty() => "~".to_owned(),
+            Some(rest) => format!("~/{}", rest.display()),
+            None => path.display().to_string(),
+        },
+        None => location.uri().to_owned(),
+    };
+    format!("Destination: {shown}")
+}
+
+fn flat_icon_button(icon: &str, tooltip: &str) -> Button {
+    let button = Button::from_icon_name(icon);
+    button.add_css_class("flat");
+    button.set_tooltip_text(Some(tooltip));
+    crate::ui::accessibility::name_control(&button, tooltip);
+    button
+}
+
+fn placeholder_row(text: &str) -> ListBoxRow {
+    let label = Label::new(Some(text));
+    label.add_css_class("dim-label");
+    label.set_margin_top(18);
+    label.set_margin_bottom(18);
+    let row = ListBoxRow::new();
+    row.set_child(Some(&label));
+    row.set_activatable(false);
+    row.set_selectable(false);
+    row
+}
+
 pub fn pick_folder<F: Fn(Location) + 'static>(
     parent: &impl IsA<gtk::Widget>,
     title: &str,
@@ -88,44 +125,68 @@ pub fn pick_folder<F: Fn(Location) + 'static>(
     let titlebar = adw::HeaderBar::new();
     titlebar.set_title_widget(Some(&Label::new(Some(title))));
     toolbar_view.add_top_bar(&titlebar);
-    let content = GtkBox::new(Orientation::Vertical, 8);
+    let content = GtkBox::new(Orientation::Vertical, 0);
     let toolbar = GtkBox::new(Orientation::Horizontal, 6);
-    let back = Button::from_icon_name("go-previous-symbolic");
-    let forward = Button::from_icon_name("go-next-symbolic");
-    let up = Button::from_icon_name("go-up-symbolic");
-    let new_folder = Button::from_icon_name("folder-new-symbolic");
-    new_folder.set_tooltip_text(Some("New Folder"));
+    toolbar.set_margin_start(12);
+    toolbar.set_margin_end(12);
+    toolbar.set_margin_top(8);
+    toolbar.set_margin_bottom(8);
+    let back = flat_icon_button("go-previous-symbolic", "Back");
+    let forward = flat_icon_button("go-next-symbolic", "Forward");
+    let up = flat_icon_button("go-up-symbolic", "Up");
+    let new_folder = flat_icon_button("folder-new-symbolic", "New Folder");
     let location_bar = LocationBar::new(&initial);
+    location_bar.widget.set_hexpand(true);
     for button in [&back, &forward, &up] {
         toolbar.append(button);
     }
     toolbar.append(&location_bar.widget);
     toolbar.append(&new_folder);
     content.append(&toolbar);
+    content.append(&gtk::Separator::new(Orientation::Horizontal));
     let body = gtk::Paned::new(Orientation::Horizontal);
     body.set_vexpand(true);
-    body.set_position(180);
-    let shortcuts = GtkBox::new(Orientation::Vertical, 4);
+    body.set_position(210);
+    body.set_resize_start_child(false);
+    body.set_shrink_start_child(false);
+    // Places on the left, like the main window's sidebar.
+    let shortcuts = ListBox::new();
+    shortcuts.add_css_class("navigation-sidebar");
+    shortcuts.set_selection_mode(gtk::SelectionMode::None);
+    shortcuts.set_activate_on_single_click(true);
     let shortcuts_scroll = ScrolledWindow::new();
+    shortcuts_scroll.set_hscrollbar_policy(gtk::PolicyType::Never);
     shortcuts_scroll.set_child(Some(&shortcuts));
     body.set_start_child(Some(&shortcuts_scroll));
     let list = ListBox::new();
+    list.add_css_class("navigation-sidebar");
     list.set_activate_on_single_click(false);
     list.set_selection_mode(gtk::SelectionMode::Single);
+    list.update_property(&[gtk::accessible::Property::Label("Folders")]);
     let scroll = ScrolledWindow::new();
+    scroll.set_hscrollbar_policy(gtk::PolicyType::Never);
     scroll.set_child(Some(&list));
     body.set_end_child(Some(&scroll));
     content.append(&body);
+    content.append(&gtk::Separator::new(Orientation::Horizontal));
+    // One row: where the files are headed, then the choices.
     let destination = Label::new(None);
+    destination.add_css_class("picker-destination");
+    destination.set_hexpand(true);
+    destination.set_xalign(0.0);
     destination.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
-    content.append(&destination);
     let select = Button::with_label(action_label);
     select.add_css_class("suggested-action");
     let cancel = Button::with_label("Cancel");
     let footer = GtkBox::new(Orientation::Horizontal, 8);
+    footer.set_margin_start(12);
+    footer.set_margin_end(12);
+    footer.set_margin_top(10);
+    footer.set_margin_bottom(10);
+    footer.append(&destination);
     footer.append(&cancel);
     footer.append(&select);
-    toolbar_view.add_bottom_bar(&footer);
+    content.append(&footer);
     toolbar_view.set_content(Some(&content));
     dialog.set_child(Some(&toolbar_view));
 
@@ -188,19 +249,27 @@ pub fn pick_folder<F: Fn(Location) + 'static>(
             folders.borrow_mut().clear();
             for entry in navigable_entries(&snapshot) {
                 let row = ListBoxRow::new();
-                let row_content = GtkBox::new(Orientation::Horizontal, 8);
+                row.add_css_class("picker-folder-row");
+                let row_content = GtkBox::new(Orientation::Horizontal, 10);
                 row_content.set_margin_top(6);
                 row_content.set_margin_bottom(6);
-                row_content.set_margin_start(8);
-                row_content.set_margin_end(8);
-                row_content.append(&gtk::Image::from_icon_name("folder-symbolic"));
-                row_content.append(&Label::new(Some(&entry.display_name)));
+                row_content.set_margin_start(6);
+                row_content.set_margin_end(6);
+                row_content.append(&gtk::Image::from_icon_name("folder"));
+                let name = Label::new(Some(&entry.display_name));
+                name.set_xalign(0.0);
+                name.set_hexpand(true);
+                name.set_ellipsize(gtk::pango::EllipsizeMode::End);
+                row_content.append(&name);
                 row.set_child(Some(&row_content));
                 folders.borrow_mut().push(entry.location);
                 list.append(&row);
             }
+            if folders.borrow().is_empty() {
+                list.append(&placeholder_row("No subfolders"));
+            }
             location_bar.set_uri(snapshot.location.uri());
-            destination.set_text(&format!("Destination: {}", snapshot.location.uri()));
+            destination.set_text(&destination_text(&snapshot.location));
         })
     };
     picker.render = render;
@@ -223,7 +292,7 @@ pub fn pick_folder<F: Fn(Location) + 'static>(
                 .borrow()
                 .clone()
                 .unwrap_or_else(|| state.borrow().location.clone());
-            destination.set_text(&format!("Destination: {}", target.uri()));
+            destination.set_text(&destination_text(&target));
         }
     });
     list.connect_row_activated({
@@ -232,16 +301,52 @@ pub fn pick_folder<F: Fn(Location) + 'static>(
             picker.activate_entry(row.index() as usize);
         }
     });
-    for section in sidebar_model.borrow().sections() {
-        shortcuts.append(&Label::new(Some(&section.title)));
+    let places = Rc::new(RefCell::new(Vec::<Option<Location>>::new()));
+    for (index, section) in sidebar_model.borrow().sections().into_iter().enumerate() {
+        let heading = Label::new(Some(&section.title));
+        heading.add_css_class("heading");
+        heading.add_css_class("dim-label");
+        heading.set_xalign(0.0);
+        heading.set_margin_start(6);
+        heading.set_margin_end(6);
+        heading.set_margin_top(if index == 0 { 8 } else { 14 });
+        heading.set_margin_bottom(4);
+        let heading_row = ListBoxRow::new();
+        heading_row.set_child(Some(&heading));
+        heading_row.set_activatable(false);
+        heading_row.set_selectable(false);
+        shortcuts.append(&heading_row);
+        places.borrow_mut().push(None);
         for node in section.nodes {
-            let button = Button::with_label(node.location.label());
-            let location = node.location.location().clone();
-            let picker = picker.clone();
-            button.connect_clicked(move |_| picker.select_location(location.clone()));
-            shortcuts.append(&button);
+            let line = GtkBox::new(Orientation::Horizontal, 10);
+            line.set_margin_top(4);
+            line.set_margin_bottom(4);
+            line.set_margin_start(6);
+            line.set_margin_end(6);
+            line.append(&gtk::Image::from_icon_name(node.location.icon_name()));
+            let label = Label::new(Some(node.location.label()));
+            label.set_xalign(0.0);
+            label.set_hexpand(true);
+            label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            line.append(&label);
+            let row = ListBoxRow::new();
+            row.add_css_class("picker-folder-row");
+            row.set_child(Some(&line));
+            shortcuts.append(&row);
+            places
+                .borrow_mut()
+                .push(Some(node.location.location().clone()));
         }
     }
+    shortcuts.connect_row_activated({
+        let picker = picker.clone();
+        move |_, row| {
+            let location = places.borrow().get(row.index() as usize).cloned().flatten();
+            if let Some(location) = location {
+                picker.select_location(location);
+            }
+        }
+    });
     for (button, backwards) in [(&back, true), (&forward, false)] {
         let picker = picker.clone();
         button.connect_clicked(move |_| {

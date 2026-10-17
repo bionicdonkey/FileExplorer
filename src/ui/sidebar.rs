@@ -1,6 +1,6 @@
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use gio::prelude::*;
@@ -66,8 +66,6 @@ pub struct Sidebar {
     model: Rc<RefCell<SidebarModel>>,
     repository: Rc<dyn DirectoryRepository>,
     on_action: Rc<dyn Fn(SidebarAction)>,
-    active_path: Rc<RefCell<Option<Location>>>,
-    active_section: Rc<RefCell<Option<String>>>,
     mount_parent: gtk::Window,
     operation_manager: Rc<RefCell<Option<OperationManager>>>,
     operation_summary: Rc<RefCell<Option<String>>>,
@@ -116,8 +114,6 @@ impl Sidebar {
             model,
             repository,
             on_action: Rc::new(on_action),
-            active_path: Rc::new(RefCell::new(None)),
-            active_section: Rc::new(RefCell::new(None)),
             mount_parent: mount_parent.clone().upcast(),
             operation_manager: Rc::new(RefCell::new(None)),
             operation_summary: Rc::new(RefCell::new(None)),
@@ -339,11 +335,6 @@ impl Sidebar {
             heading.add_css_class("flat");
             heading.add_css_class("heading");
             heading.add_css_class("sidebar-section-heading");
-            if self.active_section.borrow().as_deref() == Some(section.title.as_str()) {
-                heading.add_css_class("selected");
-                heading
-                    .update_property(&[gtk::accessible::Property::Description("Current section")]);
-            }
             let action = self.on_action.clone();
             let section_title = section.title.clone();
             heading.connect_clicked(move |_| {
@@ -495,38 +486,6 @@ impl Sidebar {
         });
     }
 
-    pub fn set_active_path(&self, path: &Path) {
-        self.set_active_location(Location::from_local_path(path));
-    }
-
-    pub fn set_active_location(&self, location: Location) {
-        *self.active_path.borrow_mut() = Some(location);
-        *self.active_section.borrow_mut() = None;
-        self.refresh();
-    }
-
-    pub fn clear_active_path(&self) {
-        clear_navigation_selection(&self.active_path, &self.active_section);
-        self.refresh();
-    }
-
-    pub fn set_active_section(&self, section: impl Into<String>) {
-        *self.active_path.borrow_mut() = None;
-        *self.active_section.borrow_mut() = Some(section.into());
-        self.refresh();
-    }
-
-    #[cfg(test)]
-    pub(crate) fn active_navigation_selection(&self) -> (Option<PathBuf>, Option<String>) {
-        (
-            self.active_path
-                .borrow()
-                .as_ref()
-                .and_then(Location::local_path),
-            self.active_section.borrow().clone(),
-        )
-    }
-
     pub fn toggle_quick_access(&self, path: PathBuf) {
         self.toggle_quick_access_location(Location::from_local_path(&path));
     }
@@ -591,7 +550,6 @@ impl Sidebar {
             self.model.clone(),
             self.repository.clone(),
             self.on_action.clone(),
-            self.active_path.clone(),
             self.mount_parent.clone(),
             self.pending_focus.clone(),
             focus_token,
@@ -605,7 +563,6 @@ impl Sidebar {
         model: Rc<RefCell<SidebarModel>>,
         repository: Rc<dyn DirectoryRepository>,
         on_action: Rc<dyn Fn(SidebarAction)>,
-        active_path: Rc<RefCell<Option<Location>>>,
         mount_parent: gtk::Window,
         pending_focus: Rc<RefCell<Option<PendingFocus>>>,
         focus_token: u64,
@@ -654,7 +611,6 @@ impl Sidebar {
             let child_location = node.location.clone();
             let children_for_toggle = children.clone();
             let children_action = on_action.clone();
-            let children_active_path = active_path.clone();
             let children_mount_parent = mount_parent.clone();
             let pending_request = Rc::new(RefCell::new(None::<(RequestId, gio::Cancellable)>));
             let unrealized_request = pending_request.clone();
@@ -712,7 +668,6 @@ impl Sidebar {
                     let model_after_result = children_model.clone();
                     let repository_after_result = children_repository.clone();
                     let action_after_result = children_action.clone();
-                    let active_after_result = children_active_path.clone();
                     let parent_after_result = children_mount_parent.clone();
                     let occurrence_after_result = occurrence.clone();
                     let focus_after_result = focus_for_toggle.clone();
@@ -748,7 +703,6 @@ impl Sidebar {
                                 model_after_result.clone(),
                                 repository_after_result.clone(),
                                 action_after_result.clone(),
-                                active_after_result.clone(),
                                 parent_after_result.clone(),
                                 focus_after_result.clone(),
                                 focus_token,
@@ -773,10 +727,6 @@ impl Sidebar {
         button.set_halign(gtk::Align::Fill);
         button.add_css_class("flat");
         button.add_css_class("sidebar-location");
-        if active_path.borrow().as_ref() == Some(node.location.location()) {
-            button.add_css_class("selected");
-            button.update_property(&[gtk::accessible::Property::Description("Current location")]);
-        }
         let button_content = GtkBox::new(Orientation::Horizontal, 8);
         button_content.set_margin_top(4);
         button_content.set_margin_bottom(4);
@@ -807,7 +757,6 @@ impl Sidebar {
         model: Rc<RefCell<SidebarModel>>,
         repository: Rc<dyn DirectoryRepository>,
         on_action: Rc<dyn Fn(SidebarAction)>,
-        active_path: Rc<RefCell<Option<Location>>>,
         mount_parent: gtk::Window,
         pending_focus: Rc<RefCell<Option<PendingFocus>>>,
         focus_token: u64,
@@ -820,7 +769,6 @@ impl Sidebar {
                 model.clone(),
                 repository.clone(),
                 on_action.clone(),
-                active_path.clone(),
                 mount_parent.clone(),
                 pending_focus.clone(),
                 focus_token,
@@ -998,14 +946,6 @@ fn sidebar_sections(model: &Rc<RefCell<SidebarModel>>) -> Vec<SidebarSection> {
     model.borrow().sections()
 }
 
-fn clear_navigation_selection(
-    active_path: &RefCell<Option<Location>>,
-    active_section: &RefCell<Option<String>>,
-) {
-    *active_path.borrow_mut() = None;
-    *active_section.borrow_mut() = None;
-}
-
 fn operation_summary_changed(previous: &Option<String>, next: &Option<String>) -> bool {
     previous != next
 }
@@ -1051,19 +991,6 @@ mod tests {
             &None,
             &Some("1 file operation in progress".into())
         ));
-    }
-
-    #[test]
-    fn clearing_navigation_selection_also_clears_the_active_section() {
-        let active_path = RefCell::new(Some(
-            crate::core::Location::from_uri("file:///tmp/example").unwrap(),
-        ));
-        let active_section = RefCell::new(Some("Network & online".to_string()));
-
-        super::clear_navigation_selection(&active_path, &active_section);
-
-        assert!(active_path.borrow().is_none());
-        assert!(active_section.borrow().is_none());
     }
 
     #[test]

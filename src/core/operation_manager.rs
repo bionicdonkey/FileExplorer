@@ -128,6 +128,10 @@ pub enum OperationKind {
     Rename,
     Trash,
     Delete,
+    /// Archive creation, run by an external archiver rather than the
+    /// coordinator; see `OperationManager::begin_job`.
+    Compress,
+    Extract,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -157,6 +161,20 @@ pub struct OperationRecord {
     pub state: OperationState,
     #[serde(default)]
     pub finished_at: Option<i64>,
+    /// A record that only stands in for another row, such as the preparation
+    /// phase of an extraction once its copy has begun.
+    #[serde(default)]
+    pub hidden: bool,
+    /// The kind to present when it differs from the one the work runs as: an
+    /// extraction is carried out as a copy.
+    #[serde(default)]
+    pub shown_as: Option<OperationKind>,
+}
+
+impl OperationRecord {
+    pub fn display_kind(&self) -> OperationKind {
+        self.shown_as.unwrap_or(self.kind)
+    }
 }
 
 #[derive(Clone)]
@@ -359,6 +377,9 @@ impl OperationManager {
                     OperationKind::Rename => MutationKind::Rename,
                     OperationKind::Trash => MutationKind::Trash,
                     OperationKind::Delete => MutationKind::Delete,
+                    OperationKind::Compress | OperationKind::Extract => {
+                        unreachable!("jobs are recorded through begin_job")
+                    }
                 },
                 sources: sources
                     .iter()
@@ -411,6 +432,8 @@ impl OperationManager {
             total: request.sources.len().max(1),
             state: OperationState::Queued,
             finished_at: None,
+            hidden: false,
+            shown_as: None,
         });
         self.cancelled
             .lock()
@@ -418,6 +441,54 @@ impl OperationManager {
             .push((id, Arc::new(AtomicBool::new(false))));
         self.dispatch(submission);
         id
+    }
+
+    /// Records work that runs outside the coordinator -- an external archiver,
+    /// or the mount an extraction waits on -- so it shows in the queue with
+    /// progress and can be cancelled like any other operation.
+    pub fn begin_job(
+        &self,
+        kind: OperationKind,
+        sources: Vec<Location>,
+        destination: Option<Location>,
+    ) -> JobHandle {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
+        self.records.lock().unwrap().push(OperationRecord {
+            id,
+            kind,
+            source_uris: sources
+                .iter()
+                .map(|location| location.uri().to_owned())
+                .collect(),
+            sources: sources
+                .iter()
+                .filter_map(|location| location.local_path())
+                .collect(),
+            destination_uri: destination
+                .as_ref()
+                .map(|location| location.uri().to_owned()),
+            destination: destination.and_then(|location| location.local_path()),
+            completed: 0,
+            // Unknown until the job measures its work; zero reads as
+            // "preparing" rather than as a finished one.
+            total: 0,
+            state: OperationState::Running,
+            finished_at: None,
+            hidden: false,
+            shown_as: None,
+        });
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.cancelled.lock().unwrap().push((id, cancel.clone()));
+        JobHandle {
+            manager: self.clone(),
+            id,
+            cancel,
+        }
+    }
+
+    /// Presents `id` as `kind` in the queue.
+    pub fn present_as(&self, id: u64, kind: OperationKind) {
+        update(&self.records, id, |record| record.shown_as = Some(kind));
     }
 
     fn dispatch(&self, submission: Submission) {
@@ -881,6 +952,8 @@ fn decode_history(bytes: &[u8]) -> (Vec<OperationRecord>, Vec<RecoverableStateNo
                 total: record.total,
                 state: record.state,
                 finished_at: record.finished_at,
+                hidden: false,
+                shown_as: None,
             });
             continue;
         }
@@ -926,9 +999,92 @@ fn decode_history(bytes: &[u8]) -> (Vec<OperationRecord>, Vec<RecoverableStateNo
             total: record.total,
             state: record.state,
             finished_at: record.finished_at,
+            hidden: false,
+            shown_as: None,
         });
     }
     (records, notices)
+}
+
+/// A running job's side of its queue record.
+#[derive(Clone)]
+pub struct JobHandle {
+    manager: OperationManager,
+    id: u64,
+    cancel: Arc<AtomicBool>,
+}
+
+impl JobHandle {
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
+    }
+
+    /// Whether the record has reached a terminal state.
+    pub fn is_finished(&self) -> bool {
+        self.manager
+            .records
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|record| record.id == self.id)
+            .map_or(true, |record| record.finished_at.is_some())
+    }
+
+    pub fn set_progress(&self, completed: u64, total: u64) {
+        update(&self.manager.records, self.id, |record| {
+            if matches!(
+                record.state,
+                OperationState::Running | OperationState::CancelRequested
+            ) {
+                record.completed = completed.min(total) as usize;
+                record.total = total as usize;
+            }
+        });
+    }
+
+    /// Ends the job. A failure after a stop was requested counts as the stop;
+    /// a job that already ended is left alone.
+    pub fn finish(&self, result: Result<(), String>) {
+        let cancelled = self.is_cancelled();
+        self.close(|record| {
+            record.state = match &result {
+                Ok(()) => {
+                    record.completed = record.total;
+                    OperationState::Completed
+                }
+                Err(_) if cancelled => OperationState::Cancelled,
+                Err(error) => OperationState::Failed(error.clone()),
+            };
+        });
+    }
+
+    /// Ends the job because another record carries the work on: that record
+    /// becomes the one shown, and this one steps aside.
+    pub fn hand_over(&self, successor: u64, kind: OperationKind) {
+        self.manager.present_as(successor, kind);
+        self.close(|record| {
+            record.state = OperationState::Completed;
+            record.hidden = true;
+        });
+    }
+
+    fn close(&self, change: impl FnOnce(&mut OperationRecord)) {
+        let mut changed = false;
+        update(&self.manager.records, self.id, |record| {
+            if record.finished_at.is_none() {
+                change(record);
+                record.finished_at = Some(now());
+                changed = true;
+            }
+        });
+        if changed {
+            self.manager.persist_history();
+        }
+    }
 }
 
 fn now() -> i64 {
@@ -1069,6 +1225,8 @@ mod tests {
             total: 10,
             state: OperationState::Completed,
             finished_at: Some(now()),
+            hidden: false,
+            shown_as: None,
         }];
         std::fs::write(
             &history_path,
@@ -1113,6 +1271,8 @@ mod tests {
             total: 100,
             state: OperationState::Queued,
             finished_at: None,
+            hidden: false,
+            shown_as: None,
         });
 
         manager.cancel(1);
@@ -1212,6 +1372,8 @@ mod tests {
             total: 1,
             state: OperationState::Failed("No such file or directory".into()),
             finished_at: None,
+            hidden: false,
+            shown_as: None,
         });
         assert!(manager.retry_elevated(1).is_err());
     }
@@ -1231,6 +1393,8 @@ mod tests {
             total: 1,
             state: OperationState::Completed,
             finished_at: Some(now()),
+            hidden: false,
+            shown_as: None,
         }];
         std::fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
         let manager = OperationManager::load_history(Some(path.clone()), 7);
@@ -1464,5 +1628,105 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
+    }
+
+    fn job_manager() -> (OperationManager, JobHandle) {
+        let manager = OperationManager::default();
+        let job = manager.begin_job(
+            OperationKind::Compress,
+            vec![Location::from_local_path(Path::new("/tmp/Trip"))],
+            Some(Location::from_local_path(Path::new("/tmp"))),
+        );
+        (manager, job)
+    }
+
+    #[test]
+    fn a_job_is_active_and_unmeasured_until_it_reports_progress() {
+        let (manager, job) = job_manager();
+
+        let record = manager.records().remove(0);
+        assert_eq!(record.state, OperationState::Running);
+        assert_eq!(record.total, 0);
+        assert_eq!(manager.active_count(), 1);
+
+        job.set_progress(30, 120);
+        let record = manager.records().remove(0);
+        assert_eq!((record.completed, record.total), (30, 120));
+
+        job.finish(Ok(()));
+        let record = manager.records().remove(0);
+        assert_eq!(record.state, OperationState::Completed);
+        assert_eq!(record.completed, 120);
+        assert!(record.finished_at.is_some());
+        assert_eq!(manager.active_count(), 0);
+    }
+
+    #[test]
+    fn cancelling_a_job_ends_it_as_cancelled_not_failed() {
+        let (manager, job) = job_manager();
+
+        manager.cancel(job.id());
+        assert!(job.is_cancelled());
+        assert_eq!(
+            manager.records()[0].state,
+            OperationState::CancelRequested,
+            "the row shows the request until the work acknowledges it"
+        );
+        job.finish(Err("Cancelled".into()));
+
+        assert_eq!(manager.records()[0].state, OperationState::Cancelled);
+    }
+
+    #[test]
+    fn a_failed_job_keeps_the_reason_and_ignores_later_updates() {
+        let (manager, job) = job_manager();
+
+        job.finish(Err("disk full".into()));
+        job.set_progress(5, 10);
+        job.finish(Ok(()));
+
+        let record = manager.records().remove(0);
+        assert_eq!(record.state, OperationState::Failed("disk full".into()));
+        assert_eq!(record.total, 0);
+    }
+
+    #[test]
+    fn handing_over_hides_the_job_and_relabels_its_successor() {
+        let (manager, job) = job_manager();
+        let successor = manager.begin_job(OperationKind::Copy, Vec::new(), None);
+
+        job.hand_over(successor.id(), OperationKind::Extract);
+
+        let records = manager.records();
+        assert!(records[0].hidden);
+        assert_eq!(records[0].state, OperationState::Completed);
+        assert!(!records[1].hidden);
+        assert_eq!(records[1].display_kind(), OperationKind::Extract);
+        assert_eq!(records[1].kind, OperationKind::Copy);
+    }
+
+    #[test]
+    fn a_copy_with_an_explicit_target_can_duplicate_a_file_in_its_own_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("shot.png");
+        std::fs::write(&file, "pixels").unwrap();
+        let manager = OperationManager::default();
+
+        let id = manager.submit_locations(
+            MutationKind::Copy,
+            vec![Location::from_local_path(&file)],
+            Some(Location::from_local_path(dir.path())),
+            Some(Location::from_local_path(&dir.path().join("shot (copy).png"))),
+            None,
+            false,
+        );
+        let record = wait_for_finished(&manager, id);
+
+        assert_eq!(record.state, OperationState::Completed);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("shot (copy).png")).unwrap(),
+            "pixels"
+        );
+        assert!(file.exists(), "the original stays");
     }
 }

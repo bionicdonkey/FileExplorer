@@ -104,20 +104,18 @@ button.sidebar-section-heading {
 }
 
 /* A title names the group rather than competing with the rows in it, until it
- * is the one being pointed at or the section currently open. */
+ * is being pointed at. */
 button.sidebar-section-heading label {
   opacity: 0.7;
   letter-spacing: 0.02em;
 }
 
 button.sidebar-section-heading:hover label,
-button.sidebar-section-heading.selected label,
 button.sidebar-section-heading:focus-visible label {
   opacity: 1;
 }
 
-button.sidebar-section-heading:hover,
-button.sidebar-section-heading.selected {
+button.sidebar-section-heading:hover {
   background-color: alpha(@accent_bg_color, 0.14);
 }
 
@@ -162,11 +160,6 @@ button.sidebar-tree-child:hover {
   background-color: alpha(@window_fg_color, 0.07);
 }
 
-button.sidebar-location.selected {
-  background-color: alpha(@accent_bg_color, 0.14);
-  color: @window_fg_color;
-}
-
 .section-overview-entry {
   border-radius: 8px;
   background-color: alpha(@window_fg_color, 0.045);
@@ -181,7 +174,7 @@ button.sidebar-location.selected {
 }
 
 /* Location glyphs support their labels rather than competing with the active
- * system accent.  The selected row retains the normal theme foreground. */
+ * system accent. */
 image.sidebar-location-icon {
   color: @window_fg_color;
 }
@@ -215,19 +208,13 @@ button.sidebar-subsection-toggle:checked:hover {
 .cut-pending { border: 1px dashed @window_fg_color; }
 .cut-pending label { font-style: italic; }
 
-/* Preserve theme text contrast. Focus and current location remain visible
- * without relying on a faint background tint or motion. Native GTK widgets
+/* Preserve theme text contrast. Focus remains visible without relying on a
+ * faint background tint or motion. Native GTK widgets
  * follow gtk-enable-animations; the location stack has no custom transitions. */
 button:focus-visible, entry:focus-visible, flowboxchild:focus-visible,
 columnview row:focus-visible, tab:focus-visible {
   outline: 2px solid @accent_color;
   outline-offset: -2px;
-}
-
-button.sidebar-location.selected,
-button.sidebar-section-heading.selected {
-  font-weight: bold;
-  border: 1px solid @accent_color;
 }
 
 .high-contrast button:focus-visible,
@@ -237,8 +224,6 @@ button.sidebar-section-heading.selected {
   outline-color: @window_fg_color;
 }
 
-.high-contrast button.sidebar-location.selected,
-.high-contrast button.sidebar-section-heading.selected,
 .high-contrast .operation-row {
   border: 1px solid @window_fg_color;
 }
@@ -271,6 +256,11 @@ button.sidebar-section-heading.selected {
   margin: 1px 6px;
 }
 
+.navigation-sidebar > row.picker-folder-row:selected {
+  background-color: alpha(@accent_bg_color, 0.2);
+  color: @window_fg_color;
+}
+
 .picker-folder-row:hover {
   background-color: alpha(@window_fg_color, 0.055);
 }
@@ -281,4 +271,5 @@ button.sidebar-section-heading.selected {
   padding: 6px 10px;
   border-radius: 8px;
   background-color: alpha(@accent_bg_color, 0.1);
+  font-size: 0.95em;
 }
