@@ -11,6 +11,12 @@
   <!-- Keep in step with `version` in Cargo.toml: the About page reads the crate
        version, and the CI release job refuses a tag that disagrees with it. -->
   <releases>
+    <release version="0.3.5" date="2026-10-17">
+      <description>
+        <p>Sorting by size, date modified or type now works. The folder listing does not carry those, so the sort had nothing to order by and fell back to the name; they are now fetched for every entry when you sort on one of them.</p>
+        <p>Start typing in the file list to select the first item whose name matches. Pause for a second to start a new search; Backspace edits it and Escape abandons it.</p>
+      </description>
+    </release>
     <release version="0.3.4" date="2026-10-14">
       <description>
         <p>Open With offers the applications that match the file. A file whose type had not loaded yet was treated as an unknown type, which matched almost nothing; the type is now worked out from the file name. In the Flatpak, Other Application opens the system's application chooser, because the sandbox cannot see installed applications.</p>
