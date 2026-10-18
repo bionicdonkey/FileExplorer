@@ -884,7 +884,7 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zorin-explorer"
-version = "0.3.5"
+version = "0.4.0"
 dependencies = [
  "futures-channel",
  "futures-util",

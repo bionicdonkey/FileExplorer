@@ -11,6 +11,15 @@
   <!-- Keep in step with `version` in Cargo.toml: the About page reads the crate
        version, and the CI release job refuses a tag that disagrees with it. -->
   <releases>
+    <release version="0.4.0" date="2026-10-18">
+      <description>
+        <p>Right-click ▸ Compress packs the selected local files and folders into a ZIP, 7-Zip or tar.gz archive beside them, using the system's zip, 7z or tar program. The Debian package now recommends zip and p7zip-full.</p>
+        <p>Extract places an archive's contents in a folder named after it, unless the archive already contains a single folder, which lands beside the archive as it is. .7z archives are unpacked with the 7z program, since GVfs cannot read them.</p>
+        <p>Everything running is shown in the status bar as a label and progress bar beside the spinner. Click it to list each running operation with its own progress and Cancel button.</p>
+        <p>Pressing Escape cancels a file drag in progress, leaving the files where they were.</p>
+        <p>Hidden files stay hidden in the icon grid when hidden files are switched off, and a quick press on a tile starts a drag instead of the rubberband selection.</p>
+      </description>
+    </release>
     <release version="0.3.5" date="2026-10-17">
       <description>
         <p>Sorting by size, date modified or type now works. The folder listing does not carry those, so the sort had nothing to order by and fell back to the name; they are now fetched for every entry when you sort on one of them.</p>
