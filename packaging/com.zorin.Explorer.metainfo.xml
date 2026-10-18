@@ -11,6 +11,12 @@
   <!-- Keep in step with `version` in Cargo.toml: the About page reads the crate
        version, and the CI release job refuses a tag that disagrees with it. -->
   <releases>
+    <release version="0.5.0" date="2026-10-18">
+      <description>
+        <p>Extraction and compression now run inside the app. A local archive is handed straight to libarchive, the same library GVfs uses underneath but opened directly so it can seek, which is why 7-Zip and RAR archives extract exactly like ZIP ones and why no archiver program is needed to unpack a .7z. Compression writes ZIP, 7-Zip and tar.gz with pure-Rust writers.</p>
+        <p>The Debian package no longer recommends zip or p7zip-full. Only gvfs-backends remains, for the remote archives that still go through GVfs.</p>
+      </description>
+    </release>
     <release version="0.4.0" date="2026-10-18">
       <description>
         <p>Right-click ▸ Compress packs the selected local files and folders into a ZIP, 7-Zip or tar.gz archive beside them, using the system's zip, 7z or tar program. The Debian package now recommends zip and p7zip-full.</p>

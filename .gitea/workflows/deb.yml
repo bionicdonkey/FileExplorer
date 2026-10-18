@@ -42,7 +42,7 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends \
             build-essential pkg-config dpkg-dev binutils curl jq ca-certificates \
-            libgtk-4-dev libadwaita-1-dev
+            libgtk-4-dev libadwaita-1-dev libarchive-dev
 
       - name: Install Rust
         # Cargo.lock is format 4, which Ubuntu's packaged cargo 1.75 cannot read.

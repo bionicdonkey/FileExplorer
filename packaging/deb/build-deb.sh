@@ -4,10 +4,10 @@
 #
 #   packaging/deb/build-deb.sh [output-dir]      (default: dist/)
 #
-# Needs cargo, dpkg-deb and the GTK 4 / libadwaita development packages. Run
-# it on the oldest distribution the package should install on: the Depends
-# line is computed from the libraries the binary actually links, so a build on
-# Ubuntu 24.04 (Zorin OS 18) installs there and on anything newer.
+# Needs cargo, dpkg-deb and the GTK 4 / libadwaita / libarchive development
+# packages. Run it on the oldest distribution the package should install on:
+# the Depends line is computed from the libraries the binary actually links, so
+# a build on Ubuntu 24.04 (Zorin OS 18) installs there and on anything newer.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -65,9 +65,9 @@ fi
 # locations; shared-mime-info names the file types the context menu offers
 # applications for.
 depends="$shlibs, pkexec | policykit-1, gvfs, shared-mime-info"
-# zip and 7z are the archivers behind the Compress menu; tar and gzip are
-# always present.
-recommends="gvfs-backends, zip, p7zip-full | 7zip"
+# gvfs-backends carries the archive and remote backends. Extraction and
+# compression themselves run in-process, so no archiver program is needed.
+recommends="gvfs-backends"
 
 install -d "$pkg/DEBIAN"
 cat > "$pkg/DEBIAN/control" <<EOF

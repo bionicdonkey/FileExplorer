@@ -34,15 +34,16 @@ pub fn activation_for(item: &FileItem) -> Activation {
 }
 
 /// Whether the application can extract this entry into a folder beside it:
-/// the archives it can browse, plus 7-Zip, which it extracts with the `7z`
-/// program instead.
+/// the archives it can browse, plus 7-Zip, which it unpacks in-process through
+/// libarchive rather than handing to another application.
 pub fn is_extractable(item: &FileItem) -> bool {
     let content_type = resolved_content_type(item);
     !item.is_dir() && (is_browsable_archive(&content_type) || is_seven_zip(&content_type))
 }
 
 /// 7-Zip archives cannot be browsed: gvfsd-archive hands libarchive a stream
-/// it cannot seek, and libarchive's 7-Zip reader needs to.
+/// it cannot seek, and libarchive's 7-Zip reader needs to. They can still be
+/// extracted, because that path opens the file with libarchive directly.
 pub fn is_seven_zip(content_type: &str) -> bool {
     matches!(
         content_type,

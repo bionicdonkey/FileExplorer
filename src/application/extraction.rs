@@ -1,14 +1,13 @@
 //! Extracting an archive into a folder beside it.
 //!
-//! gvfs reads an archive as a folder once `gvfsd-archive` has mounted it, so
-//! extracting is mounting plus the copy the operation pipeline already
-//! performs -- which keeps progress, cancellation and conflict handling the
-//! same as any other copy.
+//! Local archives are unpacked in-process through libarchive, which is what
+//! GVfs uses underneath and which can seek, so 7-Zip and RAR are no different
+//! from zip. Archives on a remote location still go through GVfs: there is no
+//! local file to hand to libarchive, so they are mounted and copied the way
+//! any other remote folder is.
 
 use crate::application::commands::named_child;
-use crate::application::compression::{
-    missing_tool, run_with_progress, seven_zip_program, ArchiveError, ArchiveFormat, Workspace,
-};
+use crate::application::compression::{ArchiveError, ReadProgress, Workspace};
 use crate::core::contracts::MutationKind;
 use crate::core::operation_manager::{OperationKind, OperationManager};
 use crate::core::Location;
@@ -55,7 +54,7 @@ pub fn reserve_destination(parent: &Location, base: &str) -> std::io::Result<Loc
     let candidate = unique_child(parent, base)?;
     gio::File::for_uri(candidate.uri())
         .make_directory(gio::Cancellable::NONE)
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error.to_string()))?;
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
     Ok(candidate)
 }
 
@@ -86,7 +85,8 @@ pub fn placement(entries: &[ArchiveEntry]) -> Placement {
     }
 }
 
-/// The top-level entries of the archive mounted at `uri`. Blocks.
+/// The top-level entries of the archive mounted at `uri`, for the remote
+/// fallback. Blocks.
 fn list_root(uri: &str) -> Result<Vec<ArchiveEntry>, glib::Error> {
     let root = gio::File::for_uri(uri);
     let enumerator = root.enumerate_children(
@@ -110,26 +110,44 @@ fn is_seven_zip_name(name: &str) -> bool {
     name.to_ascii_lowercase().ends_with(".7z")
 }
 
-/// Unpacks a 7-Zip archive in a scratch folder, then moves the result into
+/// Unpacks a local archive into a scratch folder, then moves the result into
 /// place the way `placement` describes. Blocks.
-fn extract_seven_zip_blocking(
+fn extract_local_blocking(
     archive: &Path,
     parent: &Path,
     progress: &mut dyn FnMut(u64, u64),
     cancelled: &dyn Fn() -> bool,
 ) -> Result<(), ArchiveError> {
-    let program = seven_zip_program().ok_or_else(|| missing_tool(ArchiveFormat::SevenZip))?;
     let workspace = Workspace::create(parent)
         .map_err(|error| format!("Could not write to this folder: {error}"))?;
     let unpacked = workspace.0.join("contents");
-    let total = std::fs::metadata(archive).map(|meta| meta.len()).unwrap_or(0);
-    let mut command = std::process::Command::new(program);
-    let mut output = std::ffi::OsString::from("-o");
-    output.push(&unpacked);
-    command.args(["x", "-y", "-bd"]).arg(output).arg(archive);
-    command.current_dir(parent);
+    std::fs::create_dir(&unpacked)?;
+    let total = std::fs::metadata(archive)
+        .map(|meta| meta.len())
+        .unwrap_or(0);
     progress(0, total);
-    run_with_progress(&mut command, total, progress, cancelled)?;
+    if cancelled() {
+        return Err(ArchiveError::Cancelled);
+    }
+
+    {
+        let file = std::fs::File::open(archive)
+            .map_err(|error| format!("Could not open the archive: {error}"))?;
+        let mut done = 0u64;
+        let mut reader = ReadProgress::new(file, &mut done, total, progress, cancelled);
+        compress_tools::uncompress_archive(
+            &mut reader,
+            &unpacked,
+            compress_tools::Ownership::Ignore,
+        )
+        .map_err(|error| {
+            if cancelled() {
+                ArchiveError::Cancelled
+            } else {
+                ArchiveError::Failed(format!("Could not extract the archive: {error}"))
+            }
+        })?;
+    }
     if cancelled() {
         return Err(ArchiveError::Cancelled);
     }
@@ -140,12 +158,15 @@ fn extract_seven_zip_blocking(
         .map_err(|_| "The archive is empty".to_owned())?
         .flatten()
     {
+        let path = entry.path();
         entries.push(ArchiveEntry {
-            uri: Location::from_local_path(&entry.path()).uri().to_owned(),
+            uri: Location::from_local_path(&path).uri().to_owned(),
             name: entry.file_name().to_string_lossy().into_owned(),
-            is_dir: entry.path().is_dir() && !entry.path().is_symlink(),
+            is_dir: path.is_dir() && !path.is_symlink(),
         });
     }
+    entries.sort_by(|left, right| left.name.cmp(&right.name));
+
     let parent_location = Location::from_local_path(parent);
     let (from, name) = match placement(&entries) {
         Placement::Empty => return Err("The archive is empty".to_owned().into()),
@@ -164,16 +185,14 @@ fn extract_seven_zip_blocking(
     Ok(())
 }
 
-fn extract_seven_zip(
+fn extract_local(
     operations: &OperationManager,
     archive: &Location,
     parent: &Location,
+    archive_path: std::path::PathBuf,
+    parent_path: std::path::PathBuf,
     on_failure: impl Fn(String) + 'static,
 ) -> bool {
-    let (Some(archive_path), Some(parent_path)) = (archive.local_path(), parent.local_path())
-    else {
-        return false;
-    };
     let job = operations.begin_job(
         OperationKind::Extract,
         vec![archive.clone()],
@@ -183,7 +202,7 @@ fn extract_seven_zip(
         let result = gio::spawn_blocking({
             let job = job.clone();
             move || {
-                let result = extract_seven_zip_blocking(
+                let result = extract_local_blocking(
                     &archive_path,
                     &parent_path,
                     &mut |done, total| job.set_progress(done, total),
@@ -194,7 +213,11 @@ fn extract_seven_zip(
             }
         })
         .await
-        .unwrap_or_else(|_| Err(ArchiveError::Failed("The extractor stopped unexpectedly.".into())));
+        .unwrap_or_else(|_| {
+            Err(ArchiveError::Failed(
+                "The extractor stopped unexpectedly.".into(),
+            ))
+        });
         match result {
             Ok(()) | Err(ArchiveError::Cancelled) => {}
             Err(error) => on_failure(error.message()),
@@ -203,16 +226,16 @@ fn extract_seven_zip(
     true
 }
 
-/// Mounts `archive` and copies its contents out beside it.
+/// Extracts `archive` into a folder beside it.
 ///
-/// The work shows in the operations queue from the start: first as the archive
-/// being opened -- gvfs reads a compressed archive through to index it, which
-/// is the slow part for a large `.tar.gz` -- then as the copy, with its byte
-/// progress, once the mount is ready. Cancelling during the first phase stops
-/// the mount.
+/// A local archive is unpacked in-process with libarchive, so a `.7z` or
+/// `.rar` is handled the same way as a `.zip`, and an archive holding a single
+/// folder extracts to that folder beside the archive. Anything else goes into
+/// a new folder named after the archive.
 ///
-/// An archive holding a single folder extracts to that folder beside the
-/// archive; anything else goes into a new folder named after the archive.
+/// An archive on a remote location is mounted through GVfs and copied the way
+/// any other remote folder is; the copy keeps the operation pipeline's
+/// progress, cancellation and conflict handling.
 ///
 /// Returns whether extraction began, which it does not when the location
 /// cannot be addressed as an archive; `on_failure` reports anything that goes
@@ -223,8 +246,20 @@ pub fn extract(
     parent: &Location,
     on_failure: impl Fn(String) + 'static,
 ) -> bool {
+    if let (Some(archive_path), Some(parent_path)) = (archive.local_path(), parent.local_path()) {
+        return extract_local(
+            operations,
+            archive,
+            parent,
+            archive_path,
+            parent_path,
+            on_failure,
+        );
+    }
+    // A remote 7-Zip archive cannot be browsed by GVfs and there is no local
+    // file to hand to libarchive, so it is not extractable here.
     if is_seven_zip_name(&archive.display_name()) {
-        return extract_seven_zip(operations, archive, parent, on_failure);
+        return false;
     }
     let Ok(contents) = archive.archive_contents() else {
         return false;
@@ -333,7 +368,9 @@ pub fn extract(
                                     false,
                                 ))
                             }
-                            Err(_) => Err("Could not create a folder beside the archive".to_owned()),
+                            Err(_) => {
+                                Err("Could not create a folder beside the archive".to_owned())
+                            }
                         }
                     }
                 };
@@ -382,10 +419,20 @@ mod tests {
         extraction_folder_name, placement, reserve_destination, unique_child, ArchiveEntry,
         Placement,
     };
+    use crate::application::compression::{compress_blocking, ArchiveFormat};
     use crate::core::Location;
+    use std::path::{Path, PathBuf};
 
     fn location(uri: &str) -> Location {
         Location::from_uri(uri).unwrap()
+    }
+
+    fn archive(sources: &[PathBuf], format: ArchiveFormat) -> PathBuf {
+        compress_blocking(sources, format, &mut |_, _| {}, &|| false).unwrap()
+    }
+
+    fn extract(archive: &Path, parent: &Path) -> Result<(), super::ArchiveError> {
+        super::extract_local_blocking(archive, parent, &mut |_, _| {}, &|| false)
     }
 
     #[test]
@@ -468,8 +515,199 @@ mod tests {
         assert!(!parent.path().join("kit (2)").exists());
     }
 
-    /// Runs the whole flow against the real gvfs archive backend.
-    fn extract_and_wait(archive: &std::path::Path) -> Vec<crate::core::OperationRecord> {
+    fn one_folder_fixture(root: &Path) -> PathBuf {
+        let source = root.join("src");
+        std::fs::create_dir_all(source.join("kit/sub")).unwrap();
+        std::fs::write(source.join("kit/readme.md"), "hello").unwrap();
+        std::fs::write(source.join("kit/sub/inner.txt"), "inner").unwrap();
+        source.join("kit")
+    }
+
+    fn move_archive(from: PathBuf, to: &Path) {
+        std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+        std::fs::rename(from, to).unwrap();
+    }
+
+    #[test]
+    fn a_zip_holding_one_folder_extracts_to_that_folder_beside_it() {
+        let root = tempfile::tempdir().unwrap();
+        let kit = one_folder_fixture(root.path());
+        let created = archive(&[kit], ArchiveFormat::Zip);
+        let out = root.path().join("out");
+        move_archive(created, &out.join("kit.zip"));
+        std::fs::remove_dir_all(root.path().join("src")).unwrap();
+
+        extract(&out.join("kit.zip"), &out).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(out.join("kit/readme.md")).unwrap(),
+            "hello"
+        );
+        assert_eq!(
+            std::fs::read_to_string(out.join("kit/sub/inner.txt")).unwrap(),
+            "inner"
+        );
+        assert!(!out.join("kit/kit").exists(), "no second folder inside");
+    }
+
+    #[test]
+    fn a_tar_gz_of_loose_files_extracts_into_a_folder_named_after_it() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.txt"), "a").unwrap();
+        std::fs::write(root.path().join("b.txt"), "b").unwrap();
+        let created = archive(
+            &[root.path().join("a.txt"), root.path().join("b.txt")],
+            ArchiveFormat::TarGz,
+        );
+        move_archive(created, &root.path().join("loose.tar.gz"));
+        std::fs::remove_file(root.path().join("a.txt")).unwrap();
+        std::fs::remove_file(root.path().join("b.txt")).unwrap();
+
+        extract(&root.path().join("loose.tar.gz"), root.path()).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("loose/a.txt")).unwrap(),
+            "a"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("loose/b.txt")).unwrap(),
+            "b"
+        );
+    }
+
+    #[test]
+    fn a_seven_zip_holding_one_folder_extracts_to_that_folder_beside_it() {
+        let root = tempfile::tempdir().unwrap();
+        let kit = one_folder_fixture(root.path());
+        let created = archive(&[kit], ArchiveFormat::SevenZip);
+        let out = root.path().join("out");
+        move_archive(created, &out.join("kit.7z"));
+        std::fs::remove_dir_all(root.path().join("src")).unwrap();
+
+        extract(&out.join("kit.7z"), &out).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(out.join("kit/sub/inner.txt")).unwrap(),
+            "inner"
+        );
+        assert!(!out.join("kit/kit").exists());
+    }
+
+    #[test]
+    fn a_seven_zip_of_loose_files_extracts_into_a_folder_named_after_it() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.txt"), "a").unwrap();
+        std::fs::write(root.path().join("b.txt"), "b").unwrap();
+        let created = archive(
+            &[root.path().join("a.txt"), root.path().join("b.txt")],
+            ArchiveFormat::SevenZip,
+        );
+        move_archive(created, &root.path().join("loose.7z"));
+        std::fs::remove_file(root.path().join("a.txt")).unwrap();
+        std::fs::remove_file(root.path().join("b.txt")).unwrap();
+
+        extract(&root.path().join("loose.7z"), root.path()).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("loose/a.txt")).unwrap(),
+            "a"
+        );
+    }
+
+    #[test]
+    fn zip_and_tar_keep_symbolic_links() {
+        for format in [ArchiveFormat::Zip, ArchiveFormat::TarGz] {
+            let root = tempfile::tempdir().unwrap();
+            std::fs::write(root.path().join("target.txt"), "target").unwrap();
+            std::os::unix::fs::symlink("target.txt", root.path().join("link")).unwrap();
+            let created = archive(
+                &[root.path().join("target.txt"), root.path().join("link")],
+                format,
+            );
+            move_archive(created, &root.path().join("links.zip"));
+            std::fs::remove_file(root.path().join("target.txt")).unwrap();
+            std::fs::remove_file(root.path().join("link")).unwrap();
+
+            extract(&root.path().join("links.zip"), root.path()).unwrap();
+
+            let link = root.path().join("links/link");
+            assert!(
+                std::fs::symlink_metadata(&link)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink(),
+                "{format:?} lost the link"
+            );
+            assert_eq!(
+                std::fs::read_link(&link).unwrap(),
+                PathBuf::from("target.txt")
+            );
+        }
+    }
+
+    #[test]
+    fn a_broken_archive_reports_why_and_leaves_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("bad.zip"), "not an archive").unwrap();
+
+        let error = extract(&root.path().join("bad.zip"), root.path()).unwrap_err();
+
+        assert!(!error.message().is_empty());
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn progress_climbs_to_the_size_of_the_archive() {
+        let root = tempfile::tempdir().unwrap();
+        let kit = one_folder_fixture(root.path());
+        let created = archive(&[kit], ArchiveFormat::TarGz);
+        let mut seen = Vec::new();
+
+        super::extract_local_blocking(
+            &created,
+            root.path(),
+            &mut |done, total| seen.push((done, total)),
+            &|| false,
+        )
+        .unwrap();
+
+        let total = std::fs::metadata(&created).unwrap().len();
+        assert_eq!(seen.first(), Some(&(0, total)));
+        assert_eq!(seen.last(), Some(&(total, total)));
+    }
+
+    #[test]
+    fn cancelling_stops_extraction_and_leaves_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let kit = one_folder_fixture(root.path());
+        let created = archive(&[kit], ArchiveFormat::Zip);
+        let moved = root.path().join("kit.zip");
+        std::fs::rename(created, &moved).unwrap();
+        std::fs::remove_dir_all(root.path().join("src")).unwrap();
+        let cancel_after_start = std::cell::Cell::new(false);
+
+        let result = super::extract_local_blocking(
+            &moved,
+            root.path(),
+            &mut |_, _| cancel_after_start.set(true),
+            &|| cancel_after_start.get(),
+        );
+
+        assert_eq!(result, Err(super::ArchiveError::Cancelled));
+        let names: Vec<_> = std::fs::read_dir(root.path())
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name())
+            .collect();
+        assert_eq!(
+            names,
+            vec![std::ffi::OsString::from("kit.zip")],
+            "{names:?}"
+        );
+    }
+
+    /// Runs the whole local flow through the operation queue.
+    fn extract_and_wait(archive: &Path) -> Vec<crate::core::OperationRecord> {
         use crate::core::OperationManager;
         let operations = OperationManager::default();
         let archive = Location::from_local_path(archive);
@@ -482,7 +720,7 @@ mod tests {
         while started.elapsed().as_secs() < 30 {
             context.iteration(false);
             let records = operations.records();
-            if records.len() == 2 && records.iter().all(|record| record.finished_at.is_some()) {
+            if records.len() == 1 && records.iter().all(|record| record.finished_at.is_some()) {
                 return records;
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
@@ -491,148 +729,42 @@ mod tests {
     }
 
     #[gtk::test]
-    #[ignore = "requires the gvfs archive backend"]
-    fn a_zip_holding_one_folder_extracts_to_that_folder_beside_it() {
+    fn a_local_zip_runs_through_the_operation_queue() {
         let root = tempfile::tempdir().unwrap();
-        let source = root.path().join("src");
-        std::fs::create_dir_all(source.join("kit/sub")).unwrap();
-        std::fs::write(source.join("kit/readme.md"), "hello").unwrap();
-        std::fs::write(source.join("kit/sub/inner.txt"), "inner").unwrap();
-        std::fs::create_dir(root.path().join("out")).unwrap();
-        let moved = root.path().join("out/kit.zip");
-        let status = std::process::Command::new("zip")
-            .arg("-r")
-            .arg("-q")
-            .arg(&moved)
-            .arg("kit")
-            .current_dir(&source)
-            .status()
-            .unwrap();
-        assert!(status.success());
+        let kit = one_folder_fixture(root.path());
+        let created = archive(&[kit], ArchiveFormat::Zip);
+        let out = root.path().join("out");
+        move_archive(created, &out.join("kit.zip"));
+        std::fs::remove_dir_all(root.path().join("src")).unwrap();
 
-        let records = extract_and_wait(&moved);
+        let records = extract_and_wait(&out.join("kit.zip"));
 
         assert!(records
             .iter()
             .all(|record| record.state == crate::core::OperationState::Completed));
-        let extracted = root.path().join("out/kit");
-        assert_eq!(std::fs::read_to_string(extracted.join("readme.md")).unwrap(), "hello");
         assert_eq!(
-            std::fs::read_to_string(extracted.join("sub/inner.txt")).unwrap(),
-            "inner"
+            std::fs::read_to_string(out.join("kit/readme.md")).unwrap(),
+            "hello"
         );
-        assert!(!extracted.join("kit").exists(), "no second folder inside");
     }
 
     #[gtk::test]
-    #[ignore = "requires the gvfs archive backend"]
-    fn a_zip_of_loose_files_extracts_into_a_folder_named_after_it() {
+    fn a_local_seven_zip_runs_through_the_operation_queue() {
         let root = tempfile::tempdir().unwrap();
-        std::fs::write(root.path().join("a.txt"), "a").unwrap();
-        std::fs::write(root.path().join("b.txt"), "b").unwrap();
-        let status = std::process::Command::new("zip")
-            .args(["-q", "loose.zip", "a.txt", "b.txt"])
-            .current_dir(root.path())
-            .status()
-            .unwrap();
-        assert!(status.success());
-        std::fs::remove_file(root.path().join("a.txt")).unwrap();
-        std::fs::remove_file(root.path().join("b.txt")).unwrap();
+        let kit = one_folder_fixture(root.path());
+        let created = archive(&[kit], ArchiveFormat::SevenZip);
+        let out = root.path().join("out");
+        move_archive(created, &out.join("kit.7z"));
+        std::fs::remove_dir_all(root.path().join("src")).unwrap();
 
-        extract_and_wait(&root.path().join("loose.zip"));
+        let records = extract_and_wait(&out.join("kit.7z"));
 
-        assert_eq!(std::fs::read_to_string(root.path().join("loose/a.txt")).unwrap(), "a");
-        assert_eq!(std::fs::read_to_string(root.path().join("loose/b.txt")).unwrap(), "b");
-    }
-
-    fn seven_zip(archive: &std::path::Path, inputs: &[&str], from: &std::path::Path) -> bool {
-        let Some(program) = crate::application::compression::seven_zip_program() else {
-            return false;
-        };
-        std::process::Command::new(program)
-            .args(["a", "-bd"])
-            .arg(archive)
-            .args(inputs)
-            .current_dir(from)
-            .output()
-            .unwrap()
-            .status
-            .success()
-    }
-
-    #[test]
-    fn a_seven_zip_holding_one_folder_extracts_to_that_folder_beside_it() {
-        let root = tempfile::tempdir().unwrap();
-        let source = root.path().join("src");
-        std::fs::create_dir_all(source.join("kit/sub")).unwrap();
-        std::fs::write(source.join("kit/sub/inner.txt"), "inner").unwrap();
-        std::fs::create_dir(root.path().join("out")).unwrap();
-        let archive = root.path().join("out/kit.7z");
-        if !seven_zip(&archive, &["kit"], &source) {
-            return;
-        }
-        let mut seen = Vec::new();
-
-        super::extract_seven_zip_blocking(
-            &archive,
-            &root.path().join("out"),
-            &mut |done, total| seen.push((done, total)),
-            &|| false,
-        )
-        .unwrap();
-
+        assert!(records
+            .iter()
+            .all(|record| record.state == crate::core::OperationState::Completed));
         assert_eq!(
-            std::fs::read_to_string(root.path().join("out/kit/sub/inner.txt")).unwrap(),
+            std::fs::read_to_string(out.join("kit/sub/inner.txt")).unwrap(),
             "inner"
         );
-        assert!(!root.path().join("out/kit/kit").exists());
-        assert_eq!(seen.last().map(|(done, total)| done == total), Some(true));
-        assert_eq!(
-            std::fs::read_dir(root.path().join("out")).unwrap().count(),
-            2,
-            "only the archive and the folder; the scratch folder is gone"
-        );
-    }
-
-    #[test]
-    fn a_seven_zip_of_loose_files_extracts_into_a_folder_named_after_it() {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::write(root.path().join("a.txt"), "a").unwrap();
-        std::fs::write(root.path().join("b.txt"), "b").unwrap();
-        if !seven_zip(&root.path().join("loose.7z"), &["a.txt", "b.txt"], root.path()) {
-            return;
-        }
-        std::fs::remove_file(root.path().join("a.txt")).unwrap();
-        std::fs::remove_file(root.path().join("b.txt")).unwrap();
-
-        super::extract_seven_zip_blocking(
-            &root.path().join("loose.7z"),
-            root.path(),
-            &mut |_, _| {},
-            &|| false,
-        )
-        .unwrap();
-
-        assert_eq!(std::fs::read_to_string(root.path().join("loose/a.txt")).unwrap(), "a");
-    }
-
-    #[test]
-    fn a_broken_seven_zip_reports_why_and_leaves_nothing() {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::write(root.path().join("bad.7z"), "not an archive").unwrap();
-        if crate::application::compression::seven_zip_program().is_none() {
-            return;
-        }
-
-        let error = super::extract_seven_zip_blocking(
-            &root.path().join("bad.7z"),
-            root.path(),
-            &mut |_, _| {},
-            &|| false,
-        )
-        .unwrap_err();
-
-        assert!(!error.message().is_empty());
-        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
     }
 }

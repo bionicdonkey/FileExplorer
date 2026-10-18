@@ -1,13 +1,15 @@
 //! Compressing files and folders into an archive beside them.
 //!
-//! Extracting leans on the GVfs archive backend; there is no writing
-//! counterpart for it, so compressing runs the standard archiver for the
-//! chosen format. It is limited to local files, and the archive is created in
-//! the folder the items live in.
+//! Both directions are handled in-process: reading goes through libarchive
+//! (see `extraction`), and the writers here are the pure-Rust `zip`,
+//! `sevenz-rust2` and `tar`/`flate2` libraries. No archiver program has to be
+//! installed. The work is limited to local files, and the archive is created
+//! in the folder the items live in.
 
 use std::ffi::OsString;
+use std::io::{Read, Seek, SeekFrom};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ArchiveFormat {
@@ -47,73 +49,6 @@ pub fn unique_archive_path(parent: &Path, base: &str, format: ArchiveFormat) -> 
     candidate
 }
 
-pub(crate) fn find_in_path(program: &str) -> Option<PathBuf> {
-    std::env::var_os("PATH").and_then(|paths| {
-        std::env::split_paths(&paths)
-            .map(|dir| dir.join(program))
-            .find(|candidate| candidate.is_file())
-    })
-}
-
-/// The 7-Zip binary goes by several names depending on the package.
-pub(crate) fn seven_zip_program() -> Option<PathBuf> {
-    ["7zz", "7z", "7za", "7zr"]
-        .into_iter()
-        .find_map(find_in_path)
-}
-
-pub(crate) fn missing_tool(format: ArchiveFormat) -> String {
-    match format {
-        ArchiveFormat::Zip => "The zip program is not installed.".to_owned(),
-        ArchiveFormat::SevenZip => "The 7-Zip program (7z) is not installed.".to_owned(),
-        ArchiveFormat::TarGz => "The tar program is not installed.".to_owned(),
-    }
-}
-
-/// Builds the archiver command, run from the items' folder so the archive
-/// holds relative names. Names are prefixed with `./` (or follow `--`) so a
-/// file called `-r` or `@list` is never read as an option.
-fn archive_command(
-    format: ArchiveFormat,
-    archive: &Path,
-    parent: &Path,
-    names: &[OsString],
-) -> Result<Command, String> {
-    let relative = || {
-        names.iter().map(|name| {
-            let mut path = OsString::from("./");
-            path.push(name);
-            path
-        })
-    };
-    let mut command = match format {
-        ArchiveFormat::Zip => {
-            let program = find_in_path("zip").ok_or_else(|| missing_tool(format))?;
-            let mut command = Command::new(program);
-            // -nw: names are literal, never wildcard patterns.
-            command.args(["-r", "-q", "-y", "-nw"]).arg(archive);
-            command.args(relative());
-            command
-        }
-        ArchiveFormat::SevenZip => {
-            let program = seven_zip_program().ok_or_else(|| missing_tool(format))?;
-            let mut command = Command::new(program);
-            command.args(["a", "-bd", "-y"]).arg(archive);
-            command.args(relative());
-            command
-        }
-        ArchiveFormat::TarGz => {
-            let program = find_in_path("tar").ok_or_else(|| missing_tool(format))?;
-            let mut command = Command::new(program);
-            command.arg("-czf").arg(archive).arg("-C").arg(parent).arg("--");
-            command.args(names);
-            command
-        }
-    };
-    command.current_dir(parent);
-    Ok(command)
-}
-
 #[derive(Debug, PartialEq, Eq)]
 pub enum ArchiveError {
     Cancelled,
@@ -135,52 +70,65 @@ impl From<String> for ArchiveError {
     }
 }
 
-/// How often progress is sampled and cancellation is noticed.
-const POLL: std::time::Duration = std::time::Duration::from_millis(100);
+impl From<std::io::Error> for ArchiveError {
+    fn from(error: std::io::Error) -> Self {
+        ArchiveError::Failed(error.to_string())
+    }
+}
 
-/// The bytes of file data under `sources`, symlinks not followed.
-fn total_bytes(sources: &[PathBuf], cancelled: &dyn Fn() -> bool) -> u64 {
-    let mut total = 0;
-    let mut pending: Vec<PathBuf> = sources.to_vec();
-    while let Some(path) = pending.pop() {
-        if cancelled() {
-            break;
-        }
-        let Ok(metadata) = path.symlink_metadata() else {
-            continue;
-        };
-        if metadata.is_dir() {
-            if let Ok(entries) = std::fs::read_dir(&path) {
-                pending.extend(entries.flatten().map(|entry| entry.path()));
-            }
-        } else if metadata.is_file() {
-            total += metadata.len();
+/// A reader that reports how much of `total` it has read and stops with an
+/// interrupted error once `cancelled` turns true. Extraction and compression
+/// share it so progress and cancellation behave the same while bytes move.
+pub(crate) struct ReadProgress<'a, R> {
+    inner: R,
+    done: &'a mut u64,
+    total: u64,
+    progress: &'a mut dyn FnMut(u64, u64),
+    cancelled: &'a dyn Fn() -> bool,
+}
+
+impl<'a, R> ReadProgress<'a, R> {
+    pub(crate) fn new(
+        inner: R,
+        done: &'a mut u64,
+        total: u64,
+        progress: &'a mut dyn FnMut(u64, u64),
+        cancelled: &'a dyn Fn() -> bool,
+    ) -> Self {
+        Self {
+            inner,
+            done,
+            total,
+            progress,
+            cancelled,
         }
     }
-    total
 }
 
-/// Bytes the process has read so far. An archiver reads each input file once,
-/// so this follows its progress through the data without parsing its output.
-fn bytes_read(pid: u32) -> Option<u64> {
-    std::fs::read_to_string(format!("/proc/{pid}/io"))
-        .ok()?
-        .lines()
-        .find_map(|line| line.strip_prefix("rchar:"))
-        .and_then(|value| value.trim().parse().ok())
+impl<R: Read> Read for ReadProgress<'_, R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if (self.cancelled)() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "cancelled",
+            ));
+        }
+        let read = self.inner.read(buffer)?;
+        *self.done += read as u64;
+        (self.progress)((*self.done).min(self.total), self.total);
+        Ok(read)
+    }
 }
 
-fn drain(mut stream: impl std::io::Read + Send + 'static) -> std::thread::JoinHandle<String> {
-    std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let _ = stream.read_to_end(&mut bytes);
-        String::from_utf8_lossy(&bytes).into_owned()
-    })
+impl<R: Seek> Seek for ReadProgress<'_, R> {
+    fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+        self.inner.seek(position)
+    }
 }
 
-/// A scratch folder beside the sources. The archiver writes there, so a
-/// half-written archive (and the archiver's own temporary files) never shows
-/// in the folder and cancelling can discard it whole.
+/// A scratch folder beside the sources. The archive is written there, so a
+/// half-written one never shows in the folder and cancelling can discard it
+/// whole.
 pub(crate) struct Workspace(pub(crate) PathBuf);
 
 impl Workspace {
@@ -201,59 +149,316 @@ impl Drop for Workspace {
     }
 }
 
-/// Runs `command` to completion, reporting how much of `total` bytes it has
-/// read and stopping it if `cancelled` turns true. A failure carries the
-/// last line the program printed.
-pub(crate) fn run_with_progress(
-    command: &mut Command,
+/// One item found while walking the sources, named relative to the folder the
+/// archive is being created in.
+struct Entry {
+    path: PathBuf,
+    /// Slash-separated, as archive formats expect.
+    name: String,
+    kind: EntryKind,
+}
+
+enum EntryKind {
+    Directory,
+    File,
+    Symlink(PathBuf),
+}
+
+/// Collects the sources and everything below them. `follow_symlinks` mirrors
+/// what the format does by convention: zip and tar store links as links, while
+/// 7-Zip has no portable link entry here and follows them instead.
+fn collect_entries(
+    sources: &[PathBuf],
+    follow_symlinks: bool,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<Entry>, ArchiveError> {
+    let mut entries = Vec::new();
+    let mut visited = std::collections::HashSet::new();
+    for source in sources {
+        let name = source
+            .file_name()
+            .ok_or_else(|| "An item has no name to archive.".to_owned())?
+            .to_string_lossy()
+            .into_owned();
+        collect_into(
+            source,
+            &name,
+            follow_symlinks,
+            &mut visited,
+            &mut entries,
+            cancelled,
+        )?;
+    }
+    entries.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(entries)
+}
+
+fn collect_into(
+    path: &Path,
+    name: &str,
+    follow_symlinks: bool,
+    visited: &mut std::collections::HashSet<PathBuf>,
+    entries: &mut Vec<Entry>,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<(), ArchiveError> {
+    if cancelled() {
+        return Err(ArchiveError::Cancelled);
+    }
+    let metadata = if follow_symlinks {
+        std::fs::metadata(path).or_else(|_| std::fs::symlink_metadata(path))?
+    } else {
+        std::fs::symlink_metadata(path)?
+    };
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() {
+        entries.push(Entry {
+            path: path.to_path_buf(),
+            name: name.to_owned(),
+            kind: EntryKind::Symlink(std::fs::read_link(path)?),
+        });
+    } else if file_type.is_dir() {
+        if follow_symlinks {
+            // A link that points back up the tree must not be walked twice.
+            if let Ok(canonical) = std::fs::canonicalize(path) {
+                if !visited.insert(canonical) {
+                    return Ok(());
+                }
+            }
+        }
+        entries.push(Entry {
+            path: path.to_path_buf(),
+            name: name.to_owned(),
+            kind: EntryKind::Directory,
+        });
+        let mut children: Vec<std::fs::DirEntry> =
+            std::fs::read_dir(path)?.collect::<std::io::Result<_>>()?;
+        children.sort_by_key(|child| child.file_name());
+        for child in children {
+            let child_name = format!("{name}/{}", child.file_name().to_string_lossy());
+            collect_into(
+                &child.path(),
+                &child_name,
+                follow_symlinks,
+                visited,
+                entries,
+                cancelled,
+            )?;
+        }
+    } else if file_type.is_file() {
+        entries.push(Entry {
+            path: path.to_path_buf(),
+            name: name.to_owned(),
+            kind: EntryKind::File,
+        });
+    }
+    Ok(())
+}
+
+fn total_bytes(entries: &[Entry]) -> u64 {
+    entries
+        .iter()
+        .filter(|entry| matches!(entry.kind, EntryKind::File))
+        .filter_map(|entry| std::fs::metadata(&entry.path).ok())
+        .map(|metadata| metadata.len())
+        .sum()
+}
+
+fn write_zip(
+    archive: &Path,
+    entries: &[Entry],
     total: u64,
     progress: &mut dyn FnMut(u64, u64),
     cancelled: &dyn Fn() -> bool,
 ) -> Result<(), ArchiveError> {
-    let mut child = command
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("Could not start the archiver: {error}"))?;
-    let stdout = child.stdout.take().map(drain);
-    let stderr = child.stderr.take().map(drain);
-    let pid = child.id();
-    let status = loop {
+    let file = std::fs::File::create(archive)?;
+    let mut writer = zip::ZipWriter::new(file);
+    let mut done = 0u64;
+    for entry in entries {
         if cancelled() {
-            let _ = child.kill();
-            let _ = child.wait();
             return Err(ArchiveError::Cancelled);
         }
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => {
-                if let Some(read) = bytes_read(pid) {
-                    progress(read.min(total), total);
-                }
-                std::thread::sleep(POLL);
+        let metadata = std::fs::symlink_metadata(&entry.path)?;
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+            .unix_permissions(metadata.permissions().mode() & 0o777)
+            .last_modified_time(zip_datetime(metadata.modified().ok()));
+        match &entry.kind {
+            EntryKind::Directory => writer
+                .add_directory(entry.name.clone(), options)
+                .map_err(|error| ArchiveError::Failed(error.to_string()))?,
+            EntryKind::Symlink(target) => writer
+                .add_symlink(entry.name.clone(), target.to_string_lossy(), options)
+                .map_err(|error| ArchiveError::Failed(error.to_string()))?,
+            EntryKind::File => {
+                writer
+                    .start_file(entry.name.clone(), options)
+                    .map_err(|error| ArchiveError::Failed(error.to_string()))?;
+                let source = std::fs::File::open(&entry.path)?;
+                let mut reader = ReadProgress::new(source, &mut done, total, progress, cancelled);
+                std::io::copy(&mut reader, &mut writer)?;
             }
-            Err(error) => return Err(format!("The archiver stopped unexpectedly: {error}").into()),
         }
-    };
-    let stdout = stdout.and_then(|handle| handle.join().ok()).unwrap_or_default();
-    let stderr = stderr.and_then(|handle| handle.join().ok()).unwrap_or_default();
-    if !status.success() {
-        let detail = [stderr.trim(), stdout.trim()]
-            .into_iter()
-            .find(|text| !text.is_empty())
-            .and_then(|text| text.lines().rev().find(|line| !line.trim().is_empty()))
-            .unwrap_or("the archiver reported an error");
-        return Err(detail.trim().to_owned().into());
     }
+    writer
+        .finish()
+        .map_err(|error| ArchiveError::Failed(error.to_string()))?;
     Ok(())
+}
+
+/// 7-Zip carries a POSIX mode in the high 16 bits of its Windows attributes,
+/// and only uses them when the Unix-extension bit is set. Without both,
+/// libarchive cannot tell a directory from a file and extracts every entry as
+/// a read-write file, leaving folders untraversable.
+fn seven_zip_entry(path: &Path, name: String) -> sevenz_rust2::ArchiveEntry {
+    let mut entry = sevenz_rust2::ArchiveEntry::from_path(path, name);
+    if let Ok(metadata) = std::fs::metadata(path) {
+        entry.has_windows_attributes = true;
+        entry.windows_attributes = (metadata.permissions().mode() << 16) | 0x8000;
+    }
+    entry
+}
+
+fn write_seven_zip(
+    archive: &Path,
+    entries: &[Entry],
+    total: u64,
+    progress: &mut dyn FnMut(u64, u64),
+    cancelled: &dyn Fn() -> bool,
+) -> Result<(), ArchiveError> {
+    let mut writer = sevenz_rust2::ArchiveWriter::create(archive)
+        .map_err(|error| ArchiveError::Failed(error.to_string()))?;
+    let mut done = 0u64;
+    for entry in entries {
+        if cancelled() {
+            return Err(ArchiveError::Cancelled);
+        }
+        match &entry.kind {
+            // 7-Zip follows links, so these were already resolved into files
+            // and directories by `collect_entries`. A broken link has no data
+            // to store and is skipped.
+            EntryKind::Symlink(_) => {}
+            EntryKind::Directory => {
+                writer
+                    .push_archive_entry(
+                        seven_zip_entry(&entry.path, entry.name.clone()),
+                        None::<&[u8]>,
+                    )
+                    .map_err(|error| ArchiveError::Failed(error.to_string()))?;
+            }
+            EntryKind::File => {
+                let source = std::fs::File::open(&entry.path)?;
+                let mut reader = ReadProgress::new(source, &mut done, total, progress, cancelled);
+                writer
+                    .push_archive_entry(
+                        seven_zip_entry(&entry.path, entry.name.clone()),
+                        Some(&mut reader),
+                    )
+                    .map_err(|error| ArchiveError::Failed(error.to_string()))?;
+            }
+        }
+    }
+    writer
+        .finish()
+        .map_err(|error| ArchiveError::Failed(error.to_string()))?;
+    Ok(())
+}
+
+fn write_tar_gz(
+    archive: &Path,
+    entries: &[Entry],
+    total: u64,
+    progress: &mut dyn FnMut(u64, u64),
+    cancelled: &dyn Fn() -> bool,
+) -> Result<(), ArchiveError> {
+    let file = std::fs::File::create(archive)?;
+    let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+    let mut builder = tar::Builder::new(encoder);
+    builder.follow_symlinks(false);
+    let mut done = 0u64;
+    for entry in entries {
+        if cancelled() {
+            return Err(ArchiveError::Cancelled);
+        }
+        let metadata = std::fs::symlink_metadata(&entry.path)?;
+        let mut header = tar::Header::new_gnu();
+        header.set_metadata(&metadata);
+        match &entry.kind {
+            EntryKind::Directory => {
+                header.set_entry_type(tar::EntryType::Directory);
+                header.set_size(0);
+                builder.append_data(&mut header, format!("{}/", entry.name), std::io::empty())?;
+            }
+            EntryKind::Symlink(target) => {
+                header.set_entry_type(tar::EntryType::Symlink);
+                header.set_size(0);
+                header.set_link_name(target)?;
+                builder.append_data(&mut header, entry.name.clone(), std::io::empty())?;
+            }
+            EntryKind::File => {
+                header.set_entry_type(tar::EntryType::Regular);
+                header.set_size(metadata.len());
+                let source = std::fs::File::open(&entry.path)?;
+                let mut reader = ReadProgress::new(source, &mut done, total, progress, cancelled);
+                builder.append_data(&mut header, entry.name.clone(), &mut reader)?;
+            }
+        }
+    }
+    let encoder = builder.into_inner()?;
+    encoder.finish()?;
+    Ok(())
+}
+
+/// A zip timestamp, which only covers 1980 through 2107.
+fn zip_datetime(time: Option<std::time::SystemTime>) -> zip::DateTime {
+    let Some(time) = time else {
+        return zip::DateTime::default();
+    };
+    let Ok(elapsed) = time.duration_since(std::time::UNIX_EPOCH) else {
+        return zip::DateTime::default();
+    };
+    let seconds = elapsed.as_secs() as i64;
+    let days = seconds.div_euclid(86_400);
+    let of_day = seconds.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    if !(1980..=2107).contains(&year) {
+        return zip::DateTime::default();
+    }
+    zip::DateTime::from_date_and_time(
+        year as u16,
+        month as u8,
+        day as u8,
+        (of_day / 3_600) as u8,
+        ((of_day % 3_600) / 60) as u8,
+        (of_day % 60) as u8,
+    )
+    .unwrap_or_default()
+}
+
+/// Days since the Unix epoch to a civil date (Howard Hinnant's algorithm).
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let days = days + 719_468;
+    let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
+    let day_of_era = days - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = (day_of_year - (153 * month_prime + 2) / 5 + 1) as u32;
+    let month = if month_prime < 10 {
+        month_prime + 3
+    } else {
+        month_prime - 9
+    } as u32;
+    (if month <= 2 { year + 1 } else { year }, month, day)
 }
 
 /// Archives `sources`, which must all sit in one folder, into a new file there
 /// and returns its path.
 ///
-/// `progress` receives (bytes read, bytes to read) while the archiver runs;
-/// `cancelled` is polled, and a stop discards everything written so far.
+/// `progress` receives (bytes read, bytes to read) while the archive is
+/// written; `cancelled` is polled, and a stop discards everything written so
+/// far.
 pub fn compress_blocking(
     sources: &[PathBuf],
     format: ArchiveFormat,
@@ -270,9 +475,11 @@ pub fn compress_blocking(
     let mut names = Vec::with_capacity(sources.len());
     for source in sources {
         if source.parent() != Some(parent.as_path()) {
-            return Err("Items from different folders cannot be compressed together."
-                .to_owned()
-                .into());
+            return Err(
+                "Items from different folders cannot be compressed together."
+                    .to_owned()
+                    .into(),
+            );
         }
         names.push(
             source
@@ -286,15 +493,24 @@ pub fn compress_blocking(
     let workspace = Workspace::create(&parent)
         .map_err(|error| format!("Could not write to this folder: {error}"))?;
     let scratch_archive = workspace.0.join(&file_name);
-    let mut command = archive_command(format, &scratch_archive, &parent, &names)?;
 
-    let total = total_bytes(sources, cancelled);
+    let follow_symlinks = matches!(format, ArchiveFormat::SevenZip);
+    let entries = collect_entries(sources, follow_symlinks, cancelled)?;
+    let total = total_bytes(&entries);
     if cancelled() {
         return Err(ArchiveError::Cancelled);
     }
     progress(0, total);
 
-    run_with_progress(&mut command, total, progress, cancelled)?;
+    match format {
+        ArchiveFormat::Zip => write_zip(&scratch_archive, &entries, total, progress, cancelled)?,
+        ArchiveFormat::SevenZip => {
+            write_seven_zip(&scratch_archive, &entries, total, progress, cancelled)?
+        }
+        ArchiveFormat::TarGz => {
+            write_tar_gz(&scratch_archive, &entries, total, progress, cancelled)?
+        }
+    }
     if cancelled() {
         return Err(ArchiveError::Cancelled);
     }
@@ -327,7 +543,7 @@ pub fn compress(
         .await
         .unwrap_or_else(|_| {
             Err(ArchiveError::Failed(
-                "The archiver stopped unexpectedly.".to_owned(),
+                "The compressor stopped unexpectedly.".to_owned(),
             ))
         });
         on_done(result);
@@ -337,8 +553,7 @@ pub fn compress(
 #[cfg(test)]
 mod tests {
     use super::{
-        compress_blocking, default_archive_base, find_in_path, seven_zip_program,
-        unique_archive_path, ArchiveFormat, ArchiveError,
+        compress_blocking, default_archive_base, unique_archive_path, ArchiveError, ArchiveFormat,
     };
     use std::ffi::OsString;
 
@@ -351,6 +566,11 @@ mod tests {
 
     fn names(list: &[&str]) -> Vec<OsString> {
         list.iter().map(OsString::from).collect()
+    }
+
+    fn listing(archive: &std::path::Path) -> Vec<String> {
+        let file = std::fs::File::open(archive).unwrap();
+        compress_tools::list_archive_files(file).unwrap()
     }
 
     #[test]
@@ -398,59 +618,50 @@ mod tests {
         (root, vec![folder, file])
     }
 
-    fn listing(program: &str, args: &[&str], archive: &std::path::Path) -> String {
-        let output = std::process::Command::new(program)
-            .args(args)
-            .arg(archive)
-            .output()
-            .unwrap();
-        String::from_utf8_lossy(&output.stdout).into_owned()
-    }
-
     #[test]
     fn tar_gz_holds_relative_names_with_awkward_characters() {
-        if find_in_path("tar").is_none() || find_in_path("gzip").is_none() {
-            return;
-        }
         let (root, sources) = fixture();
         let archive = run(&sources, ArchiveFormat::TarGz).unwrap();
 
         assert_eq!(archive, root.path().join("Archive.tar.gz"));
-        let listed = listing("tar", &["-tzf"], &archive);
-        assert!(listed.contains("-folder/inner.txt"), "{listed}");
-        assert!(listed.contains("a b*.txt"), "{listed}");
+        let listed = listing(&archive);
+        assert!(
+            listed.iter().any(|name| name == "-folder/inner.txt"),
+            "{listed:?}"
+        );
+        assert!(listed.iter().any(|name| name == "a b*.txt"), "{listed:?}");
     }
 
     #[test]
     fn zip_holds_relative_names_with_awkward_characters() {
-        let Some(unzip) = find_in_path("unzip") else {
-            return;
-        };
-        if find_in_path("zip").is_none() {
-            return;
-        }
         let (root, sources) = fixture();
         let archive = run(&sources, ArchiveFormat::Zip).unwrap();
 
         assert_eq!(archive, root.path().join("Archive.zip"));
-        let listed = listing(unzip.to_str().unwrap(), &["-Z1"], &archive);
-        assert!(listed.contains("-folder/inner.txt"), "{listed}");
-        assert!(listed.contains("a b*.txt"), "{listed}");
+        let listed = listing(&archive);
+        assert!(
+            listed.iter().any(|name| name == "-folder/inner.txt"),
+            "{listed:?}"
+        );
+        assert!(listed.iter().any(|name| name == "a b*.txt"), "{listed:?}");
     }
 
     #[test]
     fn seven_zip_holds_relative_names_with_awkward_characters() {
-        let Some(program) = seven_zip_program() else {
-            return;
-        };
         let (root, sources) = fixture();
         let archive = run(&sources, ArchiveFormat::SevenZip).unwrap();
 
         assert_eq!(archive, root.path().join("Archive.7z"));
-        let listed = listing(program.to_str().unwrap(), &["l", "-ba"], &archive);
-        assert!(listed.contains("-folder/inner.txt"), "{listed}");
-        assert!(listed.contains("a b*.txt"), "{listed}");
-        assert!(!listed.contains("./"), "{listed}");
+        let listed = listing(&archive);
+        assert!(
+            listed.iter().any(|name| name == "-folder/inner.txt"),
+            "{listed:?}"
+        );
+        assert!(listed.iter().any(|name| name == "a b*.txt"), "{listed:?}");
+        assert!(
+            !listed.iter().any(|name| name.starts_with("./")),
+            "{listed:?}"
+        );
     }
 
     #[test]
@@ -471,9 +682,6 @@ mod tests {
 
     #[test]
     fn progress_climbs_to_the_size_of_the_data_and_the_scratch_folder_is_gone() {
-        if find_in_path("tar").is_none() || find_in_path("gzip").is_none() {
-            return;
-        }
         let root = tempfile::tempdir().unwrap();
         let big = root.path().join("big.bin");
         std::fs::write(&big, vec![7u8; 4 * 1024 * 1024]).unwrap();
@@ -496,14 +704,15 @@ mod tests {
             .flatten()
             .map(|entry| entry.file_name())
             .collect();
-        assert_eq!(leftovers.len(), 2, "only the source and the archive: {leftovers:?}");
+        assert_eq!(
+            leftovers.len(),
+            2,
+            "only the source and the archive: {leftovers:?}"
+        );
     }
 
     #[test]
-    fn cancelling_stops_the_archiver_and_leaves_nothing_behind() {
-        if find_in_path("tar").is_none() || find_in_path("gzip").is_none() {
-            return;
-        }
+    fn cancelling_stops_the_writer_and_leaves_nothing_behind() {
         let root = tempfile::tempdir().unwrap();
         let big = root.path().join("big.bin");
         std::fs::write(&big, vec![7u8; 1024 * 1024]).unwrap();
