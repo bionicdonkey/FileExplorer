@@ -12,6 +12,14 @@ on:
       - 'v*'
   workflow_dispatch:
 
+# A release commit arrives twice: once as a push to main and once as a tag.
+# Both would build the same commit, so a tag run cancels the branch run in its
+# group. Branch runs never cancel, so a tag that happens to start first still
+# publishes instead of being cancelled by the branch event.
+concurrency:
+  group: deb-${{ github.sha }}
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/tags/v') }}
+
 jobs:
   deb:
     # The `flatpak` label is the one runner known to take container jobs here.
