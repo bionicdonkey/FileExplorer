@@ -1,9 +1,9 @@
 name: Debian package
 
 # A .deb for every commit that lands on main, and for every `v*` tag, which
-# also attaches it to the release. This is the primary package: the app needs
-# the host's applications, GVfs, terminal and polkit, none of which a Flatpak
-# sandbox provides.
+# also attaches it to the release. This is the shipping package: the app needs
+# the host's applications, GVfs, terminal and polkit, none of which a sandboxed
+# package format provides.
 on:
   push:
     branches:
@@ -22,8 +22,8 @@ concurrency:
 
 jobs:
   deb:
-    # The `flatpak` label is the one runner known to take container jobs here.
-    # The job itself needs nothing privileged; the image is what matters.
+    # The `flatpak` label names the one runner here known to take container
+    # jobs. The job itself needs nothing privileged; the image is what matters.
     runs-on: flatpak
     container:
       # Ubuntu 24.04 is the baseline (Zorin OS 18). The Depends line is computed
@@ -67,7 +67,7 @@ jobs:
 
       - name: Upload the package
         # v3, not v4: Gitea presents itself as GitHub Enterprise, which
-        # upload-artifact@v4 refuses client-side. See flatpak.yml.
+        # upload-artifact@v4 refuses client-side.
         uses: actions/upload-artifact@v3
         with:
           name: zorin-explorer-${{ steps.crate.outputs.version }}-deb
@@ -108,9 +108,8 @@ jobs:
             cat "$body"
           }
 
-          # The Flatpak workflow runs for the same tag and creates the release
-          # too. Whichever gets there second finds it: look first, create if
-          # missing, and look again if that creation lost the race.
+          # Re-running a tag attaches to the release that already exists rather
+          # than failing on the duplicate; create it only when none is present.
           if release="$(api GET "/releases/tags/${TAG}" 2>/dev/null)"; then
             echo "release ${TAG} exists; attaching to it"
           elif release="$(api POST /releases -H 'Content-Type: application/json' \

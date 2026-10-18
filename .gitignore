@@ -1,5 +1,4 @@
-# Build output. The Flatpak manifest also skips these from its directory
-# source, so a local build cannot copy them into the next one.
+# Build output.
 /target/
 /build/
 /dist/
