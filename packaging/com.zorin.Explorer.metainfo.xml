@@ -11,6 +11,12 @@
   <!-- Keep in step with `version` in Cargo.toml: the About page reads the crate
        version, and the CI release job refuses a tag that disagrees with it. -->
   <releases>
+    <release version="0.6.0" date="2026-10-18">
+      <description>
+        <p>Archives now open in the window like folders, 7-Zip included. A local archive is listed in-process with libarchive, opened directly so it can seek, and its folders are browsed with the same tabs, breadcrumbs and Up as anywhere else. GVfs cannot read 7-Zip because it hands libarchive a stream it cannot seek, which is why a .7z used to leave the window.</p>
+        <p>Files and folders can be copied or moved out of an open archive into a folder, with the same conflict handling and progress as any other transfer. An archive is read-only, so a move copies the entry out and leaves the archive unchanged.</p>
+      </description>
+    </release>
     <release version="0.5.0" date="2026-10-18">
       <description>
         <p>Extraction and compression now run inside the app. A local archive is handed straight to libarchive, the same library GVfs uses underneath but opened directly so it can seek, which is why 7-Zip and RAR archives extract exactly like ZIP ones and why no archiver program is needed to unpack a .7z. Compression writes ZIP, 7-Zip and tar.gz with pure-Rust writers.</p>

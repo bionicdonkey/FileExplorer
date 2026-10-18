@@ -25,7 +25,13 @@ pub fn activation_for(item: &FileItem) -> Activation {
     if item.is_dir() {
         return Activation::Browse(item.location().clone());
     }
-    if is_browsable_archive(&resolved_content_type(item)) {
+    let content_type = resolved_content_type(item);
+    // 7-Zip is browsable only from a local file. There is no seekable file
+    // behind a remote archive for libarchive to read, and gvfsd-archive hands
+    // it a stream it cannot seek, so a remote `.7z` still leaves the window.
+    let browsable = is_browsable_archive(&content_type)
+        || (is_seven_zip(&content_type) && item.location().local_path().is_some());
+    if browsable {
         if let Ok(contents) = item.location().archive_contents() {
             return Activation::Browse(contents);
         }
@@ -34,16 +40,22 @@ pub fn activation_for(item: &FileItem) -> Activation {
 }
 
 /// Whether the application can extract this entry into a folder beside it:
-/// the archives it can browse, plus 7-Zip, which it unpacks in-process through
-/// libarchive rather than handing to another application.
+/// every archive the window can browse, including 7-Zip, which it unpacks
+/// in-process through libarchive.
+///
+/// An archive shown inside another archive is not extractable: it has no file
+/// on disk to open, only the outer archive the user is already browsing.
 pub fn is_extractable(item: &FileItem) -> bool {
+    if item.location().is_inside_archive() {
+        return false;
+    }
     let content_type = resolved_content_type(item);
     !item.is_dir() && (is_browsable_archive(&content_type) || is_seven_zip(&content_type))
 }
 
-/// 7-Zip archives cannot be browsed: gvfsd-archive hands libarchive a stream
-/// it cannot seek, and libarchive's 7-Zip reader needs to. They can still be
-/// extracted, because that path opens the file with libarchive directly.
+/// A 7-Zip archive is read in-process from its own local file, exactly like
+/// the formats gvfsd-archive mounts. libarchive's 7-Zip reader seeks, and the
+/// archive adapter opens the file itself rather than going through a stream.
 pub fn is_seven_zip(content_type: &str) -> bool {
     matches!(
         content_type,
@@ -120,13 +132,41 @@ mod tests {
     }
 
     #[test]
-    fn a_seven_zip_archive_is_extracted_but_not_browsed() {
-        let archive = entry("backup.7z", EntryKind::File, Some("application/x-7z-compressed"));
-        assert_eq!(activation_for(&archive), Activation::LaunchExternally);
+    fn a_local_seven_zip_is_browsed_and_still_extractable() {
+        let archive = entry(
+            "backup.7z",
+            EntryKind::File,
+            Some("application/x-7z-compressed"),
+        );
+        let Activation::Browse(location) = activation_for(&archive) else {
+            panic!("a local 7z must open in the window, not elsewhere");
+        };
+        assert!(location.is_inside_archive());
         assert!(is_extractable(&archive));
         let pending = entry("backup.7z", EntryKind::File, None);
         assert!(is_extractable(&pending));
-        assert!(!is_extractable(&entry("notes.txt", EntryKind::File, Some("text/plain"))));
+        assert!(!is_extractable(&entry(
+            "notes.txt",
+            EntryKind::File,
+            Some("text/plain")
+        )));
+    }
+
+    #[test]
+    fn a_remote_seven_zip_leaves_the_window() {
+        // There is no local file for libarchive to seek in, and gvfsd-archive
+        // cannot read 7-Zip from a stream, so a remote 7z is not browsable.
+        let remote = FileItem::from_snapshot(&EntrySnapshot {
+            location: Location::from_uri("smb://server/backup.7z").unwrap(),
+            display_name: "backup.7z".to_owned(),
+            kind: EntryKind::File,
+            size: None,
+            modified: None,
+            content_type: Some("application/x-7z-compressed".to_owned()),
+            capabilities: CapabilitySnapshot::default(),
+        });
+        assert_eq!(activation_for(&remote), Activation::LaunchExternally);
+        assert!(is_extractable(&remote));
     }
 
     #[test]

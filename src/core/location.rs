@@ -130,15 +130,35 @@ impl Location {
 
     /// The archive a location at an archive root was opened from.
     fn archive_file(&self) -> Option<Self> {
+        let parsed = glib::Uri::parse(&self.canonical_uri, glib::UriFlags::ENCODED).ok()?;
+        if !self.is_inside_archive() || !parsed.path().trim_matches('/').is_empty() {
+            return None;
+        }
+        self.archive_source()
+    }
+
+    /// The archive file a location inside an archive was opened from, at any
+    /// depth. `archive_contents` puts the archive's own URI in the authority,
+    /// escaped once to fit and again because parsing unescapes it; this undoes
+    /// that so the real file can be addressed.
+    pub fn archive_source(&self) -> Option<Self> {
         if !self.is_inside_archive() {
             return None;
         }
         let parsed = glib::Uri::parse(&self.canonical_uri, glib::UriFlags::ENCODED).ok()?;
-        if !parsed.path().trim_matches('/').is_empty() {
-            return None;
-        }
         let archive = glib::Uri::unescape_string(&parsed.host()?, None)?;
         Self::from_uri(&archive).ok()
+    }
+
+    /// The decoded path of this location inside its archive, empty at the root.
+    /// This is the name libarchive reports for the entry, not the URI encoding.
+    pub fn archive_inner_path(&self) -> Option<String> {
+        if !self.is_inside_archive() {
+            return None;
+        }
+        let parsed = glib::Uri::parse(&self.canonical_uri, glib::UriFlags::ENCODED).ok()?;
+        let path = glib::Uri::unescape_string(&parsed.path(), None)?;
+        Some(path.trim_matches('/').to_owned())
     }
 
     pub fn is_within(&self, root: &Self) -> bool {

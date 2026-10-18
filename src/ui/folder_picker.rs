@@ -4,7 +4,7 @@ use crate::core::{
     navigation::{NavigationStatus, TabState},
     Location, OperationManager, SidebarModel,
 };
-use crate::infrastructure::gio_directory::GioDirectoryRepository;
+use crate::infrastructure::directory_router::DirectoryRouter;
 use crate::ui::header::LocationBar;
 use adw::prelude::*;
 use gtk::{Box as GtkBox, Button, Label, ListBox, ListBoxRow, Orientation, ScrolledWindow};
@@ -190,7 +190,7 @@ pub fn pick_folder<F: Fn(Location) + 'static>(
     toolbar_view.set_content(Some(&content));
     dialog.set_child(Some(&toolbar_view));
 
-    let repository = Rc::new(GioDirectoryRepository::new(
+    let repository = Rc::new(DirectoryRouter::new(
         glib::MainContext::ref_thread_default(),
     ));
     let mount_parent = parent.clone().upcast::<gtk::Widget>().downgrade();

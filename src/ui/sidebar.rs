@@ -15,7 +15,7 @@ use crate::core::ports::DirectoryRepository;
 use crate::core::sidebar_model::SidebarSection;
 use crate::core::{Location, OperationManager};
 use crate::core::{SidebarLocation, SidebarModel, SidebarNode};
-use crate::infrastructure::gio_directory::GioDirectoryRepository;
+use crate::infrastructure::directory_router::DirectoryRouter;
 use crate::ui::operations_page::active_summary;
 
 /// Width of the column every chevron sits in. Rows without one reserve it, so a
@@ -85,7 +85,7 @@ impl Sidebar {
         mount_parent: &impl IsA<gtk::Window>,
         on_action: F,
     ) -> Self {
-        let repository = Rc::new(GioDirectoryRepository::new(
+        let repository = Rc::new(DirectoryRouter::new(
             glib::MainContext::ref_thread_default(),
         ));
         let window: gtk::Window = mount_parent.clone().upcast();

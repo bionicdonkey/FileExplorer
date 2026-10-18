@@ -18,21 +18,22 @@ implemented and covered by tests. Tagged versions are published as a Debian pack
   before enumeration finishes
 - Thumbnails and file metadata fetched lazily for visible rows only, and cancelled when the view
   navigates away
-- Archives (`.zip`, `.tar` and its compressed forms, `.rar`, …) open in the window like folders,
-  through the GVfs archive backend. Zip-based documents such as `.docx` and `.epub` are not
-  archives for this purpose and still open in the application that owns them. `.7z` is the
-  exception: GVfs cannot read it — its archive backend hands libarchive a non-seekable stream, and
-  the 7z header layout needs random access — so a `.7z` opens in the default application and
-  **Extract** unpacks it instead.
+- Archives (`.zip`, `.tar` and its compressed forms, `.rar`, `.7z`, …) open in the window like
+  folders. A local archive is listed in-process with libarchive, opened directly so it can seek,
+  which is what lets a `.7z` browse at all: the GVfs archive backend hands libarchive a stream it
+  cannot seek. Zip-based documents such as `.docx` and `.epub` are not archives for this purpose and
+  still open in the application that owns them. A remote archive still goes through GVfs, because
+  there is no local file to open; a remote `.7z` is the one case GVfs cannot read.
+- Entries can be copied or moved out of an archive into a folder, with the same conflict handling as
+  any other transfer. The archive is read-only, so a move copies the entry out and leaves the
+  archive as it was.
 - **Extract** puts an archive's contents in a new folder named after it, unless the archive is a
   single folder, which lands beside the archive as it is.
 - **Compress** packs selected local files and folders into a `.zip`, `.7z` or `.tar.gz` beside
   them.
-- Both directions run in-process. Extraction hands a local archive to libarchive — the same library
-  GVfs uses underneath, but opened directly so it can seek — which is why a `.7z` or `.rar` extracts
-  exactly like a `.zip`, and why no archiver program has to be installed. Compression uses pure-Rust
-  writers (`zip`, `sevenz-rust2`, `tar`/`flate2`). A remote archive still goes through GVfs: there
-  is no local file to hand to libarchive, so it is mounted and copied like any other remote folder.
+- Both directions run in-process: reading through libarchive and writing through pure-Rust writers
+  (`zip`, `sevenz-rust2`, `tar`/`flate2`), so no archiver program has to be installed. A remote
+  archive is mounted and copied like any other remote folder.
 - Everything running — compressing, extracting, copies and moves — is shown in the status bar as a
   label and bar beside the spinner. The label expands into the list of running operations, each
   with its own progress and Cancel button, and the Operations tab keeps the full history. A local
@@ -193,8 +194,15 @@ native faults.
   small object per remote share visited. The workaround can be dropped once the host gvfs carries
   the fix; `parallel_non_local_locations_survive_repeated_construction_and_teardown` is the check
   that it is still needed.
-- A remote `.7z` cannot be extracted. GVfs cannot browse it and there is no local file for
-  libarchive to open, so **Extract** is unavailable for one on an `smb://` or `sftp://` share.
+- A remote `.7z` cannot be browsed or extracted. GVfs cannot read it and there is no local file for
+  libarchive to open, so such a file on an `smb://` or `sftp://` share is handed to the default
+  application instead.
+- An archive is read-only and local. Browsing it offers no create, rename, trash or delete, an
+  archive nested inside another archive is not opened in place, and entries can be copied out only
+  into a local folder — a remote destination would need the archive mounted, which it is not.
+- Listing a local archive reads its entry headers once and caches the result until the file
+  changes. A folder inside a large streaming format such as `.tar.xz` still costs one read of the
+  archive the first time; a `.zip` or `.7z` reads only its index.
 - `resources/com.zorin.Explorer.gschema.xml` is present but unused — preferences persist as JSON
   under `$XDG_CONFIG_HOME`, not GSettings.
 

@@ -24,7 +24,7 @@ use crate::core::{
     GroupField, ListColumn, ListColumnLayout, Location, SidebarLocation, SidebarNode,
     SortDirection, SortField, ViewMode, ViewOptions,
 };
-use crate::infrastructure::gio_directory::GioDirectoryRepository;
+use crate::infrastructure::directory_router::DirectoryRouter;
 use crate::ui::accessibility::{AccessibleStatus, StatusPriority};
 use crate::ui::context_menu::{
     configure_command_button, delete_command, item_commands, open_with_apps, CommandAvailability,
@@ -792,7 +792,7 @@ impl FileView {
     }
 
     pub fn from_location(initial: Location) -> Self {
-        let repository = Rc::new(GioDirectoryRepository::new(
+        let repository = Rc::new(DirectoryRouter::new(
             glib::MainContext::ref_thread_default(),
         ));
         let view = Self::new_with_repository(initial, repository.clone());
@@ -6039,11 +6039,9 @@ mod tests {
     #[gtk::test]
     fn opening_an_archive_navigates_into_it_instead_of_leaving_the_window() {
         // The view used to hand everything that was not a directory to the
-        // desktop, which for a zip is another file manager.
+        // desktop, which for a zip is another file manager. A local 7-Zip
+        // browses too now, even though GVfs cannot read one.
         let directory = tempfile::tempdir().unwrap();
-        let archive_path = directory.path().join("Trip.zip");
-        fs::write(&archive_path, b"PK\x05\x06").unwrap();
-        let archive = FileItem::from_path(&archive_path).unwrap();
         let note_path = directory.path().join("note.txt");
         fs::write(&note_path, "plain").unwrap();
         let note = FileItem::from_path(&note_path).unwrap();
@@ -6054,16 +6052,22 @@ mod tests {
         let record = navigated.clone();
         view.set_navigation_handler(move |location| record.borrow_mut().push(location));
 
-        view.open_item(&archive);
-        let inside = navigated.borrow().last().cloned();
-        let inside = inside.expect("opening an archive must navigate");
-        assert!(inside.is_inside_archive(), "got {}", inside.uri());
-        assert_eq!(inside.display_name(), "Trip.zip");
+        for name in ["Trip.zip", "Trip.7z"] {
+            let archive_path = directory.path().join(name);
+            fs::write(&archive_path, b"PK\x05\x06").unwrap();
+            let archive = FileItem::from_path(&archive_path).unwrap();
+            view.open_item(&archive);
+            let inside = navigated.borrow().last().cloned();
+            let inside = inside.expect("opening an archive must navigate");
+            assert!(inside.is_inside_archive(), "got {}", inside.uri());
+            assert_eq!(inside.display_name(), name);
+        }
 
         // Everything else still belongs to the application that owns it, and
         // leaving the window is not a navigation.
+        let navigations = navigated.borrow().len();
         view.open_item(&note);
-        assert_eq!(navigated.borrow().len(), 1);
+        assert_eq!(navigated.borrow().len(), navigations);
     }
 
     #[gtk::test]

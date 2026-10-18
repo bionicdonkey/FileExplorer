@@ -8,7 +8,9 @@ use crate::application::operations::{
     OperationCoordinator, OperationProjection, OperationState as ProjectedState,
 };
 use crate::core::contracts::{ConflictDecision, MutationKind, OperationId, OperationRequest};
+use crate::core::ports::FileOperations;
 use crate::core::{Location, RecoverableStateNotice};
+use crate::infrastructure::archive_operations::ArchiveOperations;
 use crate::infrastructure::gio_executor::GioExecutor;
 use crate::infrastructure::gio_operations::GioOperations;
 use serde::{Deserialize, Serialize};
@@ -506,7 +508,12 @@ impl OperationManager {
                     context.clone(),
                     manager.executor.clone(),
                 ));
-                let coordinator = OperationCoordinator::new(adapter.clone());
+                let backend: Rc<dyn FileOperations> = Rc::new(ArchiveOperations::new(
+                    adapter.clone(),
+                    context.clone(),
+                    manager.executor.clone(),
+                ));
+                let coordinator = OperationCoordinator::new(backend);
                 loop {
                     match receive.recv_timeout(std::time::Duration::from_millis(2)) {
                         Ok(submission) => {
