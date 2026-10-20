@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "README lines that deliberately have no feature",
+  "type": "object",
+  "required": ["version", "ignore"],
+  "additionalProperties": false,
+  "properties": {
+    "version": { "const": 1 },
+    "note": { "type": "string" },
+    "ignore": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["readme", "reason"],
+        "additionalProperties": false,
+        "properties": {
+          "readme": { "type": "string", "minLength": 1 },
+          "reason": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  }
+}

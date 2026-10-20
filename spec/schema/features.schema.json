@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Feature registry",
+  "type": "object",
+  "required": ["version", "features"],
+  "additionalProperties": false,
+  "properties": {
+    "version": { "const": 1 },
+    "note": { "type": "string" },
+    "features": { "type": "array", "items": { "$ref": "#/$defs/feature" } }
+  },
+  "$defs": {
+    "feature": {
+      "type": "object",
+      "required": ["id", "title", "readme", "scenarios", "linux", "macos"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9]+(\\.[a-z0-9-]+)+$" },
+        "title": { "type": "string", "minLength": 1 },
+        "readme": { "type": "string", "minLength": 1 },
+        "scenarios": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^(adapter|domain)/[a-z0-9-]+/[a-z0-9-]+$" }
+        },
+        "ui_tests": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "linux": { "type": "array", "items": { "type": "string" } },
+            "macos": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "linux": { "$ref": "#/$defs/platformState" },
+        "macos": { "$ref": "#/$defs/platformState" },
+        "note": { "type": "string" }
+      }
+    },
+    "platformState": {
+      "type": "object",
+      "required": ["state"],
+      "additionalProperties": false,
+      "properties": {
+        "state": { "enum": ["parity", "approximate", "excluded", "pending"] },
+        "note": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

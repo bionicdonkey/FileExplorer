@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Archive-versus-document rule table",
+  "description": "Ordered rules; the first rule whose match applies wins.",
+  "type": "object",
+  "required": ["version", "rules"],
+  "additionalProperties": false,
+  "properties": {
+    "version": { "const": 1 },
+    "note": { "type": "string" },
+    "rules": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "match", "family", "browsable", "ownership"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string" },
+          "match": {
+            "type": "object",
+            "minProperties": 1,
+            "additionalProperties": false,
+            "properties": {
+              "mime": { "type": "array", "items": { "type": "string" } },
+              "uti": { "type": "array", "items": { "type": "string" } },
+              "extensions": { "type": "array", "items": { "type": "string" } }
+            }
+          },
+          "family": { "type": "string" },
+          "browsable": { "type": "boolean" },
+          "ownership": { "enum": ["app", "external"] },
+          "note": { "type": "string" }
+        }
+      }
+    }
+  }
+}

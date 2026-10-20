@@ -10,3 +10,4 @@
 docs/superpowers/
 .env
 .aider*
+/spec/tools/target/

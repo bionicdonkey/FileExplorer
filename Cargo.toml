@@ -4,6 +4,7 @@ version = "0.7.0"
 edition = "2021"
 description = "A native Explorer-style file manager for Linux"
 license = "GPL-3.0-or-later"
+exclude = ["macos/", "spec/", "docs/"]
 
 [dependencies]
 adw = { package = "libadwaita", version = "0.6", features = ["v1_5"] }

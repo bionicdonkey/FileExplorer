@@ -1,0 +1,294 @@
+{
+  "version": 1,
+  "note": "Seeded from the README feature list. Scenarios arrive with the Linux runner (Phase B).",
+  "features": [
+    {
+      "id": "browsing.tabs",
+      "title": "Tabs with overflow handling",
+      "readme": "Tabs with overflow handling and an adaptive titlebar",
+      "scenarios": [],
+      "linux": {
+        "state": "parity"
+      },
+      "macos": {
+        "state": "pending"
+      }
+    },
+    {
+      "id": "browsing.view-modes",
+      "title": "View modes, sorting, grouping and columns",
+      "readme": "Four view modes",
+      "scenarios": [],
+      "linux": {
+        "state": "parity"
+      },
+      "macos": {
+        "state": "pending"
+      }
+    },
+    {
+      "id": "browsing.location-bar",
+      "title": "Breadcrumb, editable path and folder suggestions",
+      "readme": "Breadcrumb location bar with an editable path entry",
+      "scenarios": [],
+      "linux": {
+        "state": "parity"
+      },
+      "macos": {
+        "state": "pending"
+      }
+    },
+    {
+      "id": "browsing.sidebar",
+      "title": "Sidebar: quick access, pinned locations, drives, network shares",
+      "readme": "Explorer-style sidebar",
+      "scenarios": [],
+      "linux": {
+        "state": "parity"
+      },
+      "macos": {
+        "state": "pending"
+      }
+    },
+    {
+      "id": "browsing.streaming",
+      "title": "Incremental directory streaming with bounded paging",
+      "readme": "Incremental directory streaming with bounded paging",
+      "scenarios": [],
+      "linux": {
+        "state": "parity"
+      },
+      "macos": {
+        "state": "pending"
+      }
+    },
+    {
+      "id": "browsing.visible-metadata",
+      "title": "Visible-row metadata and thumbnails, cancelled on navigate",
+      "readme": "Thumbnails and file metadata fetched lazily",
+      "scenarios": [],
+      "linux": {
+        "state": "parity"
+      },
+      "macos": {
+        "state": "pending"
+      }
+    },
+    {
+      "id": "archives.browse",
+      "title": "Archives open in the window like folders",
+      "readme": "Archives (`.zip`",
+      "scenarios": [],
+      "linux": {
+        "state": "parity"
+      },
+      "macos": {
+        "state": "pending"
+      }
+    },
+    {
+      "id": "archives.copy-out",
+      "title": "Entries copied or moved out of an archive",
+      "readme": "Entries can be copied or moved out of an archive",
+      "scenarios": [],
+      "linux": {
+        "state": "parity"
+      },
+      "macos": {
+        "state": "pending"
+      }
+    },
+    {
+      "id": "archives.extract",
+      "title": "Extract an archive into a folder",
+      "readme": "**Extract** puts an archive's contents",
+      "scenarios": [],
+      "linux": {
+        "state": "parity"
+      },
+      "macos": {
+        "state": "pending"
+      }
+    },
+    {
+      "id": "archives.compress",
+      "title": "Compress files into zip, 7z or tar.gz",
+      "readme": "**Compress** packs selected local files",
+      "scenarios": [],
+      "linux": {
+        "state": "parity"
+      },
+      "macos": {
+        "state": "pending"
+      }
+    },
+    {
+      "id": "archives.in-process",
+      "title": "Archive reading and writing without external programs",
+      "readme": "Both directions run in-process",
+      "scenarios": [],
+      "linux": {
+        "state": "parity"
+      },
+      "macos": {
+        "state": "pending"
+      }
+    },
+    {
+      "id": "operations.progress",
+      "title": "Running operations in the status bar with progress and cancel",
+      "readme": "Everything running",
+      "scenarios": [],
+      "linux": {
+        "state": "parity"
+      },
+      "macos": {
+        "state": "pending"
+      }
+    },
+    {
+      "id": "operations.file-ops",
+      "title": "Copy, move, rename, delete, trash and create with conflict handling",
+      "readme": "Copy, move, rename, delete, trash and create",
+      "scenarios": [],
+      "linux": {
+        "state": "parity"
+      },
+      "macos": {
+        "state": "pending"
+      }
+    },
+    {
+      "id": "operations.history",
+      "title": "Operations page with persisted history",
+      "readme": "An operations page showing in-flight",
+      "scenarios": [],
+      "linux": {
+        "state": "parity"
+      },
+      "macos": {
+        "state": "pending"
+      }
+    },
+    {
+      "id": "ui.drag-and-drop",
+      "title": "Drag and drop, including between windows",
+      "readme": "Drag and drop, including between windows",
+      "scenarios": [],
+      "linux": {
+        "state": "parity"
+      },
+      "macos": {
+        "state": "pending"
+      }
+    },
+    {
+      "id": "ui.properties",
+      "title": "Properties dialog",
+      "readme": "A properties dialog with tabbed detail",
+      "scenarios": [],
+      "linux": {
+        "state": "parity"
+      },
+      "macos": {
+        "state": "pending"
+      }
+    },
+    {
+      "id": "operations.elevation",
+      "title": "Retry permission-denied operations with elevation",
+      "readme": "Permission-denied operations can be retried with elevation",
+      "scenarios": [],
+      "linux": {
+        "state": "parity"
+      },
+      "macos": {
+        "state": "pending"
+      }
+    },
+    {
+      "id": "search.backend",
+      "title": "Indexed search with an explicit unavailable outcome",
+      "readme": "Tracker-backed search where available",
+      "scenarios": [],
+      "linux": {
+        "state": "parity"
+      },
+      "macos": {
+        "state": "pending"
+      }
+    },
+    {
+      "id": "search.modes-and-bounds",
+      "title": "Filename and content search with depth and time bounds",
+      "readme": "Filename and content modes",
+      "scenarios": [],
+      "linux": {
+        "state": "parity"
+      },
+      "macos": {
+        "state": "pending"
+      }
+    },
+    {
+      "id": "search.history-privacy",
+      "title": "Search history privacy preference",
+      "readme": "Search history is subject to a privacy preference",
+      "scenarios": [],
+      "linux": {
+        "state": "parity"
+      },
+      "macos": {
+        "state": "pending"
+      }
+    },
+    {
+      "id": "remote.uris",
+      "title": "Non-local URIs are first-class and never treated as local paths",
+      "readme": "Non-local URIs",
+      "scenarios": [],
+      "linux": {
+        "state": "parity"
+      },
+      "macos": {
+        "state": "pending"
+      }
+    },
+    {
+      "id": "remote.mount-auth",
+      "title": "Mount authentication and retry",
+      "readme": "GTK-parented mount authentication",
+      "scenarios": [],
+      "linux": {
+        "state": "parity"
+      },
+      "macos": {
+        "state": "pending"
+      }
+    },
+    {
+      "id": "session.persistence",
+      "title": "Session state persists across restarts",
+      "readme": "Tabs, pinned locations and view preferences persist",
+      "scenarios": [],
+      "linux": {
+        "state": "parity"
+      },
+      "macos": {
+        "state": "pending"
+      }
+    },
+    {
+      "id": "session.history-redaction",
+      "title": "Persisted operation history redacts path detail",
+      "readme": "Persisted operation history redacts path detail",
+      "scenarios": [],
+      "linux": {
+        "state": "parity"
+      },
+      "macos": {
+        "state": "pending"
+      }
+    }
+  ]
+}

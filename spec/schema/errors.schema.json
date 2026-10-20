@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Error kinds and retry classes",
+  "type": "object",
+  "required": ["version", "kinds", "retry_classes"],
+  "additionalProperties": false,
+  "properties": {
+    "version": { "const": 1 },
+    "note": { "type": "string" },
+    "retry_classes": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string" } },
+    "kinds": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["kind", "message_key", "retry"],
+        "additionalProperties": false,
+        "properties": {
+          "kind": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+          "message_key": { "type": "string", "minLength": 1 },
+          "retry": { "type": "string" },
+          "note": { "type": "string" }
+        }
+      }
+    },
+    "failures": {
+      "description": "Canonical failure mapping: what each platform failure becomes.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["failure", "kind"],
+        "additionalProperties": false,
+        "properties": {
+          "failure": { "type": "string" },
+          "kind": { "type": "string" },
+          "note": { "type": "string" }
+        }
+      }
+    }
+  }
+}
