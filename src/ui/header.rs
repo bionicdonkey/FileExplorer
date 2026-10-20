@@ -9,6 +9,7 @@ use gtk::{
 
 use crate::core::location::{Location, LocationInput};
 use crate::ui::context_menu::{configure_command_button, CommandAvailability, ContextCommand};
+use crate::ui::location_completion::LocationCompletion;
 
 #[derive(Clone, Copy)]
 pub enum NavigationAction {
@@ -66,6 +67,7 @@ pub struct LocationBar {
     entry: Entry,
     breadcrumbs: GtkBox,
     stack: Stack,
+    completion: Rc<LocationCompletion>,
     on_navigate: Rc<RefCell<Option<Box<dyn Fn(Location)>>>>,
     committed_uri: Rc<RefCell<String>>,
     breadcrumb_metadata_requests: Rc<BreadcrumbMetadataRequests>,
@@ -135,11 +137,13 @@ impl LocationBar {
 
         let on_navigate = Rc::new(RefCell::new(None));
         let breadcrumb_metadata_requests = Rc::new(BreadcrumbMetadataRequests::default());
+        let completion = LocationCompletion::new(&entry);
         let bar = Self {
             widget: stack.clone(),
             entry,
             breadcrumbs,
             stack,
+            completion,
             on_navigate,
             committed_uri,
             breadcrumb_metadata_requests,
@@ -150,7 +154,9 @@ impl LocationBar {
 
     pub fn connect_location_changed<F: Fn(Location) + 'static>(&self, callback: F) {
         let stack = self.stack.clone();
+        let completion = self.completion.clone();
         self.entry.connect_activate(move |entry| {
+            completion.dismiss();
             match LocationInput::parse(entry.text().as_str()) {
                 Ok(location) => {
                     entry.remove_css_class("error");
@@ -189,7 +195,7 @@ impl LocationBar {
     pub fn set_location(&self, path: &std::path::Path) {
         self.clear_validation_error();
         *self.committed_uri.borrow_mut() = Location::from_local_path(path).uri().to_owned();
-        self.entry.set_text(&path.display().to_string());
+        self.completion.set_text(&path.display().to_string());
         self.render_breadcrumbs(path);
         self.stack.set_visible_child_name("breadcrumbs");
     }
@@ -197,7 +203,7 @@ impl LocationBar {
     pub fn set_uri(&self, uri: &str) {
         self.clear_validation_error();
         *self.committed_uri.borrow_mut() = uri.to_owned();
-        self.entry.set_text(uri);
+        self.completion.set_text(uri);
         self.render_uri_breadcrumbs(uri);
         self.stack.set_visible_child_name("breadcrumbs");
     }
@@ -217,6 +223,7 @@ impl LocationBar {
     }
 
     pub fn set_section(&self, title: &str) {
+        self.completion.dismiss();
         self.breadcrumb_metadata_requests.cancel_all();
         while let Some(child) = self.breadcrumbs.first_child() {
             self.breadcrumbs.remove(&child);

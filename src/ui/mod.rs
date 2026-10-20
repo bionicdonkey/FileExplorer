@@ -3,6 +3,7 @@ pub mod context_menu;
 pub mod file_view;
 pub mod folder_picker;
 pub mod header;
+pub mod location_completion;
 pub mod operations_page;
 pub mod preferences_page;
 pub mod properties_dialog;

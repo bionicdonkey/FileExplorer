@@ -3,7 +3,7 @@
 A native Linux file manager with a Windows 11 Explorer-inspired interaction model, built with Rust,
 GTK 4, libadwaita and GIO. It targets Zorin OS and GNOME.
 
-The project is a pre-release (`0.5.0`). Core browsing, file operations, search and preferences are
+The project is a pre-release (`0.7.0`). Core browsing, file operations, search and preferences are
 implemented and covered by tests. Tagged versions are published as a Debian package.
 
 ## Features
@@ -12,7 +12,7 @@ implemented and covered by tests. Tagged versions are published as a Debian pack
 - Tabs with overflow handling and an adaptive titlebar
 - Four view modes — detailed list, compact list, icon grid, and a hybrid mode — with grid density
   options, sorting, grouping and configurable list columns
-- Breadcrumb location bar with editable path entry
+- Breadcrumb location bar with an editable path entry and folder suggestions while typing
 - Explorer-style sidebar: quick access, pinned locations, drives and network shares
 - Incremental directory streaming with bounded paging, so large directories paint a first frame
   before enumeration finishes
@@ -143,8 +143,8 @@ A release is cut by tagging. The tag must match the crate version, or the job fa
 anything:
 
 ```bash
-# with Cargo.toml at version = "0.5.0"
-git tag v0.5.0 && git push origin v0.5.0
+# with Cargo.toml at version = "0.7.0"
+git tag v0.7.0 && git push origin v0.7.0
 ```
 
 Re-running a tag attaches to the existing release and replaces the asset rather than duplicating it.
