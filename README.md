@@ -159,6 +159,18 @@ Around 300 tests span the library and twelve integration binaries: contract test
 navigation, search and operations; GIO integration and executor lifecycle tests; headless GTK tests
 that drive real widgets; and accessibility and performance checks.
 
+The behaviour that a second implementation would have to match is also written down as language-neutral
+scenarios under `spec/`, with a registry that ties each README feature to them. They run as one more test
+binary, one line per scenario, and the registry and separation checks run alongside:
+
+```bash
+cargo test --test spec_scenarios            # SPEC_FILTER=<text> or SPEC_REPEAT=<n> narrow or soak it
+cargo run --manifest-path spec/tools/Cargo.toml -- check
+sh scripts/check-separation.sh
+```
+
+See `spec/README.md` for the layout and for how to add a feature.
+
 Two caveats apply to interpreting a green run:
 
 - **The GTK and X11 tests run under a virtual display, never against a live one.** They create,

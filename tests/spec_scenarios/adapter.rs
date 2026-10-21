@@ -45,6 +45,8 @@ enum Bound {
     Inspect(RequestOutcome<CapabilitySnapshot>),
     /// An operation manager that persisted its history to a file of its own.
     History(History),
+    /// The advisory metadata delivered for visible rows.
+    Visible(RequestOutcome<Vec<VisibleMetadata>>),
     /// Extraction: `Ok` or the reason it gave.
     Extract(Result<(), String>),
     /// Compression: the archive's path relative to the sandbox, or the reason it gave.
@@ -179,6 +181,10 @@ pub fn run(scenario: &Value, mode: Mode) -> Check {
                         };
                     }
                     runs.insert(step["as"].as_str().unwrap_or("_").to_string(), Bound::Search(outcome));
+                }
+                "inspect_visible" => {
+                    let outcome = inspect_visible(&context, &sandbox, step).map_err(at)?;
+                    runs.insert(step["as"].as_str().unwrap_or("_").to_string(), Bound::Visible(outcome));
                 }
                 "extract" => {
                     let result = extract_archive(&sandbox, step).map_err(at)?;
@@ -580,6 +586,31 @@ fn compress_sources(sandbox: &Sandbox, step: &Value) -> Result<Result<String, St
     })
 }
 
+fn inspect_visible(context: &glib::MainContext, sandbox: &Sandbox, step: &Value) -> Result<RequestOutcome<Vec<VisibleMetadata>>, String> {
+    let router = DirectoryRouter::new(context.clone());
+    let cancellable = gio::Cancellable::new();
+    if step["cancel"].as_str() == Some("immediately") {
+        cancellable.cancel();
+    }
+    let locations = paths(&step["paths"]).into_iter().map(|p| locate(sandbox, p)).collect::<Result<Vec<_>, _>>()?;
+    let received: Rc<RefCell<Option<RequestOutcome<Vec<VisibleMetadata>>>>> = Rc::default();
+    let out = received.clone();
+    router.inspect_visible_metadata(
+        VisibleMetadataRequest { id: RequestId(55), locations, cancellable },
+        Box::new(move |completion| {
+            assert_eq!(completion.id, RequestId(55), "a completion carries its request's id");
+            *out.borrow_mut() = Some(completion.outcome);
+        }),
+    );
+    if received.borrow().is_some() {
+        return Err("a callback ran inline before the adapter returned".into());
+    }
+    pump(context, || received.borrow().is_some())?;
+    router.drain_owner_requests();
+    let outcome = received.borrow_mut().take().unwrap();
+    Ok(outcome)
+}
+
 fn expect_unsupported_pages(pages: &[RequestOutcome<DirectorySnapshot>]) -> Check {
     match pages.last() {
         Some(RequestOutcome::Failed(error)) if error.kind == OperationErrorKind::Unsupported => Ok(()),
@@ -658,6 +689,12 @@ fn expectation(sandbox: &Sandbox, runs: &HashMap<String, Bound>, expect: &str, s
                     }
                     check_failure(last, &step["error"])
                 }
+                Bound::Visible(outcome) => {
+                    if outcome_label(outcome) != want {
+                        return Err(format!("outcome is {}, expected {want}", outcome_label(outcome)));
+                    }
+                    Ok(())
+                }
                 Bound::Inspect(outcome) => {
                     if outcome_label(outcome) != want {
                         return Err(format!("outcome is {}, expected {want}", outcome_label(outcome)));
@@ -680,6 +717,25 @@ fn expectation(sandbox: &Sandbox, runs: &HashMap<String, Bound>, expect: &str, s
                 }
                 Bound::Search(_) | Bound::History(_) => Err("this step has no single outcome".into()),
             }
+        }
+        "metadata" => {
+            let Bound::Visible(RequestOutcome::Succeeded(rows)) = bound()? else { return Err("no visible metadata was delivered".into()) };
+            let path = step["path"].as_str().ok_or("metadata needs `path`")?;
+            let wanted = locate(sandbox, path)?;
+            let row = rows.iter().find(|r| r.location == wanted).ok_or_else(|| format!("no metadata for {path}"))?;
+            if let Some(size) = step["size"].as_u64() {
+                if row.size != Some(size) {
+                    return Err(format!("{path} size is {:?}, expected {size}", row.size));
+                }
+            }
+            for (field, present) in [("has_modified", row.modified.is_some()), ("has_content_type", row.content_type.is_some())] {
+                if let Some(want) = step[field].as_bool() {
+                    if present != want {
+                        return Err(format!("{path} {field} is {present}, expected {want}"));
+                    }
+                }
+            }
+            Ok(())
         }
         "history" => match bound()? {
             Bound::History(history) => expect_history(sandbox, history, step),

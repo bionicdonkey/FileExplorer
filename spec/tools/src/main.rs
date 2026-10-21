@@ -272,6 +272,24 @@ fn run_check(repo: &Path) -> ExitCode {
     if !uncovered.is_empty() {
         warnings.push(format!("{} feature(s) have no scenarios or ui_tests yet", uncovered.len()));
     }
+    // 7. A Linux `ui_tests` entry is `path/to/file.rs::function`; both must exist.
+    if let Some(registry) = &registry {
+        for feature in &registry.features {
+            let id = feature["id"].as_str().unwrap_or("?");
+            for test in feature["ui_tests"]["linux"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+                let Some((file, name)) = test.split_once("::") else {
+                    problems.push(format!("{id}: ui test {test:?} is not `file::function`"));
+                    continue;
+                };
+                match fs::read_to_string(repo.join(file)) {
+                    Ok(text) if text.contains(&format!("fn {name}(")) => {}
+                    Ok(_) => problems.push(format!("{id}: {file} has no function {name}")),
+                    Err(e) => problems.push(format!("{id}: ui test file {file}: {e}")),
+                }
+            }
+        }
+    }
+
     // 6. Scenario ids that the contract documents cite must exist (one `*` matches any text).
     if let Ok(entries) = fs::read_dir(spec.join("contracts")) {
         for entry in entries.flatten() {

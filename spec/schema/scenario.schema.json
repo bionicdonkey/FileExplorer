@@ -27,7 +27,7 @@
       "properties": {
         "do": {
           "enum": [
-            "list", "list_pages", "inspect", "manage", "extract", "compress", "operate", "search", "watch", "mutate", "cancel", "wait",
+            "list", "list_pages", "inspect", "inspect_visible", "manage", "extract", "compress", "operate", "search", "watch", "mutate", "cancel", "wait",
             "navigate", "back", "forward", "refresh", "retry", "close",
             "type", "submit", "clear",
             "retry_elevated",
@@ -38,7 +38,7 @@
         },
         "expect": {
           "enum": [
-            "outcome", "events", "effect", "entries", "entry", "pages", "history", "tree", "search", "changed", "capability",
+            "outcome", "events", "effect", "entries", "entry", "pages", "history", "metadata", "tree", "search", "changed", "capability",
             "port_requests", "request_cancelled", "view", "record", "clipboard",
             "lock_keys", "submit_result", "cancel_result", "reducer", "search_history", "location", "session", "named_child", "clipboard_payload", "pins", "activation", "file_types_table", "error_table"
           ]

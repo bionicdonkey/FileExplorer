@@ -12,6 +12,20 @@
       },
       "macos": {
         "state": "pending"
+      },
+      "ui_tests": {
+        "linux": [
+          "src/ui/tab_layout.rs::normal_window_keeps_its_width_when_tabs_are_added",
+          "src/ui/tab_layout.rs::user_resized_window_width_is_preserved",
+          "src/ui/tab_layout.rs::tabs_compress_then_overflow_inside_a_fixed_window",
+          "src/ui/tab_layout.rs::compact_window_width_is_preserved",
+          "src/ui/tab_layout.rs::overflow_reserves_space_for_all_titlebar_controls",
+          "src/ui/tab_layout.rs::every_tab_count_preserves_the_supplied_window_width",
+          "src/ui/window.rs::remove_matching_releases_the_read_borrow_before_removing_the_middle_item",
+          "src/ui/window.rs::matching_index_tracks_a_tab_after_a_preceding_tab_is_removed",
+          "src/ui/window.rs::utility_tabs_never_trigger_the_last_file_tab_close_rule",
+          "tests/headless_gtk.rs::slice5_cold_warm_local_remote_frames_and_fifty_tabs_meet_p95_budgets"
+        ]
       }
     },
     {
@@ -49,6 +63,24 @@
       },
       "macos": {
         "state": "pending"
+      },
+      "ui_tests": {
+        "linux": [
+          "src/core/view_options.rs::explicit_folder_options_round_trip",
+          "src/core/view_options.rs::picture_folder_uses_grid_when_no_override_exists",
+          "src/core/view_options.rs::explicit_folder_options_keep_custom_list_column_order_and_widths",
+          "src/core/view_options.rs::malformed_column_layout_returns_all_columns_once_in_default_order",
+          "src/core/view_options.rs::grid_sizes_expand_tile_geometry_with_icon_size",
+          "src/core/view_options.rs::small_icon_tiles_use_compact_padding_without_forcing_height",
+          "src/core/view_options.rs::hidden_files_are_off_by_default_and_persist_per_folder",
+          "src/core/view_options.rs::global_defaults_apply_when_a_folder_has_no_override",
+          "src/core/view_options.rs::explicit_folder_options_override_global_defaults",
+          "src/core/view_options.rs::clearing_all_folder_options_preserves_global_defaults",
+          "tests/headless_gtk.rs::slice5_page_sized_grid_recycles_rows",
+          "tests/headless_gtk.rs::slice5_hidden_filter_keeps_the_complete_incremental_source_model",
+          "tests/headless_gtk.rs::slice5_large_grid_recycles_visible_rows",
+          "tests/headless_gtk.rs::slice5_incremental_grouping_and_hidden_filter_preserve_all_visible_rows"
+        ]
       }
     },
     {
@@ -80,6 +112,41 @@
       },
       "macos": {
         "state": "pending"
+      },
+      "ui_tests": {
+        "linux": [
+          "src/core/sidebar_model.rs::online_accounts_lists_providers_not_disks",
+          "src/core/sidebar_model.rs::an_account_is_listed_once_rather_than_once_per_gio_mount",
+          "src/core/sidebar_model.rs::network_shortcuts_become_sidebar_children",
+          "src/core/sidebar_model.rs::pinning_a_path_is_persisted_once",
+          "src/core/sidebar_model.rs::sidebar_section_state_round_trips_with_preferences",
+          "src/core/sidebar_model.rs::expanded_tree_locations_round_trip_with_preferences",
+          "src/core/sidebar_model.rs::sidebar_separates_personal_folders_from_devices",
+          "src/core/sidebar_model.rs::device_sorting_places_removable_media_before_fixed_drives",
+          "src/core/sidebar_model.rs::devices_group_defaults_to_collapsed_and_persists",
+          "src/core/sidebar_model.rs::user_section_prefers_the_account_display_name",
+          "src/core/sidebar_model.rs::only_file_uris_are_classified_as_local_devices",
+          "src/core/sidebar_model.rs::unpinning_removes_the_matching_path",
+          "src/core/sidebar_model.rs::uri_location_without_path_is_not_local",
+          "src/core/sidebar_model.rs::local_sidebar_location_provides_a_navigation_path",
+          "src/core/sidebar_model.rs::remote_pin_is_saved_once_and_can_be_removed",
+          "src/core/sidebar_model.rs::v2_sidebar_pins_persist_canonical_uris_and_report_bad_records",
+          "src/core/sidebar_model.rs::v2_pin_loading_preserves_symlink_identity_and_other_valid_providers",
+          "src/ui/sidebar.rs::devices_heading_is_nested_after_file_system_in_this_pc",
+          "src/ui/sidebar.rs::sidebar_renders_quick_access_this_pc_and_network_sections",
+          "src/ui/sidebar.rs::operation_summary_only_requires_a_render_when_it_changes",
+          "src/ui/sidebar.rs::section_snapshot_releases_the_sidebar_model_before_rendering",
+          "src/ui/sidebar.rs::remote_expansion_loads_directory_children_from_the_repository",
+          "src/ui/sidebar.rs::collapsing_an_expansion_cancels_its_pending_repository_request",
+          "src/ui/sidebar.rs::stale_success_after_collapse_does_not_repopulate_the_sidebar_tree",
+          "src/ui/sidebar.rs::sidebar_retains_the_volume_monitor_so_device_signals_keep_firing",
+          "src/ui/sidebar.rs::every_row_reserves_the_chevron_column",
+          "src/ui/sidebar.rs::clicking_a_section_heading_asks_for_its_overview",
+          "src/ui/sidebar.rs::an_unmounted_device_is_listed_and_asks_to_be_mounted",
+          "tests/accessibility.rs::slice4_sidebar_duplicate_home_restores_the_user_section_occurrence",
+          "tests/accessibility.rs::slice4_sidebar_duplicate_tree_expander_restores_its_ancestor_occurrence",
+          "tests/accessibility.rs::slice4_sidebar_expanders_expose_state_and_refresh_keeps_keyboard_focus"
+        ]
       }
     },
     {
@@ -102,7 +169,9 @@
       "id": "browsing.visible-metadata",
       "title": "Visible-row metadata and thumbnails, cancelled on navigate",
       "readme": "Thumbnails and file metadata fetched lazily",
-      "scenarios": [],
+      "scenarios": [
+        "adapter/directory/visible-row-metadata-is-fetched-on-request"
+      ],
       "linux": {
         "state": "parity"
       },
@@ -246,7 +315,8 @@
         "adapter/operations/capability-inspection-reports-a-missing-parent",
         "adapter/operations/a-symlink-back-into-the-source-is-refused-before-writing",
         "adapter/operations/multi-item-conflict-decisions",
-        "domain/errors/the-table-agrees-with-the-code"
+        "domain/errors/the-table-agrees-with-the-code",
+        "adapter/operations/a-stale-capability-version-is-refused-before-any-work"
       ],
       "linux": {
         "state": "parity"
@@ -279,6 +349,17 @@
       },
       "macos": {
         "state": "pending"
+      },
+      "ui_tests": {
+        "linux": [
+          "src/ui/dnd_tests.rs::finished_sentinel_is_published_without_leaving_its_temporary_file",
+          "src/ui/dnd_tests.rs::slice3_external_move_waits_for_terminal_ack_over_real_x11",
+          "src/ui/window.rs::slice3_windows_share_cut_lease_and_paste_the_new_owner",
+          "src/ui/window.rs::slice3_two_windows_follow_system_provider_and_old_cut_cannot_clear_replacement",
+          "src/ui/window.rs::slice3_drop_acknowledgement_waits_for_every_terminal_item",
+          "tests/headless_gtk.rs::slice3_multiple_selection_routes_one_uri_command_and_drag_payload",
+          "tests/navigation_search_contract.rs::daily_selection_capabilities_and_drag_action_are_uri_based"
+        ]
       }
     },
     {
@@ -291,6 +372,14 @@
       },
       "macos": {
         "state": "pending"
+      },
+      "ui_tests": {
+        "linux": [
+          "tests/properties.rs::permission_bits_round_trip_unix_mode",
+          "tests/properties.rs::property_details_include_owner_and_group",
+          "tests/headless_gtk.rs::slice3_properties_reports_async_errors_and_unavailable_fields",
+          "tests/headless_gtk.rs::slice3_properties_close_restores_focus_and_operation_center_reports_completion"
+        ]
       }
     },
     {
@@ -384,6 +473,14 @@
       },
       "macos": {
         "state": "pending"
+      },
+      "ui_tests": {
+        "linux": [
+          "src/ui/window.rs::unmount_failure_uses_a_safe_operation_error_message_key",
+          "src/ui/sidebar.rs::sidebar_retains_the_volume_monitor_so_device_signals_keep_firing",
+          "src/ui/sidebar.rs::an_unmounted_device_is_listed_and_asks_to_be_mounted",
+          "tests/gio_integration.rs::daily_uri_adapter_queries_nonlocal_gio_backend_without_a_mount"
+        ]
       }
     },
     {

@@ -1,0 +1,15 @@
+{
+  "id": "adapter/directory/visible-row-metadata-is-fetched-on-request",
+  "kind": "adapter",
+  "summary": "Size, date and content type are not in the listing; asking for them for specific rows returns them, and a request cancelled before delivery reports cancelled",
+  "given": {"tree": [{"file": "data.txt", "content": "hello"}, {"dir": "folder"}]},
+  "steps": [
+    {"do": "list", "path": ".", "as": "list"},
+    {"expect": "entry", "ref": "$list", "name": "data.txt", "size": null, "modified": null, "content_type": null},
+    {"do": "inspect_visible", "paths": ["data.txt", "folder"], "as": "rows"},
+    {"expect": "outcome", "ref": "$rows", "is": "succeeded"},
+    {"expect": "metadata", "ref": "$rows", "path": "data.txt", "size": 5, "has_modified": true, "has_content_type": true},
+    {"do": "inspect_visible", "paths": ["data.txt"], "cancel": "immediately", "as": "cancelled"},
+    {"expect": "outcome", "ref": "$cancelled", "is": "cancelled"}
+  ]
+}

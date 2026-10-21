@@ -1,0 +1,12 @@
+{
+  "id": "adapter/operations/a-stale-capability-version-is-refused-before-any-work",
+  "kind": "adapter",
+  "summary": "A request made against an older capability version fails as capability_changed with no effect, even though the action itself is supported",
+  "given": {"tree": [{"file": "source", "content": "data"}]},
+  "steps": [
+    {"do": "operate", "kind": "copy", "sources": ["source"], "target": "target", "capability_version": 2, "as": "stale"},
+    {"expect": "outcome", "ref": "$stale", "is": "failed", "error": {"kind": "capability_changed"}},
+    {"expect": "effect", "ref": "$stale", "is": "unchanged", "completed": []},
+    {"expect": "tree", "contains": ["source"], "absent": ["target"]}
+  ]
+}

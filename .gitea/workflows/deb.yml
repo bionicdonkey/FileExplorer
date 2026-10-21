@@ -65,6 +65,11 @@ jobs:
           cargo run --manifest-path spec/tools/Cargo.toml --locked -- check
           cargo run --manifest-path spec/tools/Cargo.toml --locked -- status
 
+      - name: Run the behaviour scenarios
+        # The shared specification's scenarios against the real adapters. Slow to link, so it
+        # runs once per push rather than per scenario; it needs no display.
+        run: cargo test --locked --test spec_scenarios
+
       - name: Read the crate version
         id: crate
         run: |
