@@ -1,0 +1,23 @@
+{
+  "id": "domain/search/debounce-sends-only-the-latest-query-and-close-cancels",
+  "kind": "domain",
+  "summary": "Typing restarts a 180 ms debounce so only the latest query reaches the port; closing the tab cancels it and a late answer is ignored",
+  "given": {"location": "file:///home"},
+  "steps": [
+    {"do": "navigate", "subject": "navigation", "to": "file:///home"},
+    {"port": "directory", "request": 1, "respond": {"succeeded": {"entries": []}}},
+    {"do": "type", "subject": "search", "text": "r", "accepted": true},
+    {"do": "type", "subject": "search", "text": "re", "accepted": true},
+    {"do": "type", "subject": "search", "text": "report", "accepted": true},
+    {"expect": "port_requests", "port": "search", "count": 0},
+    {"do": "advance", "subject": "clock", "ms": 179},
+    {"expect": "port_requests", "port": "search", "count": 0},
+    {"do": "advance", "subject": "clock", "ms": 1},
+    {"expect": "port_requests", "port": "search", "count": 1, "last": {"query": "report"}},
+    {"do": "clear", "subject": "search"},
+    {"do": "close", "subject": "navigation"},
+    {"expect": "request_cancelled", "port": "search", "request": 1},
+    {"port": "search", "request": 1, "respond": {"completed": {"scope_limited": true}}},
+    {"expect": "view", "subject": "search", "status": "none"}
+  ]
+}

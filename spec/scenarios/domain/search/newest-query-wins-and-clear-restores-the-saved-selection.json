@@ -1,0 +1,21 @@
+{
+  "id": "domain/search/newest-query-wins-and-clear-restores-the-saved-selection",
+  "kind": "domain",
+  "summary": "A newer query cancels the older one and its stale answer is ignored; clearing search restores the directory, the selection and the history as they were",
+  "given": {"location": "file:///home"},
+  "steps": [
+    {"do": "navigate", "subject": "navigation", "to": "file:///home"},
+    {"port": "directory", "request": 1, "respond": {"succeeded": {"entries": ["file:///home/chosen"]}}},
+    {"do": "select", "subject": "navigation", "items": ["file:///home/chosen"]},
+    {"do": "submit", "subject": "search", "text": "one", "accepted": true},
+    {"expect": "port_requests", "port": "search", "count": 1, "last": {"max_depth": 1, "max_results": 5000, "timeout_ms": 2000}},
+    {"do": "submit", "subject": "search", "text": "two", "accepted": true},
+    {"expect": "request_cancelled", "port": "search", "request": 1},
+    {"port": "search", "request": 2, "respond": {"completed": {"scope_limited": true, "limits": ["depth"]}}},
+    {"port": "search", "request": 1, "respond": {"unsupported": {}}},
+    {"expect": "view", "subject": "search", "status": "completed", "content": "search"},
+    {"do": "select", "subject": "navigation", "items": []},
+    {"do": "clear", "subject": "search"},
+    {"expect": "view", "subject": "search", "status": "none", "content": "directory", "selection": ["file:///home/chosen"], "can_go_back": false}
+  ]
+}

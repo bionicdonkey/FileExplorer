@@ -248,7 +248,12 @@
       "id": "search.backend",
       "title": "Indexed search with an explicit unavailable outcome",
       "readme": "Tracker-backed search where available",
-      "scenarios": [],
+      "scenarios": [
+        "domain/search/debounce-sends-only-the-latest-query-and-close-cancels",
+        "domain/search/typing-while-loading-neither-cancels-navigation-nor-binds-to-the-old-root",
+        "domain/search/newest-query-wins-and-clear-restores-the-saved-selection",
+        "domain/search/incomplete-keeps-results-and-rejects-a-navigation-race"
+      ],
       "linux": {
         "state": "parity"
       },
@@ -272,7 +277,9 @@
       "id": "search.history-privacy",
       "title": "Search history privacy preference",
       "readme": "Search history is subject to a privacy preference",
-      "scenarios": [],
+      "scenarios": [
+        "domain/search/history-honours-the-privacy-policy"
+      ],
       "linux": {
         "state": "parity"
       },

@@ -1,0 +1,11 @@
+{
+  "id": "domain/search/history-honours-the-privacy-policy",
+  "kind": "domain",
+  "summary": "Recording a submitted term while the preference is on saves it; submitting with the preference off removes every saved term, in memory and on disk",
+  "steps": [
+    {"do": "record_submitted", "subject": "search_history", "text": "report", "enabled": true, "retention_days": 30},
+    {"expect": "search_history", "entries": 1, "persisted_entries": 1},
+    {"do": "record_submitted", "subject": "search_history", "text": "private term", "enabled": false, "retention_days": 30},
+    {"expect": "search_history", "entries": 0, "persisted_entries": 0}
+  ]
+}

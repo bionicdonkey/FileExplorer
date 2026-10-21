@@ -1,0 +1,18 @@
+{
+  "id": "domain/search/incomplete-keeps-results-and-rejects-a-navigation-race",
+  "kind": "domain",
+  "summary": "An incomplete search keeps its de-duplicated results and can be retried with the same query and scope; an answer that arrives after a new navigation began is ignored",
+  "given": {"location": "smb://host/share"},
+  "steps": [
+    {"do": "navigate", "subject": "navigation", "to": "smb://host/share"},
+    {"port": "directory", "request": 1, "respond": {"succeeded": {"entries": []}}},
+    {"do": "submit", "subject": "search", "text": "report", "accepted": true},
+    {"port": "search", "request": 1, "respond": {"incomplete": {"reason": "provider_failure", "matches": ["smb://host/share/report%20one", "smb://host/share/report%20one"]}}},
+    {"expect": "view", "subject": "search", "status": "incomplete", "reason": "provider_failure", "content": "search", "matches": ["smb://host/share/report%20one"]},
+    {"do": "retry", "subject": "search", "accepted": true},
+    {"expect": "port_requests", "port": "search", "count": 2, "last": {"query": "report", "root": "smb://host/share", "max_depth": 1, "max_results": 5000, "timeout_ms": 2000}},
+    {"do": "navigate", "subject": "navigation", "to": "file:///elsewhere"},
+    {"port": "search", "request": 2, "respond": {"completed": {"scope_limited": true}}},
+    {"expect": "view", "subject": "search", "status": "incomplete"}
+  ]
+}

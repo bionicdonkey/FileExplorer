@@ -1,0 +1,18 @@
+{
+  "id": "domain/search/typing-while-loading-neither-cancels-navigation-nor-binds-to-the-old-root",
+  "kind": "domain",
+  "summary": "A search typed while a directory is loading is refused: the load is not cancelled and nothing reaches the search port",
+  "given": {"location": "file:///home"},
+  "steps": [
+    {"do": "navigate", "subject": "navigation", "to": "file:///home"},
+    {"do": "submit", "subject": "search", "text": "report", "accepted": false},
+    {"expect": "port_requests", "port": "search", "count": 0},
+    {"expect": "request_cancelled", "port": "directory", "request": 1, "is": false},
+    {"port": "directory", "request": 1, "respond": {"succeeded": {"entries": []}}},
+    {"do": "navigate", "subject": "navigation", "to": "smb://host/share"},
+    {"do": "submit", "subject": "search", "text": "report", "accepted": false},
+    {"expect": "port_requests", "port": "search", "count": 0},
+    {"expect": "request_cancelled", "port": "directory", "request": 2, "is": false},
+    {"port": "directory", "request": 2, "respond": {"succeeded": {"entries": []}}}
+  ]
+}

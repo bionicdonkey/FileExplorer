@@ -21,6 +21,7 @@ use std::collections::HashMap;
 use crate::{effective_steps, Check, Mode};
 
 mod ops;
+mod search;
 
 type SharedSink = Rc<RefCell<DirectoryPageSink>>;
 
@@ -89,6 +90,7 @@ pub struct World {
     tab: Rc<RefCell<TabState>>,
     navigation: NavigationCoordinator,
     ops: ops::Ops,
+    search: search::Search,
     pub bound: RefCell<HashMap<String, Bound>>,
     pub default_capabilities: Value,
 }
@@ -103,15 +105,22 @@ pub fn run(scenario: &Value, mode: Mode) -> Check {
     let world = World {
         navigation: NavigationCoordinator::new(tab.clone(), directory.clone()),
         directory,
-        tab,
         ops: ops::Ops::new(),
+        search: search::Search::new(tab.clone()),
+        tab,
         bound: RefCell::new(HashMap::new()),
         default_capabilities: scenario["given"]["capabilities"].clone(),
     };
-    for (index, step) in effective_steps(scenario).iter().enumerate() {
-        step_once(&world, step).map_err(|e| format!("step {index}: {e}"))?;
-    }
-    Ok(())
+    // The search debounce spawns onto the thread-default context, which the clock pumps.
+    let context = glib::MainContext::new();
+    context
+        .with_thread_default(|| {
+            for (index, step) in effective_steps(scenario).iter().enumerate() {
+                step_once(&world, step).map_err(|e| format!("step {index}: {e}"))?;
+            }
+            Ok(())
+        })
+        .map_err(|e| e.to_string())?
 }
 
 fn step_once(world: &World, step: &Value) -> Check {
@@ -120,6 +129,9 @@ fn step_once(world: &World, step: &Value) -> Check {
         return match subject {
             "navigation" => navigation_action(world, action, step),
             "operations" => ops::action(world, action, step),
+            "search" => search::action(world, action, step),
+            "clock" => search::clock_action(world, action, step),
+            "search_history" => search::history_action(world, action, step),
             "reducer" => ops::reducer_action(world, action, step),
             other => Err(format!("subject {other:?} is not implemented by the domain runner yet")),
         };
@@ -127,6 +139,7 @@ fn step_once(world: &World, step: &Value) -> Check {
     if step["port"].is_string() && step["expect"].is_null() {
         return match step["port"].as_str() {
             Some("capabilities") | Some("operations") => ops::script_port(world, step),
+            Some("search") => search::script_port(world, step),
             _ => script_port(world, step),
         };
     }
@@ -137,6 +150,10 @@ fn step_once(world: &World, step: &Value) -> Check {
         Some("port_requests") if matches!(step["port"].as_str(), Some("capabilities") | Some("operations")) => {
             ops::expect_port_requests(world, step)
         }
+        Some("port_requests") if step["port"].as_str() == Some("search") => search::expect_port_requests(world, step),
+        Some("request_cancelled") if step["port"].as_str() == Some("search") => search::expect_cancelled(world, step),
+        Some("view") if step["subject"].as_str() == Some("search") => search::expect_view(world, step),
+        Some("search_history") => search::history_expectation(world, step),
         Some("port_requests") => expect_port_requests(world, step),
         Some("request_cancelled") => expect_cancelled(world, step),
         Some("view") => expect_view(world, step),
@@ -154,6 +171,10 @@ fn navigation_action(world: &World, action: &str, step: &Value) -> Check {
         "retry" => world.navigation.retry(|_| {}),
         "close" => {
             world.navigation.close_tab();
+            true
+        }
+        "select" => {
+            world.tab.borrow_mut().selection_keys = step["items"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect();
             true
         }
         other => return Err(format!("navigation has no action {other:?}")),
@@ -257,7 +278,8 @@ fn expect_cancelled(world: &World, step: &Value) -> Check {
         use gio::prelude::CancellableExt;
         world.directory.held.borrow()[index].0.cancellable.is_cancelled()
     };
-    if cancelled { Ok(()) } else { Err(format!("request {} was not cancelled", index + 1)) }
+    let want = step["is"].as_bool().unwrap_or(true);
+    if cancelled == want { Ok(()) } else { Err(format!("request {} cancelled is {cancelled}, expected {want}", index + 1)) }
 }
 
 /// A deliberately small projection: location, back and forward targets, status, error kind.
