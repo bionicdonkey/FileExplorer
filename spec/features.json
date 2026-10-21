@@ -234,7 +234,9 @@
       "id": "operations.history",
       "title": "Operations page with persisted history",
       "readme": "An operations page showing in-flight",
-      "scenarios": [],
+      "scenarios": [
+        "adapter/history/persisted-history-redacts-path-detail"
+      ],
       "linux": {
         "state": "parity"
       },
@@ -380,7 +382,9 @@
       "id": "session.history-redaction",
       "title": "Persisted operation history redacts path detail",
       "readme": "Persisted operation history redacts path detail",
-      "scenarios": [],
+      "scenarios": [
+        "adapter/history/persisted-history-redacts-path-detail"
+      ],
       "linux": {
         "state": "parity"
       },

@@ -1,0 +1,12 @@
+{
+  "id": "adapter/history/persisted-history-redacts-path-detail",
+  "kind": "adapter",
+  "summary": "Operations that fail and succeed are recorded and survive a restart, but neither the saved history nor the reloaded one reveals a path or a file name",
+  "note": "An unconfirmed delete fails and leaves the file; the copy lands inside the target folder.",
+  "given": {"tree": [{"file": "private-source-name", "content": "keep"}, {"dir": "private-target-name"}]},
+  "steps": [
+    {"do": "manage", "operations": [{"kind": "delete", "sources": ["private-source-name"]}, {"kind": "copy", "sources": ["private-source-name"], "destination": "private-target-name"}], "as": "history"},
+    {"expect": "history", "ref": "$history", "states": ["failed", "completed"], "persisted_lacks": ["$sandbox", "private-source-name", "private-target-name"], "reloaded_records": 2},
+    {"expect": "tree", "contains": ["private-source-name", "private-target-name/private-source-name"]}
+  ]
+}

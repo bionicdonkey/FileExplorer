@@ -19,7 +19,8 @@ use serde_json::Value;
 use gio::prelude::CancellableExt;
 use zorin_explorer::core::contracts::*;
 use zorin_explorer::core::ports::{DirectoryRepository, FileOperations, SearchRepository};
-use zorin_explorer::core::Location;
+use zorin_explorer::core::operation_manager::OperationKind;
+use zorin_explorer::core::{Location, OperationManager, OperationState};
 use zorin_explorer::infrastructure::{
     directory_router::DirectoryRouter, gio_operations, gio_operations::GioOperations,
     tracker_search::TrackerSearchRepository,
@@ -40,6 +41,15 @@ enum Bound {
     Pages(Vec<RequestOutcome<DirectorySnapshot>>),
     Search(SearchOutcome),
     Inspect(RequestOutcome<CapabilitySnapshot>),
+    /// An operation manager that persisted its history to a file of its own.
+    History(History),
+}
+
+struct History {
+    file: std::path::PathBuf,
+    ids: Vec<u64>,
+    states: Vec<String>,
+    _dir: tempfile::TempDir,
 }
 
 impl Run {
@@ -163,6 +173,10 @@ pub fn run(scenario: &Value, mode: Mode) -> Check {
                         };
                     }
                     runs.insert(step["as"].as_str().unwrap_or("_").to_string(), Bound::Search(outcome));
+                }
+                "manage" => {
+                    let history = manage(&sandbox, step).map_err(at)?;
+                    runs.insert(step["as"].as_str().unwrap_or("_").to_string(), Bound::History(history));
                 }
                 "inspect" => {
                     let outcome = inspect(&context, &sandbox, step).map_err(at)?;
@@ -384,6 +398,98 @@ fn inspect(context: &glib::MainContext, sandbox: &Sandbox, step: &Value) -> Resu
     Ok(outcome)
 }
 
+/// Runs operations through the operation manager with history persisted to a file, and waits
+/// for each to finish. The file is outside the sandbox, so it never shows up in a tree check.
+fn manage(sandbox: &Sandbox, step: &Value) -> Result<History, String> {
+    let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let file = dir.path().join("history.json");
+    let manager = OperationManager::load_history(Some(file.clone()), 7);
+    let mut ids = Vec::new();
+    let mut states = Vec::new();
+    for operation in step["operations"].as_array().ok_or("manage needs `operations`")? {
+        let kind = match operation["kind"].as_str().unwrap_or("") {
+            "copy" => OperationKind::Copy,
+            "move" => OperationKind::Move,
+            "delete" => OperationKind::Delete,
+            "trash" => OperationKind::Trash,
+            other => return Err(format!("unknown operation kind {other:?}")),
+        };
+        let sources = paths(&operation["sources"]).into_iter().map(|p| sandbox.path(p)).collect();
+        let id = manager.submit(kind, sources, operation["destination"].as_str().map(|d| sandbox.path(d)));
+        let record = {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Some(r) = manager.records().into_iter().find(|r| r.id == id && r.finished_at.is_some()) {
+                    break r;
+                }
+                if Instant::now() > deadline {
+                    return Err(format!("operation {id} did not finish in time"));
+                }
+                std::thread::yield_now();
+            }
+        };
+        states.push(match record.state {
+            OperationState::Completed => "completed".to_string(),
+            OperationState::Failed(_) => "failed".to_string(),
+            OperationState::Cancelled => "cancelled".to_string(),
+            other => format!("{other:?}").to_lowercase(),
+        });
+        ids.push(id);
+    }
+    // The manager saves history itself once each job ends; wait for the file to hold them all.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let saved = std::fs::read_to_string(&file).unwrap_or_default();
+        if serde_json::from_str::<Value>(&saved).is_ok_and(|v| v["records"].as_array().map_or(0, Vec::len) >= ids.len()) {
+            break;
+        }
+        if Instant::now() > deadline {
+            return Err("history was not saved in time".into());
+        }
+        std::thread::yield_now();
+    }
+    Ok(History { file, ids, states, _dir: dir })
+}
+
+fn expect_history(sandbox: &Sandbox, history: &History, step: &Value) -> Check {
+    if step.get("states").is_some() {
+        let want: Vec<String> = paths(&step["states"]).into_iter().map(str::to_string).collect();
+        if history.states != want {
+            return Err(format!("operation states are {:?}, expected {want:?}", history.states));
+        }
+    }
+    let root = sandbox.path("").display().to_string();
+    let forbidden: Vec<String> = paths(&step["persisted_lacks"])
+        .into_iter()
+        .map(|text| if text == "$sandbox" { root.trim_end_matches('/').to_string() } else { text.to_string() })
+        .collect();
+    let raw = std::fs::read_to_string(&history.file).map_err(|e| e.to_string())?;
+    for text in &forbidden {
+        if raw.contains(text.as_str()) {
+            return Err(format!("the saved history reveals {text:?}"));
+        }
+    }
+    if step.get("reloaded_records").is_some() || !forbidden.is_empty() {
+        let reloaded = OperationManager::load_history(Some(history.file.clone()), 7);
+        if let Some(count) = step["reloaded_records"].as_u64() {
+            if reloaded.records().len() as u64 != count {
+                return Err(format!("history reloads {} records, expected {count}", reloaded.records().len()));
+            }
+        }
+        let shown = format!(
+            "{:?} {:?}",
+            reloaded.records(),
+            history.ids.iter().map(|id| reloaded.summary(*id)).collect::<Vec<_>>()
+        );
+        for text in &forbidden {
+            if shown.contains(text.as_str()) {
+                return Err(format!("the reloaded history reveals {text:?}"));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn expect_unsupported_pages(pages: &[RequestOutcome<DirectorySnapshot>]) -> Check {
     match pages.last() {
         Some(RequestOutcome::Failed(error)) if error.kind == OperationErrorKind::Unsupported => Ok(()),
@@ -468,9 +574,13 @@ fn expectation(sandbox: &Sandbox, runs: &HashMap<String, Bound>, expect: &str, s
                     }
                     check_failure(outcome, &step["error"])
                 }
-                Bound::Search(_) => Err("use `search` to check a search outcome".into()),
+                Bound::Search(_) | Bound::History(_) => Err("this step has no single outcome".into()),
             }
         }
+        "history" => match bound()? {
+            Bound::History(history) => expect_history(sandbox, history, step),
+            _ => Err("that step did not run the operation manager".into()),
+        },
         "effect" => {
             let completion = find()?.completion()?;
             let got = effect_name(completion.effect);
