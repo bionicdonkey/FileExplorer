@@ -309,7 +309,34 @@ pub fn expect_error_table(_world: &World, _step: &Value) -> Check {
         eq(&format!("failure {name}"), error.kind, kind_of(entry["kind"].as_str().ok_or("needs kind")?)?)?;
         eq(&format!("failure {name} shows only its message key"), error.to_string(), error.message_key.to_string())?;
     }
-    // Every kind the code has appears in the table, so a new one cannot be added silently.
-    let listed = table["kinds"].as_array().map_or(0, Vec::len);
-    eq("number of error kinds", listed, 11)
+    // The table names exactly the kinds in `ALL_KINDS`. `kind_name` has no wildcard arm, so adding
+    // a kind to the code stops this file compiling until the new kind is named here, and then
+    // this comparison fails until the table lists it too.
+    let mut listed: Vec<&str> = table["kinds"].as_array().into_iter().flatten().filter_map(|e| e["kind"].as_str()).collect();
+    let mut known: Vec<&str> = ALL_KINDS.iter().map(|k| kind_name(*k)).collect();
+    listed.sort_unstable();
+    known.sort_unstable();
+    eq("error kinds in the table", listed, known)
+}
+
+const ALL_KINDS: [zorin_explorer::core::contracts::OperationErrorKind; 11] = {
+    use zorin_explorer::core::contracts::OperationErrorKind::*;
+    [PermissionDenied, AuthenticationRequired, MountUnavailable, Conflict, NotFound, ReadOnly, Unsupported, CapabilityChanged, PartialCompletion, InvalidRequest, Unknown]
+};
+
+fn kind_name(kind: zorin_explorer::core::contracts::OperationErrorKind) -> &'static str {
+    use zorin_explorer::core::contracts::OperationErrorKind::*;
+    match kind {
+        PermissionDenied => "permission_denied",
+        AuthenticationRequired => "authentication_required",
+        MountUnavailable => "mount_unavailable",
+        Conflict => "conflict",
+        NotFound => "not_found",
+        ReadOnly => "read_only",
+        Unsupported => "unsupported",
+        CapabilityChanged => "capability_changed",
+        PartialCompletion => "partial_completion",
+        InvalidRequest => "invalid_request",
+        Unknown => "unknown",
+    }
 }
