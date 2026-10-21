@@ -7,6 +7,7 @@
 //! code that reads the root README.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -347,18 +348,19 @@ fn run_status(repo: &Path) -> ExitCode {
         return ExitCode::FAILURE;
     };
 
-    print!("{:<12}", "platform");
+    let out = &mut std::io::stdout().lock();
+    let _ = write!(out, "{:<12}", "platform");
     for state in STATES {
-        print!("{state:>13}");
+        let _ = write!(out, "{state:>13}");
     }
-    println!("{:>8}", "total");
+    let _ = writeln!(out, "{:>8}", "total");
     for platform in PLATFORMS {
-        print!("{platform:<12}");
+        let _ = write!(out, "{platform:<12}");
         for state in STATES {
             let count = registry.features.iter().filter(|f| state_of(f, platform) == state).count();
-            print!("{count:>13}");
+            let _ = write!(out, "{count:>13}");
         }
-        println!("{:>8}", registry.features.len());
+        let _ = writeln!(out, "{:>8}", registry.features.len());
     }
     for platform in PLATFORMS {
         let pending: Vec<&str> = registry
@@ -368,9 +370,9 @@ fn run_status(repo: &Path) -> ExitCode {
             .filter_map(|f| f["id"].as_str())
             .collect();
         if !pending.is_empty() {
-            println!("\npending on {platform} ({}):", pending.len());
+            let _ = writeln!(out, "\npending on {platform} ({}):", pending.len());
             for id in pending {
-                println!("  {id}");
+                let _ = writeln!(out, "  {id}");
             }
         }
     }

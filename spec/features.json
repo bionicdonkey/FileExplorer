@@ -354,8 +354,6 @@
         "linux": [
           "src/ui/dnd_tests.rs::finished_sentinel_is_published_without_leaving_its_temporary_file",
           "src/ui/dnd_tests.rs::slice3_external_move_waits_for_terminal_ack_over_real_x11",
-          "src/ui/window.rs::slice3_windows_share_cut_lease_and_paste_the_new_owner",
-          "src/ui/window.rs::slice3_two_windows_follow_system_provider_and_old_cut_cannot_clear_replacement",
           "src/ui/window.rs::slice3_drop_acknowledgement_waits_for_every_terminal_item",
           "tests/headless_gtk.rs::slice3_multiple_selection_routes_one_uri_command_and_drag_payload",
           "tests/navigation_search_contract.rs::daily_selection_capabilities_and_drag_action_are_uri_based"
@@ -467,21 +465,16 @@
       "id": "remote.mount-auth",
       "title": "Mount authentication and retry",
       "readme": "GTK-parented mount authentication",
-      "scenarios": [],
+      "scenarios": [
+        "domain/navigation/unmount-cancels-pending-and-keeps-history-for-reconnect"
+      ],
       "linux": {
         "state": "parity"
       },
       "macos": {
         "state": "pending"
       },
-      "ui_tests": {
-        "linux": [
-          "src/ui/window.rs::unmount_failure_uses_a_safe_operation_error_message_key",
-          "src/ui/sidebar.rs::sidebar_retains_the_volume_monitor_so_device_signals_keep_firing",
-          "src/ui/sidebar.rs::an_unmounted_device_is_listed_and_asks_to_be_mounted",
-          "tests/gio_integration.rs::daily_uri_adapter_queries_nonlocal_gio_backend_without_a_mount"
-        ]
-      }
+      "note": "Only the retry after a mount becomes unavailable is covered (the scenario). Parenting the authentication dialog on the requesting window (GTK MountOperation) has no automated test on either platform."
     },
     {
       "id": "session.persistence",
