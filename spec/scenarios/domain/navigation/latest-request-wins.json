@@ -1,0 +1,20 @@
+{
+  "id": "domain/navigation/latest-request-wins",
+  "kind": "domain",
+  "summary": "A newer navigation cancels the pending one; an answer to the superseded request is ignored and history records only what loaded",
+  "given": { "location": "file:///home" },
+  "steps": [
+    { "do": "navigate", "subject": "navigation", "to": "file:///a" },
+    { "port": "directory", "request": 1, "respond": { "succeeded": { "entries": [] } } },
+    { "expect": "view", "subject": "navigation", "location": "file:///a", "status": "ready", "back": null },
+    { "do": "navigate", "subject": "navigation", "to": "file:///b" },
+    { "do": "navigate", "subject": "navigation", "to": "file:///c" },
+    { "expect": "request_cancelled", "port": "directory", "request": 2 },
+    { "expect": "port_requests", "port": "directory", "count": 3, "last": { "path": "file:///c" } },
+    { "expect": "view", "subject": "navigation", "location": "file:///a", "status": "loading" },
+    { "port": "directory", "request": 2, "respond": { "succeeded": { "entries": [] } } },
+    { "expect": "view", "subject": "navigation", "location": "file:///a", "status": "loading", "back": null },
+    { "port": "directory", "request": 3, "respond": { "succeeded": { "entries": ["file:///c/x"] } } },
+    { "expect": "view", "subject": "navigation", "location": "file:///c", "status": "ready", "back": "file:///a", "forward": null }
+  ]
+}

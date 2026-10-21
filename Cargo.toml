@@ -33,3 +33,9 @@ tempfile = "=3.10.1"
 [[bin]]
 name = "zorin-explorer"
 path = "src/main.rs"
+
+# One binary reports one line per scenario of the shared specification in spec/.
+[[test]]
+name = "spec_scenarios"
+path = "tests/spec_scenarios/main.rs"
+harness = false

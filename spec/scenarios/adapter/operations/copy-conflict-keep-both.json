@@ -1,0 +1,17 @@
+{
+  "id": "adapter/operations/copy-conflict-keep-both",
+  "kind": "adapter",
+  "summary": "Copying with the KeepBoth decision leaves the original and writes a numbered sibling",
+  "given": {
+    "tree": [
+      { "file": "source", "content": "new" },
+      { "file": "target", "content": "old" }
+    ]
+  },
+  "steps": [
+    { "do": "operate", "kind": "copy", "sources": ["source"], "target": "target", "decision": "keep_both", "as": "copy" },
+    { "expect": "outcome", "ref": "$copy", "is": "succeeded" },
+    { "expect": "events", "ref": "$copy", "match": ["started", { "any": "progress" }, "succeeded"] },
+    { "expect": "tree", "contains": ["target", "target (2)"], "contents": { "target": "old", "target (2)": "new" } }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "id": "adapter/operations/copy-conflict-no-overwrite",
+  "kind": "adapter",
+  "summary": "Copying onto an existing name without a decision fails with a conflict and changes nothing",
+  "given": {
+    "tree": [
+      { "file": "source", "content": "new" },
+      { "file": "target", "content": "old" }
+    ]
+  },
+  "steps": [
+    { "do": "operate", "kind": "copy", "sources": ["source"], "target": "target", "as": "copy" },
+    { "expect": "outcome", "ref": "$copy", "is": "failed", "error": { "kind": "conflict", "retry": "after_user_action" } },
+    { "expect": "events", "ref": "$copy", "match": ["started", "failed"] },
+    { "expect": "effect", "ref": "$copy", "is": "unchanged" },
+    { "expect": "tree", "contains": ["source", "target"], "contents": { "target": "old" } }
+  ]
+}

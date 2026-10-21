@@ -42,13 +42,18 @@
           ]
         },
         "port": { "enum": ["directory", "operations", "search"] },
+        "subject": { "enum": ["navigation", "search", "operations", "clipboard", "clock"] },
         "as": { "type": "string" },
         "note": { "type": "string" }
       },
       "oneOf": [
-        { "required": ["do"], "not": { "anyOf": [{ "required": ["expect"] }, { "required": ["port"] }] } },
-        { "required": ["expect"], "not": { "anyOf": [{ "required": ["do"] }, { "required": ["port"] }] } },
-        { "required": ["port"], "not": { "anyOf": [{ "required": ["do"] }, { "required": ["expect"] }] } }
+        { "required": ["do"], "not": { "anyOf": [{ "required": ["expect"] }, { "required": ["respond"] }, { "required": ["emit"] }] } },
+        { "required": ["expect"], "not": { "anyOf": [{ "required": ["do"] }, { "required": ["respond"] }, { "required": ["emit"] }] } },
+        {
+          "required": ["port", "request"],
+          "oneOf": [{ "required": ["respond"] }, { "required": ["emit"] }],
+          "not": { "anyOf": [{ "required": ["do"] }, { "required": ["expect"] }] }
+        }
       ]
     },
     "override": {

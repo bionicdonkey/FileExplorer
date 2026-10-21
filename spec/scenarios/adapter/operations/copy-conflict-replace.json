@@ -1,0 +1,17 @@
+{
+  "id": "adapter/operations/copy-conflict-replace",
+  "kind": "adapter",
+  "summary": "Copying with the Replace decision overwrites the existing file",
+  "given": {
+    "tree": [
+      { "file": "source", "content": "new" },
+      { "file": "target", "content": "old" }
+    ]
+  },
+  "steps": [
+    { "do": "operate", "kind": "copy", "sources": ["source"], "target": "target", "decision": "replace", "as": "copy" },
+    { "expect": "outcome", "ref": "$copy", "is": "succeeded" },
+    { "expect": "events", "ref": "$copy", "match": ["started", { "any": "progress" }, "succeeded"] },
+    { "expect": "tree", "contains": ["source", "target"], "contents": { "target": "new" } }
+  ]
+}

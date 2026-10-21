@@ -15,6 +15,20 @@
       }
     },
     {
+      "id": "browsing.navigation",
+      "title": "Per-tab navigation: the latest request wins and history commits only on success",
+      "readme": "Tabs with overflow handling",
+      "scenarios": [
+        "domain/navigation/latest-request-wins"
+      ],
+      "linux": {
+        "state": "parity"
+      },
+      "macos": {
+        "state": "pending"
+      }
+    },
+    {
       "id": "browsing.view-modes",
       "title": "View modes, sorting, grouping and columns",
       "readme": "Four view modes",
@@ -150,7 +164,11 @@
       "id": "operations.file-ops",
       "title": "Copy, move, rename, delete, trash and create with conflict handling",
       "readme": "Copy, move, rename, delete, trash and create",
-      "scenarios": [],
+      "scenarios": [
+        "adapter/operations/copy-conflict-no-overwrite",
+        "adapter/operations/copy-conflict-replace",
+        "adapter/operations/copy-conflict-keep-both"
+      ],
       "linux": {
         "state": "parity"
       },
