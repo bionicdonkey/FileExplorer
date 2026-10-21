@@ -1,0 +1,12 @@
+{
+  "id": "domain/location/location-bar-input-keeps-remote-identity",
+  "kind": "domain",
+  "summary": "The location bar keeps trash, network and remote URIs as they are, turns a bare path into a file URI, and refuses credentials",
+  "steps": [
+    {"expect": "location", "via": "input", "input": "trash:///", "canonical": "trash:///"},
+    {"expect": "location", "via": "input", "input": "smb://host/share", "canonical": "smb://host/share"},
+    {"expect": "location", "via": "input", "input": "network:///", "canonical": "network:///"},
+    {"expect": "location", "via": "input", "input": "/tmp/a b", "canonical": "file:///tmp/a%20b"},
+    {"expect": "location", "via": "input", "input": "smb://user:password@host/share", "is": "rejected"}
+  ]
+}

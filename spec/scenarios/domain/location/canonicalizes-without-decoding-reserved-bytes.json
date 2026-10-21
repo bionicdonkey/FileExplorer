@@ -1,0 +1,10 @@
+{
+  "id": "domain/location/canonicalizes-without-decoding-reserved-bytes",
+  "kind": "domain",
+  "summary": "Canonical form folds the scheme and host, decodes only unreserved bytes, drops default ports, and keeps an encoded slash distinct from a path separator",
+  "steps": [
+    {"expect": "location", "input": "SMB://HOST/%7e", "canonical": "smb://host/~"},
+    {"expect": "location", "input": "http://HOST:80/a", "canonical": "http://host/a"},
+    {"expect": "location", "input": "smb://host/a%2fb", "canonical": "smb://host/a%2Fb", "differs_from": "smb://host/a/b"}
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "id": "domain/location/session-codec-round-trips-and-skips-bad-records",
+  "kind": "domain",
+  "summary": "A saved session round-trips remote locations; a record that fails validation is skipped with a notice and the rest are kept",
+  "steps": [
+    {"expect": "session", "round_trip": ["smb://host/share"]},
+    {"expect": "session", "decode": {"schema_version": 2, "locations": ["sftp://host/ok", "smb://user@host/no"]}, "locations": ["sftp://host/ok"], "notices": ["malformed_record"]}
+  ]
+}

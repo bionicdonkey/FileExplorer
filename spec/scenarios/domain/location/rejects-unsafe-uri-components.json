@@ -1,0 +1,13 @@
+{
+  "id": "domain/location/rejects-unsafe-uri-components",
+  "kind": "domain",
+  "summary": "Locations with credentials, queries, fragments, bad escapes or control characters are rejected",
+  "steps": [
+    {"expect": "location", "input": "smb://user@host/share", "is": "rejected"},
+    {"expect": "location", "input": "smb://host/share?token=secret", "is": "rejected"},
+    {"expect": "location", "input": "smb://host/share#secret", "is": "rejected"},
+    {"expect": "location", "input": "smb://host/%", "is": "rejected"},
+    {"expect": "location", "input": "smb://host/%zz", "is": "rejected"},
+    {"expect": "location", "input": "smb://host/line\nbreak", "is": "rejected"}
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "id": "domain/clipboard/uri-payload-rejects-unsafe-input-and-deduplicates",
+  "kind": "domain",
+  "summary": "A pasted URI list is de-duplicated and re-serialised with CRLF line endings; empty, bare-path, credentialed, queried and control-character input is refused",
+  "steps": [
+    {"expect": "clipboard_payload", "format": "uri_list", "action": "cut", "text": "# Files\r\nsmb://host/share/a\r\nfile:///tmp/b\r\nsmb://host/share/a\r\n", "is": "accepted", "uris": ["smb://host/share/a", "file:///tmp/b"], "uri_list": "smb://host/share/a\r\nfile:///tmp/b\r\n"},
+    {"expect": "clipboard_payload", "format": "uri_list", "action": "copy", "text": "", "is": "rejected"},
+    {"expect": "clipboard_payload", "format": "uri_list", "action": "copy", "text": "/tmp/a", "is": "rejected"},
+    {"expect": "clipboard_payload", "format": "uri_list", "action": "copy", "text": "smb://user:secret@host/a", "is": "rejected"},
+    {"expect": "clipboard_payload", "format": "uri_list", "action": "copy", "text": "file:///tmp/a?secret=x", "is": "rejected"},
+    {"expect": "clipboard_payload", "format": "uri_list", "action": "copy", "text": "file:///tmp/a\ninvalid", "is": "rejected"}
+  ]
+}

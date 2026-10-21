@@ -55,7 +55,14 @@
       "id": "browsing.location-bar",
       "title": "Breadcrumb, editable path and folder suggestions",
       "readme": "Breadcrumb location bar with an editable path entry",
-      "scenarios": [],
+      "scenarios": [
+        "domain/location/rejects-unsafe-uri-components",
+        "domain/location/canonicalizes-without-decoding-reserved-bytes",
+        "domain/location/redacts-remote-path-details",
+        "domain/location/hostname-is-folded-but-an-opaque-authority-is-not",
+        "domain/location/location-bar-input-keeps-remote-identity",
+        "domain/location/named-children-reject-path-traversal"
+      ],
       "linux": {
         "state": "parity"
       },
@@ -103,7 +110,11 @@
       "id": "archives.browse",
       "title": "Archives open in the window like folders",
       "readme": "Archives (`.zip`",
-      "scenarios": [],
+      "scenarios": [
+        "domain/location/an-archive-is-addressed-by-its-own-escaped-uri",
+        "domain/location/a-location-in-an-archive-is-named-not-redacted",
+        "domain/location/leaving-an-archive-returns-to-the-folder-it-is-in"
+      ],
       "linux": {
         "state": "parity"
       },
@@ -191,7 +202,10 @@
         "domain/operations/partial-failure-keeps-completed-items-and-refuses-unconfirmed-delete",
         "domain/operations/decision-skip-never-reaches-the-backend",
         "domain/operations/decision-cancel-remaining-never-reaches-the-backend",
-        "domain/operations/opaque-request-blocks-a-trusted-request-and-local-lock-keys-are-sorted"
+        "domain/operations/opaque-request-blocks-a-trusted-request-and-local-lock-keys-are-sorted",
+        "domain/clipboard/uri-payload-rejects-unsafe-input-and-deduplicates",
+        "domain/clipboard/external-payload-keeps-cut-and-rejects-unknown-actions",
+        "domain/clipboard/a-cut-is-cleared-only-by-its-own-terminal-paste"
       ],
       "linux": {
         "state": "parity"
@@ -302,7 +316,9 @@
       "id": "remote.uris",
       "title": "Non-local URIs are first-class and never treated as local paths",
       "readme": "Non-local URIs",
-      "scenarios": [],
+      "scenarios": [
+        "domain/location/location-bar-input-keeps-remote-identity"
+      ],
       "linux": {
         "state": "parity"
       },
@@ -326,7 +342,12 @@
       "id": "session.persistence",
       "title": "Session state persists across restarts",
       "readme": "Tabs, pinned locations and view preferences persist",
-      "scenarios": [],
+      "scenarios": [
+        "domain/location/session-codec-round-trips-and-skips-bad-records",
+        "domain/location/older-session-files-migrate-and-are-rewritten-as-v2",
+        "domain/location/legacy-local-paths-import-idempotently",
+        "domain/location/pins-and-sessions-keep-unmounted-identities"
+      ],
       "linux": {
         "state": "parity"
       },

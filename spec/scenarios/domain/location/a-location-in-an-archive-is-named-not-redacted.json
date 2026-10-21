@@ -1,0 +1,10 @@
+{
+  "id": "domain/location/a-location-in-an-archive-is-named-not-redacted",
+  "kind": "domain",
+  "summary": "Inside an archive, the root is named after the archive file and a deeper location after its last component",
+  "steps": [
+    {"expect": "location", "input": "file:///home/user/Backups/photos 2025.tar.gz", "archive_contents": true, "as": "root"},
+    {"expect": "location", "input": "$root", "display_name": "photos 2025.tar.gz"},
+    {"expect": "location", "input": {"join": ["$root", "Holiday/Day%201"]}, "display_name": "Day 1"}
+  ]
+}

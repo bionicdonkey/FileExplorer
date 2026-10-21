@@ -1,0 +1,14 @@
+{
+  "id": "domain/location/named-children-reject-path-traversal",
+  "kind": "domain",
+  "summary": "A new file or folder name must be a single plain component: empty, dot, dot-dot, separators and control characters are refused, and the name is escaped",
+  "steps": [
+    {"expect": "named_child", "parent": "smb://host/share", "name": "new folder", "is": "accepted", "uri": "smb://host/share/new%20folder"},
+    {"expect": "named_child", "parent": "smb://host/share", "name": "", "is": "rejected"},
+    {"expect": "named_child", "parent": "smb://host/share", "name": ".", "is": "rejected"},
+    {"expect": "named_child", "parent": "smb://host/share", "name": "..", "is": "rejected"},
+    {"expect": "named_child", "parent": "smb://host/share", "name": "../escape", "is": "rejected"},
+    {"expect": "named_child", "parent": "smb://host/share", "name": "child/name", "is": "rejected"},
+    {"expect": "named_child", "parent": "smb://host/share", "name": "name\nsecret", "is": "rejected"}
+  ]
+}

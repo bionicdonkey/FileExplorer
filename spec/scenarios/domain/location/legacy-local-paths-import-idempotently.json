@@ -1,0 +1,8 @@
+{
+  "id": "domain/location/legacy-local-paths-import-idempotently",
+  "kind": "domain",
+  "summary": "Importing the same legacy local paths twice yields the same locations",
+  "steps": [
+    {"expect": "session", "legacy_paths": ["/tmp/one", "/tmp/two"], "uris": ["file:///tmp/one", "file:///tmp/two"]}
+  ]
+}

@@ -33,18 +33,18 @@
             "retry_elevated",
             "cut", "copy", "paste", "external_payload",
             "advance",
-            "start", "apply", "select", "expand_scope", "record_submitted", "unmount", "show_section"
+            "start", "apply", "select", "expand_scope", "record_submitted", "unmount", "show_section", "replace", "begin_paste", "finish_paste", "pin", "save", "reload"
           ]
         },
         "expect": {
           "enum": [
             "outcome", "events", "effect", "entries", "pages", "tree", "search", "changed", "capability",
             "port_requests", "request_cancelled", "view", "record", "clipboard",
-            "lock_keys", "submit_result", "cancel_result", "reducer", "search_history"
+            "lock_keys", "submit_result", "cancel_result", "reducer", "search_history", "location", "session", "named_child", "clipboard_payload", "pins"
           ]
         },
         "port": { "enum": ["directory", "capabilities", "operations", "search"] },
-        "subject": { "enum": ["navigation", "search", "operations", "reducer", "clipboard", "clock", "location", "file_types", "search_history"] },
+        "subject": { "enum": ["navigation", "search", "operations", "reducer", "clipboard", "clock", "location", "file_types", "search_history", "pins"] },
         "as": { "type": "string" },
         "note": { "type": "string" }
       },

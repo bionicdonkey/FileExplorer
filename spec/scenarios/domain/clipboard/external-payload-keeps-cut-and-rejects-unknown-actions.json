@@ -1,0 +1,10 @@
+{
+  "id": "domain/clipboard/external-payload-keeps-cut-and-rejects-unknown-actions",
+  "kind": "domain",
+  "summary": "The GNOME clipboard format carries copy or cut ahead of the URIs; any other action is refused",
+  "steps": [
+    {"expect": "clipboard_payload", "format": "gnome", "text": "cut\nfile:///tmp/a\n", "is": "accepted", "action": "cut"},
+    {"expect": "clipboard_payload", "format": "gnome", "text": "copy\nsmb://host/share/a\n", "is": "accepted", "action": "copy"},
+    {"expect": "clipboard_payload", "format": "gnome", "text": "delete\nfile:///tmp/a", "is": "rejected"}
+  ]
+}

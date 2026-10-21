@@ -1,0 +1,9 @@
+{
+  "id": "domain/location/hostname-is-folded-but-an-opaque-authority-is-not",
+  "kind": "domain",
+  "summary": "A host name is lower-cased; the escaped-URI authority of an archive location keeps its case",
+  "steps": [
+    {"expect": "location", "input": "SMB://HOST/Share", "canonical": "smb://host/Share"},
+    {"expect": "location", "input": "archive://file%253A%252F%252F%252FA%252FB.zip/", "canonical": "archive://file%253A%252F%252F%252FA%252FB.zip/"}
+  ]
+}

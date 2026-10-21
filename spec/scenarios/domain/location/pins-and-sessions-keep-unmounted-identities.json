@@ -1,0 +1,14 @@
+{
+  "id": "domain/location/pins-and-sessions-keep-unmounted-identities",
+  "kind": "domain",
+  "summary": "Pinned locations and saved sessions keep remote and missing locations as written, across a save and reload",
+  "steps": [
+    {"do": "pin", "subject": "pins", "uri": "smb://offline/share/reports"},
+    {"do": "pin", "subject": "pins", "uri": "sftp://offline/home/me"},
+    {"do": "pin", "subject": "pins", "uri": "file:///missing"},
+    {"do": "save", "subject": "pins"},
+    {"do": "reload", "subject": "pins"},
+    {"expect": "pins", "contains": ["smb://offline/share/reports", "sftp://offline/home/me", "file:///missing"]},
+    {"expect": "session", "round_trip": ["smb://offline/share/reports", "sftp://offline/home/me", "file:///missing"]}
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "id": "domain/location/older-session-files-migrate-and-are-rewritten-as-v2",
+  "kind": "domain",
+  "summary": "A version 1 session, including bare paths, migrates to URIs and is written back as version 2",
+  "steps": [
+    {"expect": "session", "decode": {"locations": ["file:///tmp/legacy", "/tmp/bare"]}, "locations": ["file:///tmp/legacy", "file:///tmp/bare"], "rewritten_as": {"schema_version": 2, "locations": ["file:///tmp/legacy", "file:///tmp/bare"]}}
+  ]
+}

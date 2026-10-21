@@ -1,0 +1,8 @@
+{
+  "id": "domain/location/redacts-remote-path-details",
+  "kind": "domain",
+  "summary": "A remote location is redacted to its scheme and host",
+  "steps": [
+    {"expect": "location", "input": "sftp://host/private/name", "redacted": "sftp://host/\u2026"}
+  ]
+}

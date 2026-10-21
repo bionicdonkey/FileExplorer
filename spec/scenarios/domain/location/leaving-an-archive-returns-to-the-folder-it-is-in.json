@@ -1,0 +1,10 @@
+{
+  "id": "domain/location/leaving-an-archive-returns-to-the-folder-it-is-in",
+  "kind": "domain",
+  "summary": "Up from an archive root goes to the folder containing the archive; up from inside goes to the archive root",
+  "steps": [
+    {"expect": "location", "input": "file:///home/user/Backups/photos.zip", "archive_contents": true, "as": "root"},
+    {"expect": "location", "input": "$root", "parent": "file:///home/user/Backups"},
+    {"expect": "location", "input": {"join": ["$root", "Holiday"]}, "parent": "$root"}
+  ]
+}

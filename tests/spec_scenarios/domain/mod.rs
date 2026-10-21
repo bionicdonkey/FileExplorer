@@ -21,6 +21,7 @@ use std::collections::HashMap;
 use crate::{effective_steps, Check, Mode};
 
 mod ops;
+mod pure;
 mod search;
 
 type SharedSink = Rc<RefCell<DirectoryPageSink>>;
@@ -91,6 +92,7 @@ pub struct World {
     navigation: NavigationCoordinator,
     ops: ops::Ops,
     search: search::Search,
+    pure: pure::Pure,
     pub bound: RefCell<HashMap<String, Bound>>,
     pub default_capabilities: Value,
 }
@@ -107,6 +109,7 @@ pub fn run(scenario: &Value, mode: Mode) -> Check {
         directory,
         ops: ops::Ops::new(),
         search: search::Search::new(tab.clone()),
+        pure: pure::Pure::default(),
         tab,
         bound: RefCell::new(HashMap::new()),
         default_capabilities: scenario["given"]["capabilities"].clone(),
@@ -132,6 +135,8 @@ fn step_once(world: &World, step: &Value) -> Check {
             "search" => search::action(world, action, step),
             "clock" => search::clock_action(world, action, step),
             "search_history" => search::history_action(world, action, step),
+            "clipboard" => pure::clipboard_action(world, action, step),
+            "pins" => pure::pins_action(world, action, step),
             "reducer" => ops::reducer_action(world, action, step),
             other => Err(format!("subject {other:?} is not implemented by the domain runner yet")),
         };
@@ -154,6 +159,12 @@ fn step_once(world: &World, step: &Value) -> Check {
         Some("request_cancelled") if step["port"].as_str() == Some("search") => search::expect_cancelled(world, step),
         Some("view") if step["subject"].as_str() == Some("search") => search::expect_view(world, step),
         Some("search_history") => search::history_expectation(world, step),
+        Some("location") => pure::expect_location(world, step),
+        Some("session") => pure::expect_session(world, step),
+        Some("named_child") => pure::expect_named_child(world, step),
+        Some("clipboard_payload") => pure::expect_clipboard_payload(world, step),
+        Some("clipboard") => pure::expect_clipboard(world, step),
+        Some("pins") => pure::expect_pins(world, step),
         Some("port_requests") => expect_port_requests(world, step),
         Some("request_cancelled") => expect_cancelled(world, step),
         Some("view") => expect_view(world, step),

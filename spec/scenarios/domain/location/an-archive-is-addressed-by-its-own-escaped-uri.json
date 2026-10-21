@@ -1,0 +1,10 @@
+{
+  "id": "domain/location/an-archive-is-addressed-by-its-own-escaped-uri",
+  "kind": "domain",
+  "summary": "The contents of an archive have a canonical location derived from the archive's own URI, which parses back to itself and is not a local path",
+  "note": "The archive:// form is how GVfs addresses archives. The macOS app addresses them its own way and overrides these expectations in platforms.macos.",
+  "steps": [
+    {"expect": "location", "input": "file:///home/user/Downloads/Sample.zip", "archive_contents": "archive://file%253A%252F%252F%252Fhome%252Fuser%252FDownloads%252FSample.zip/"},
+    {"expect": "location", "input": "archive://file%253A%252F%252F%252Fhome%252Fuser%252FDownloads%252FSample.zip/", "canonical": "archive://file%253A%252F%252F%252Fhome%252Fuser%252FDownloads%252FSample.zip/", "inside_archive": true, "local_path": null}
+  ]
+}

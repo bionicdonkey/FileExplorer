@@ -1,0 +1,20 @@
+{
+  "id": "domain/clipboard/a-cut-is-cleared-only-by-its-own-terminal-paste",
+  "kind": "domain",
+  "summary": "A cut leaves the clipboard only when the paste that was started for it finishes terminally; a different paste, a non-terminal finish, or a replacement leaves the right content",
+  "steps": [
+    {"do": "replace", "subject": "clipboard", "format": "uri_list", "action": "cut", "text": "file:///tmp/a"},
+    {"do": "begin_paste", "subject": "clipboard", "id": 7},
+    {"do": "finish_paste", "subject": "clipboard", "id": 8, "terminal": true},
+    {"expect": "clipboard", "mode": "cut", "uris": ["file:///tmp/a"]},
+    {"do": "finish_paste", "subject": "clipboard", "id": 7, "terminal": false},
+    {"expect": "clipboard", "mode": "cut", "uris": ["file:///tmp/a"]},
+    {"do": "finish_paste", "subject": "clipboard", "id": 7, "terminal": true},
+    {"expect": "clipboard", "mode": null},
+    {"do": "replace", "subject": "clipboard", "format": "uri_list", "action": "cut", "text": "file:///tmp/a"},
+    {"do": "begin_paste", "subject": "clipboard", "id": 9},
+    {"do": "replace", "subject": "clipboard", "format": "uri_list", "action": "copy", "text": "file:///tmp/b"},
+    {"do": "finish_paste", "subject": "clipboard", "id": 9, "terminal": true},
+    {"expect": "clipboard", "mode": "copy", "uris": ["file:///tmp/b"]}
+  ]
+}
