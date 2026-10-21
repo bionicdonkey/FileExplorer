@@ -1,0 +1,14 @@
+{
+  "id": "adapter/archives/a-lone-folder-extracts-to-that-folder-beside-the-archive",
+  "kind": "adapter",
+  "summary": "An archive holding a single folder extracts to that folder next to the archive, with no second wrapper inside",
+  "given": {"tree": [{"dir": "work"}, {"copy_fixture": "archives/nested-folder.zip", "to": "work/nested-folder.zip"}, {"dir": "other"}, {"copy_fixture": "archives/nested-folder.7z", "to": "other/nested-folder.7z"}]},
+  "steps": [
+    {"do": "extract", "archive": "work/nested-folder.zip", "into": "work", "as": "zip"},
+    {"expect": "outcome", "ref": "$zip", "is": "succeeded"},
+    {"expect": "tree", "contents": {"work/kit/readme.md": "hello", "work/kit/sub/inner.txt": "inner"}, "absent": ["work/kit/kit"]},
+    {"do": "extract", "archive": "other/nested-folder.7z", "into": "other", "as": "sz"},
+    {"expect": "outcome", "ref": "$sz", "is": "succeeded"},
+    {"expect": "tree", "contents": {"other/kit/readme.md": "hello", "other/kit/sub/inner.txt": "inner"}, "absent": ["other/kit/kit"]}
+  ]
+}

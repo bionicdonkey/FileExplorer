@@ -1,0 +1,14 @@
+{
+  "id": "adapter/archives/an-existing-target-is-a-conflict-before-anything-is-unpacked",
+  "kind": "adapter",
+  "summary": "Copying an entry onto an existing name fails with a conflict, leaves the existing file as it was, and leaves no scratch folder behind",
+  "given": {"tree": [{"copy_fixture": "archives/nested-folder.7z", "to": "nested-folder.7z"}, {"dir": "out"}, {"file": "out/readme.md", "content": "old"}]},
+  "steps": [
+    {"do": "operate", "kind": "copy", "sources": ["in-archive:nested-folder.7z!/kit/readme.md"], "destination": "out", "as": "copy"},
+    {"expect": "outcome", "ref": "$copy", "is": "failed", "error": {"kind": "conflict"}},
+    {"expect": "effect", "ref": "$copy", "is": "unchanged"},
+    {"expect": "tree", "contents": {"out/readme.md": "old"}},
+    {"do": "list", "path": "out", "as": "out"},
+    {"expect": "entries", "ref": "$out", "names": ["readme.md"], "order": "exact"}
+  ]
+}

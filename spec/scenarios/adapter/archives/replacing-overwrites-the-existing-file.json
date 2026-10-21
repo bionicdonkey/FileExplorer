@@ -1,0 +1,11 @@
+{
+  "id": "adapter/archives/replacing-overwrites-the-existing-file",
+  "kind": "adapter",
+  "summary": "With Replace an entry taken out over a file of the same name overwrites it",
+  "given": {"tree": [{"copy_fixture": "archives/nested-folder.7z", "to": "nested-folder.7z"}, {"dir": "out"}, {"file": "out/readme.md", "content": "old"}]},
+  "steps": [
+    {"do": "operate", "kind": "copy", "sources": ["in-archive:nested-folder.7z!/kit/readme.md"], "destination": "out", "decision": "replace", "as": "copy"},
+    {"expect": "outcome", "ref": "$copy", "is": "succeeded"},
+    {"expect": "tree", "contents": {"out/readme.md": "hello"}}
+  ]
+}

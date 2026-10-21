@@ -27,7 +27,7 @@
       "properties": {
         "do": {
           "enum": [
-            "list", "list_pages", "inspect", "manage", "operate", "search", "watch", "mutate", "cancel", "wait",
+            "list", "list_pages", "inspect", "manage", "extract", "compress", "operate", "search", "watch", "mutate", "cancel", "wait",
             "navigate", "back", "forward", "refresh", "retry", "close",
             "type", "submit", "clear",
             "retry_elevated",

@@ -1,0 +1,25 @@
+{
+  "id": "adapter/archives/browse-lists-entries-in-name-order",
+  "kind": "adapter",
+  "summary": "Every supported archive lists as a folder: names in order, folders and files together, one level at a time",
+  "given": {"tree": [{"copy_fixture": "archives/nested-folder.zip", "to": "nested-folder.zip"}, {"copy_fixture": "archives/nested-folder.7z", "to": "nested-folder.7z"}, {"copy_fixture": "archives/sample.zip", "to": "sample.zip"}, {"copy_fixture": "archives/sample.7z", "to": "sample.7z"}, {"copy_fixture": "archives/sample.tar.gz", "to": "sample.tar.gz"}]},
+  "steps": [
+    {"do": "list", "path": "in-archive:nested-folder.zip!/", "as": "zip_root"},
+    {"expect": "entries", "ref": "$zip_root", "names": ["kit"], "order": "exact"},
+    {"expect": "entry", "ref": "$zip_root", "name": "kit", "kind": "directory"},
+    {"do": "list", "path": "in-archive:nested-folder.zip!/kit", "as": "zip_kit"},
+    {"expect": "entries", "ref": "$zip_kit", "names": ["readme.md", "sub"], "order": "exact"},
+    {"do": "list", "path": "in-archive:nested-folder.zip!/kit/sub", "as": "zip_sub"},
+    {"expect": "entries", "ref": "$zip_sub", "names": ["inner.txt"], "order": "exact"},
+    {"do": "list", "path": "in-archive:nested-folder.7z!/kit", "as": "sz_kit"},
+    {"expect": "entries", "ref": "$sz_kit", "names": ["readme.md", "sub"], "order": "exact"},
+    {"do": "list", "path": "in-archive:sample.zip!/", "as": "loose_zip"},
+    {"expect": "entries", "ref": "$loose_zip", "names": ["a.txt", "b.txt", "sub"], "order": "exact"},
+    {"do": "list", "path": "in-archive:sample.7z!/", "as": "loose_7z"},
+    {"expect": "entries", "ref": "$loose_7z", "names": ["a.txt", "b.txt", "sub"], "order": "exact"},
+    {"do": "list", "path": "in-archive:sample.tar.gz!/", "as": "loose_tgz"},
+    {"expect": "entries", "ref": "$loose_tgz", "names": ["a.txt", "b.txt", "sub"], "order": "exact"},
+    {"do": "list", "path": "in-archive:sample.tar.gz!/sub", "as": "tgz_sub"},
+    {"expect": "entries", "ref": "$tgz_sub", "names": ["c.txt"], "order": "exact"}
+  ]
+}

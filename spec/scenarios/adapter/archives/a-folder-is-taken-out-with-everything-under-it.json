@@ -1,0 +1,11 @@
+{
+  "id": "adapter/archives/a-folder-is-taken-out-with-everything-under-it",
+  "kind": "adapter",
+  "summary": "Copying a folder out of an archive brings every file below it",
+  "given": {"tree": [{"copy_fixture": "archives/nested-folder.7z", "to": "nested-folder.7z"}, {"dir": "out"}]},
+  "steps": [
+    {"do": "operate", "kind": "copy", "sources": ["in-archive:nested-folder.7z!/kit"], "destination": "out", "as": "copy"},
+    {"expect": "outcome", "ref": "$copy", "is": "succeeded"},
+    {"expect": "tree", "contents": {"out/kit/readme.md": "hello", "out/kit/sub/inner.txt": "inner"}}
+  ]
+}

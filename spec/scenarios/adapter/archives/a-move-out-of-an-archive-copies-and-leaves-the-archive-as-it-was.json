@@ -1,0 +1,13 @@
+{
+  "id": "adapter/archives/a-move-out-of-an-archive-copies-and-leaves-the-archive-as-it-was",
+  "kind": "adapter",
+  "summary": "An archive is read-only, so moving an entry out copies it; the archive still lists it afterwards",
+  "given": {"tree": [{"copy_fixture": "archives/nested-folder.7z", "to": "nested-folder.7z"}, {"dir": "out"}]},
+  "steps": [
+    {"do": "operate", "kind": "move", "sources": ["in-archive:nested-folder.7z!/kit/readme.md"], "destination": "out", "as": "move"},
+    {"expect": "outcome", "ref": "$move", "is": "succeeded"},
+    {"expect": "tree", "contents": {"out/readme.md": "hello"}},
+    {"do": "list", "path": "in-archive:nested-folder.7z!/kit", "as": "after"},
+    {"expect": "entries", "ref": "$after", "names": ["readme.md", "sub"], "order": "exact"}
+  ]
+}

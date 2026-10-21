@@ -19,11 +19,13 @@ use serde_json::Value;
 use gio::prelude::CancellableExt;
 use zorin_explorer::core::contracts::*;
 use zorin_explorer::core::ports::{DirectoryRepository, FileOperations, SearchRepository};
+use zorin_explorer::application::compression::{compress_blocking, ArchiveFormat};
+use zorin_explorer::application::extraction::extract;
 use zorin_explorer::core::operation_manager::OperationKind;
 use zorin_explorer::core::{Location, OperationManager, OperationState};
 use zorin_explorer::infrastructure::{
-    directory_router::DirectoryRouter, gio_operations, gio_operations::GioOperations,
-    tracker_search::TrackerSearchRepository,
+    archive_operations::ArchiveOperations, directory_router::DirectoryRouter, gio_executor::GioExecutor,
+    gio_operations, gio_operations::GioOperations, tracker_search::TrackerSearchRepository,
 };
 
 use crate::sandbox::Sandbox;
@@ -43,6 +45,10 @@ enum Bound {
     Inspect(RequestOutcome<CapabilitySnapshot>),
     /// An operation manager that persisted its history to a file of its own.
     History(History),
+    /// Extraction: `Ok` or the reason it gave.
+    Extract(Result<(), String>),
+    /// Compression: the archive's path relative to the sandbox, or the reason it gave.
+    Compress(Result<String, String>),
 }
 
 struct History {
@@ -150,7 +156,7 @@ pub fn run(scenario: &Value, mode: Mode) -> Check {
         if let Some(action) = step["do"].as_str() {
             match action {
                 "operate" => {
-                    let run = operate(&sandbox, step, next_id).map_err(at)?;
+                    let run = operate(&context, &sandbox, step, next_id).map_err(at)?;
                     next_id += 1;
                     if mode == Mode::Excluded {
                         return expect_unsupported(&run).map_err(at);
@@ -173,6 +179,14 @@ pub fn run(scenario: &Value, mode: Mode) -> Check {
                         };
                     }
                     runs.insert(step["as"].as_str().unwrap_or("_").to_string(), Bound::Search(outcome));
+                }
+                "extract" => {
+                    let result = extract_archive(&sandbox, step).map_err(at)?;
+                    runs.insert(step["as"].as_str().unwrap_or("_").to_string(), Bound::Extract(result));
+                }
+                "compress" => {
+                    let result = compress_sources(&sandbox, step).map_err(at)?;
+                    runs.insert(step["as"].as_str().unwrap_or("_").to_string(), Bound::Compress(result));
                 }
                 "manage" => {
                     let history = manage(&sandbox, step).map_err(at)?;
@@ -199,7 +213,7 @@ pub fn run(scenario: &Value, mode: Mode) -> Check {
     Ok(())
 }
 
-fn operate(sandbox: &Sandbox, step: &Value, id: u64) -> Result<Run, String> {
+fn operate(context: &glib::MainContext, sandbox: &Sandbox, step: &Value, id: u64) -> Result<Run, String> {
     let kind = match step["kind"].as_str().ok_or("operate needs `kind`")? {
         "copy" => MutationKind::Copy,
         "move" => MutationKind::Move,
@@ -229,12 +243,31 @@ fn operate(sandbox: &Sandbox, step: &Value, id: u64) -> Result<Run, String> {
         Some("cancel_remaining") => Some(ConflictDecision::CancelRemaining),
         Some(other) => return Err(format!("unknown decision {other:?}")),
     };
-    let mut events = Vec::new();
-    let mut sink = |event| events.push(event);
-    match decision {
-        Some(decision) => gio_operations::execute_with_decision(request, decision, &mut sink),
-        None => gio_operations::execute(request, &mut sink),
-    }
+    let events = if request.sources.iter().any(Location::is_inside_archive) {
+        // Entries inside an archive are taken out by the archive adapter, asynchronously.
+        let adapter = ArchiveOperations::new(Rc::new(GioOperations::new(context.clone())), context.clone(), GioExecutor::shared());
+        let received: Rc<RefCell<Vec<OperationEvent>>> = Rc::default();
+        let out = received.clone();
+        let sink: zorin_explorer::core::ports::OperationSink = Box::new(move |event| out.borrow_mut().push(event));
+        match decision {
+            Some(decision) => adapter.submit_with_decision(request, decision, sink),
+            None => adapter.submit(request, sink),
+        }
+        if !received.borrow().is_empty() {
+            return Err("an event ran inline before the adapter returned".into());
+        }
+        pump(context, || received.borrow().last().is_some_and(OperationEvent::is_terminal))?;
+        let collected = received.borrow().clone();
+        collected
+    } else {
+        let mut events = Vec::new();
+        let mut sink = |event| events.push(event);
+        match decision {
+            Some(decision) => gio_operations::execute_with_decision(request, decision, &mut sink),
+            None => gio_operations::execute(request, &mut sink),
+        }
+        events
+    };
     let run = Run { events };
     // The runner checks this itself; scenarios do not repeat it (spec 3.2).
     let sequences: Vec<u64> = run.events.iter().map(sequence).collect();
@@ -255,6 +288,12 @@ fn expect_unsupported(run: &Run) -> Check {
 
 /// A sandbox-relative path, or a URI when the text names a scheme.
 fn locate(sandbox: &Sandbox, text: &str) -> Result<Location, String> {
+    // `in-archive:ARCHIVE!/INNER` names an entry inside a local archive; INNER is URI-escaped.
+    if let Some(rest) = text.strip_prefix("in-archive:") {
+        let (archive, inner) = rest.split_once("!/").ok_or("in-archive: needs `ARCHIVE!/INNER`")?;
+        let root = Location::from_local_path(&sandbox.path(archive)).archive_contents().map_err(|e| format!("{archive}: {e:?}"))?;
+        return Location::from_uri(&format!("{}{inner}", root.uri())).map_err(|e| format!("bad archive entry {inner:?}: {e:?}"));
+    }
     if text.contains("://") {
         Location::from_uri(text).map_err(|e| format!("bad location {text:?}: {e:?}"))
     } else {
@@ -490,6 +529,57 @@ fn expect_history(sandbox: &Sandbox, history: &History, step: &Value) -> Check {
     Ok(())
 }
 
+/// Extracts through the application's own entry point and waits for the operation to finish.
+/// That entry point schedules on the process-wide default context, so this pumps that one.
+fn extract_archive(sandbox: &Sandbox, step: &Value) -> Result<Result<(), String>, String> {
+    let default = glib::MainContext::default();
+    let _guard = default.acquire().map_err(|e| e.to_string())?;
+    let manager = OperationManager::default();
+    let archive = locate(sandbox, step["archive"].as_str().ok_or("extract needs `archive`")?)?;
+    let parent = locate(sandbox, step["into"].as_str().unwrap_or("."))?;
+    let failure: Rc<RefCell<Option<String>>> = Rc::default();
+    let reported = failure.clone();
+    if !extract(&manager, &archive, &parent, move |message| *reported.borrow_mut() = Some(message)) {
+        return Ok(Err("extraction did not begin".into()));
+    }
+    pump(&default, || {
+        let records = manager.records();
+        !records.is_empty() && records.iter().all(|r| r.finished_at.is_some())
+    })?;
+    let state = manager.records().last().map(|r| r.state.clone());
+    let reason = failure.borrow().clone();
+    let outcome = match (state, reason) {
+        (Some(OperationState::Completed), None) => Ok(()),
+        (_, Some(message)) => Err(message),
+        (state, None) => Err(format!("extraction ended as {state:?}")),
+    };
+    Ok(outcome)
+}
+
+fn compress_sources(sandbox: &Sandbox, step: &Value) -> Result<Result<String, String>, String> {
+    let format = match step["format"].as_str().ok_or("compress needs `format`")? {
+        "zip" => ArchiveFormat::Zip,
+        "7z" => ArchiveFormat::SevenZip,
+        "tar_gz" => ArchiveFormat::TarGz,
+        other => return Err(format!("unknown archive format {other:?}")),
+    };
+    let sources: Vec<std::path::PathBuf> = paths(&step["sources"]).into_iter().map(|p| sandbox.path(p)).collect();
+    let mut progress = Vec::new();
+    let outcome = compress_blocking(&sources, format, &mut |done, total| progress.push((done, total)), &|| false);
+    Ok(match outcome {
+        Ok(path) => {
+            // Progress climbs to the size of the data and ends there.
+            if let (Some(first), Some(last)) = (progress.first(), progress.last()) {
+                if first.0 != 0 || last.0 != last.1 {
+                    return Err(format!("progress ran {first:?} to {last:?}"));
+                }
+            }
+            Ok(path.strip_prefix(sandbox.path("")).map_err(|e| e.to_string())?.to_string_lossy().into_owned())
+        }
+        Err(error) => Err(error.message()),
+    })
+}
+
 fn expect_unsupported_pages(pages: &[RequestOutcome<DirectorySnapshot>]) -> Check {
     match pages.last() {
         Some(RequestOutcome::Failed(error)) if error.kind == OperationErrorKind::Unsupported => Ok(()),
@@ -573,6 +663,20 @@ fn expectation(sandbox: &Sandbox, runs: &HashMap<String, Bound>, expect: &str, s
                         return Err(format!("outcome is {}, expected {want}", outcome_label(outcome)));
                     }
                     check_failure(outcome, &step["error"])
+                }
+                Bound::Extract(result) => {
+                    let got = if result.is_ok() { "succeeded" } else { "failed" };
+                    if got == want { Ok(()) } else { Err(format!("extraction {got}, expected {want}: {result:?}")) }
+                }
+                Bound::Compress(result) => {
+                    let got = if result.is_ok() { "succeeded" } else { "failed" };
+                    if got != want {
+                        return Err(format!("compression {got}, expected {want}: {result:?}"));
+                    }
+                    match (result, step["archive"].as_str()) {
+                        (Ok(path), Some(expected)) if path != expected => Err(format!("archive is {path:?}, expected {expected:?}")),
+                        _ => Ok(()),
+                    }
                 }
                 Bound::Search(_) | Bound::History(_) => Err("this step has no single outcome".into()),
             }

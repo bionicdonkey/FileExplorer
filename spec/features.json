@@ -123,7 +123,8 @@
         "domain/file-types/an-archive-is-recognised-before-its-type-arrives",
         "domain/file-types/zip-based-documents-belong-to-their-application",
         "domain/file-types/a-folder-opens-as-a-folder-and-a-plain-file-leaves",
-        "domain/file-types/the-table-agrees-with-the-code"
+        "domain/file-types/the-table-agrees-with-the-code",
+        "adapter/archives/browse-lists-entries-in-name-order"
       ],
       "linux": {
         "state": "parity"
@@ -136,7 +137,15 @@
       "id": "archives.copy-out",
       "title": "Entries copied or moved out of an archive",
       "readme": "Entries can be copied or moved out of an archive",
-      "scenarios": [],
+      "scenarios": [
+        "adapter/archives/a-file-is-taken-out-of-an-archive",
+        "adapter/archives/a-folder-is-taken-out-with-everything-under-it",
+        "adapter/archives/an-existing-target-is-a-conflict-before-anything-is-unpacked",
+        "adapter/archives/keeping-both-lands-beside-the-existing-file",
+        "adapter/archives/replacing-overwrites-the-existing-file",
+        "adapter/archives/a-move-out-of-an-archive-copies-and-leaves-the-archive-as-it-was",
+        "adapter/archives/every-format-gives-up-its-entries"
+      ],
       "linux": {
         "state": "parity"
       },
@@ -148,7 +157,12 @@
       "id": "archives.extract",
       "title": "Extract an archive into a folder",
       "readme": "**Extract** puts an archive's contents",
-      "scenarios": [],
+      "scenarios": [
+        "adapter/archives/a-lone-folder-extracts-to-that-folder-beside-the-archive",
+        "adapter/archives/loose-files-extract-into-a-folder-named-after-the-archive",
+        "adapter/archives/an-existing-folder-pushes-the-extraction-to-a-new-name",
+        "adapter/archives/a-broken-archive-reports-why-and-leaves-nothing"
+      ],
       "linux": {
         "state": "parity"
       },
@@ -160,7 +174,13 @@
       "id": "archives.compress",
       "title": "Compress files into zip, 7z or tar.gz",
       "readme": "**Compress** packs selected local files",
-      "scenarios": [],
+      "scenarios": [
+        "adapter/archives/compress-zip-round-trips-awkward-names",
+        "adapter/archives/compress-7z-round-trips-awkward-names",
+        "adapter/archives/compress-tar-gz-round-trips-awkward-names",
+        "adapter/archives/compress-names-a-single-item-after-itself-and-avoids-a-clash",
+        "adapter/archives/compress-refuses-items-from-different-folders-and-leaves-nothing"
+      ],
       "linux": {
         "state": "parity"
       },
@@ -172,7 +192,12 @@
       "id": "archives.in-process",
       "title": "Archive reading and writing without external programs",
       "readme": "Both directions run in-process",
-      "scenarios": [],
+      "scenarios": [
+        "adapter/archives/every-format-gives-up-its-entries",
+        "adapter/archives/compress-zip-round-trips-awkward-names",
+        "adapter/archives/compress-7z-round-trips-awkward-names",
+        "adapter/archives/compress-tar-gz-round-trips-awkward-names"
+      ],
       "linux": {
         "state": "parity"
       },

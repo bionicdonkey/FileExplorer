@@ -1,0 +1,14 @@
+{
+  "id": "adapter/archives/loose-files-extract-into-a-folder-named-after-the-archive",
+  "kind": "adapter",
+  "summary": "An archive of loose files extracts into a new folder named after it with every archive suffix dropped",
+  "given": {"tree": [{"dir": "a"}, {"copy_fixture": "archives/sample.tar.gz", "to": "a/sample.tar.gz"}, {"dir": "b"}, {"copy_fixture": "archives/sample.7z", "to": "b/sample.7z"}]},
+  "steps": [
+    {"do": "extract", "archive": "a/sample.tar.gz", "into": "a", "as": "tgz"},
+    {"expect": "outcome", "ref": "$tgz", "is": "succeeded"},
+    {"expect": "tree", "contents": {"a/sample/a.txt": "a", "a/sample/b.txt": "b", "a/sample/sub/c.txt": "c"}},
+    {"do": "extract", "archive": "b/sample.7z", "into": "b", "as": "sz"},
+    {"expect": "outcome", "ref": "$sz", "is": "succeeded"},
+    {"expect": "tree", "contents": {"b/sample/a.txt": "a", "b/sample/sub/c.txt": "c"}}
+  ]
+}

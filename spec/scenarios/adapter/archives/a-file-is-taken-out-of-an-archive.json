@@ -1,0 +1,12 @@
+{
+  "id": "adapter/archives/a-file-is-taken-out-of-an-archive",
+  "kind": "adapter",
+  "summary": "Copying one entry out of an archive puts it in the folder, reports it completed, and leaves the archive alone",
+  "given": {"tree": [{"copy_fixture": "archives/nested-folder.7z", "to": "nested-folder.7z"}, {"dir": "out"}]},
+  "steps": [
+    {"do": "operate", "kind": "copy", "sources": ["in-archive:nested-folder.7z!/kit/readme.md"], "destination": "out", "as": "copy"},
+    {"expect": "outcome", "ref": "$copy", "is": "succeeded"},
+    {"expect": "effect", "ref": "$copy", "is": "changed"},
+    {"expect": "tree", "contains": ["nested-folder.7z"], "contents": {"out/readme.md": "hello"}}
+  ]
+}

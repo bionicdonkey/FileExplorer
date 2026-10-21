@@ -1,0 +1,11 @@
+{
+  "id": "adapter/archives/an-existing-folder-pushes-the-extraction-to-a-new-name",
+  "kind": "adapter",
+  "summary": "Extracting where a folder of that name already exists leaves it alone and extracts to a numbered folder",
+  "given": {"tree": [{"dir": "a"}, {"copy_fixture": "archives/sample.zip", "to": "a/sample.zip"}, {"dir": "a/sample"}, {"file": "a/sample/keep.txt", "content": "mine"}]},
+  "steps": [
+    {"do": "extract", "archive": "a/sample.zip", "into": "a", "as": "zip"},
+    {"expect": "outcome", "ref": "$zip", "is": "succeeded"},
+    {"expect": "tree", "contents": {"a/sample/keep.txt": "mine", "a/sample (2)/a.txt": "a"}}
+  ]
+}

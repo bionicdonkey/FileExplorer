@@ -1,0 +1,11 @@
+{
+  "id": "adapter/archives/keeping-both-lands-beside-the-existing-file",
+  "kind": "adapter",
+  "summary": "With KeepBoth an entry taken out beside a file of the same name gets a numbered name",
+  "given": {"tree": [{"copy_fixture": "archives/nested-folder.7z", "to": "nested-folder.7z"}, {"dir": "out"}, {"file": "out/readme.md", "content": "old"}]},
+  "steps": [
+    {"do": "operate", "kind": "copy", "sources": ["in-archive:nested-folder.7z!/kit/readme.md"], "destination": "out", "decision": "keep_both", "as": "copy"},
+    {"expect": "outcome", "ref": "$copy", "is": "succeeded"},
+    {"expect": "tree", "contents": {"out/readme.md": "old", "out/readme (2).md": "hello"}}
+  ]
+}

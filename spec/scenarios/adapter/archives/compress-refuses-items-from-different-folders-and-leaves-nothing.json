@@ -1,0 +1,18 @@
+{
+  "id": "adapter/archives/compress-refuses-items-from-different-folders-and-leaves-nothing",
+  "kind": "adapter",
+  "summary": "Items from different folders, an empty selection and a missing source all fail, and no archive or scratch folder is left",
+  "given": {"tree": [{"file": "one/a", "content": "a"}, {"file": "two/b", "content": "b"}]},
+  "steps": [
+    {"do": "compress", "sources": ["one/a", "two/b"], "format": "tar_gz", "as": "mixed"},
+    {"expect": "outcome", "ref": "$mixed", "is": "failed"},
+    {"do": "compress", "sources": [], "format": "tar_gz", "as": "none"},
+    {"expect": "outcome", "ref": "$none", "is": "failed"},
+    {"do": "compress", "sources": ["gone"], "format": "tar_gz", "as": "missing"},
+    {"expect": "outcome", "ref": "$missing", "is": "failed"},
+    {"do": "list", "path": ".", "as": "root"},
+    {"expect": "entries", "ref": "$root", "names": ["one", "two"], "order": "any"},
+    {"do": "list", "path": "one", "as": "one"},
+    {"expect": "entries", "ref": "$one", "names": ["a"], "order": "exact"}
+  ]
+}

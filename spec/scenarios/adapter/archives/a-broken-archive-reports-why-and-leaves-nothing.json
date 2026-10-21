@@ -1,0 +1,12 @@
+{
+  "id": "adapter/archives/a-broken-archive-reports-why-and-leaves-nothing",
+  "kind": "adapter",
+  "summary": "An archive that cannot be read fails with a reason and leaves no partial output or scratch folder",
+  "given": {"tree": [{"dir": "a"}, {"file": "a/bad.zip", "content": "not an archive"}]},
+  "steps": [
+    {"do": "extract", "archive": "a/bad.zip", "into": "a", "as": "bad"},
+    {"expect": "outcome", "ref": "$bad", "is": "failed"},
+    {"do": "list", "path": "a", "as": "after"},
+    {"expect": "entries", "ref": "$after", "names": ["bad.zip"], "order": "exact"}
+  ]
+}

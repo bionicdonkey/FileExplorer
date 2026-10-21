@@ -1,0 +1,12 @@
+{
+  "id": "adapter/archives/compress-names-a-single-item-after-itself-and-avoids-a-clash",
+  "kind": "adapter",
+  "summary": "One item gives an archive named after it; if that name is taken the next free numbered name is used",
+  "given": {"tree": [{"dir": "Trip"}, {"file": "Trip/x", "content": "x"}, {"file": "Trip.tar.gz"}, {"file": "Trip (2).tar.gz"}]},
+  "steps": [
+    {"do": "compress", "sources": ["Trip"], "format": "tar_gz", "as": "first"},
+    {"expect": "outcome", "ref": "$first", "is": "succeeded", "archive": "Trip (3).tar.gz"},
+    {"do": "compress", "sources": ["Trip"], "format": "zip", "as": "zip"},
+    {"expect": "outcome", "ref": "$zip", "is": "succeeded", "archive": "Trip.zip"}
+  ]
+}

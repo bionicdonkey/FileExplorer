@@ -1,0 +1,15 @@
+{
+  "id": "adapter/archives/every-format-gives-up-its-entries",
+  "kind": "adapter",
+  "summary": "An entry can be taken out of a zip, a 7z and a tar.gz alike",
+  "given": {"tree": [{"copy_fixture": "archives/sample.zip", "to": "sample.zip"}, {"copy_fixture": "archives/sample.7z", "to": "sample.7z"}, {"copy_fixture": "archives/sample.tar.gz", "to": "sample.tar.gz"}, {"dir": "out"}]},
+  "steps": [
+    {"do": "operate", "kind": "copy", "sources": ["in-archive:sample.zip!/a.txt"], "target": "out/from-zip.txt", "as": "zip"},
+    {"expect": "outcome", "ref": "$zip", "is": "succeeded"},
+    {"do": "operate", "kind": "copy", "sources": ["in-archive:sample.7z!/a.txt"], "target": "out/from-7z.txt", "as": "sz"},
+    {"expect": "outcome", "ref": "$sz", "is": "succeeded"},
+    {"do": "operate", "kind": "copy", "sources": ["in-archive:sample.tar.gz!/sub/c.txt"], "target": "out/from-tgz.txt", "as": "tgz"},
+    {"expect": "outcome", "ref": "$tgz", "is": "succeeded"},
+    {"expect": "tree", "contents": {"out/from-zip.txt": "a", "out/from-7z.txt": "a", "out/from-tgz.txt": "c"}}
+  ]
+}

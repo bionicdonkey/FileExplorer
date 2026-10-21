@@ -1,0 +1,19 @@
+{
+  "id": "adapter/archives/compress-7z-round-trips-awkward-names",
+  "kind": "adapter",
+  "summary": "Compressing a folder and a file with awkward names into a 7z gives an archive that lists and extracts back to the same content",
+  "given": {"tree": [{"dir": "-folder"}, {"file": "-folder/inner.txt", "content": "inner"}, {"file": "a b*.txt", "content": "outer"}]},
+  "steps": [
+    {"do": "compress", "sources": ["-folder", "a b*.txt"], "format": "7z", "as": "made"},
+    {"expect": "outcome", "ref": "$made", "is": "succeeded", "archive": "Archive.7z"},
+    {"do": "list", "path": "in-archive:Archive.7z!/", "as": "root"},
+    {"expect": "entries", "ref": "$root", "names": ["-folder", "a b*.txt"], "order": "exact"},
+    {"do": "list", "path": "in-archive:Archive.7z!/-folder", "as": "inner"},
+    {"expect": "entries", "ref": "$inner", "names": ["inner.txt"], "order": "exact"},
+    {"do": "mutate", "remove": "-folder"},
+    {"do": "mutate", "remove": "a b*.txt"},
+    {"do": "extract", "archive": "Archive.7z", "into": ".", "as": "back"},
+    {"expect": "outcome", "ref": "$back", "is": "succeeded"},
+    {"expect": "tree", "contents": {"Archive/-folder/inner.txt": "inner", "Archive/a b*.txt": "outer"}}
+  ]
+}
