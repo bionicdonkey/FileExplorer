@@ -1,0 +1,17 @@
+{
+  "id": "domain/operations/linked-elevation-keeps-permission-denied-exception",
+  "kind": "domain",
+  "summary": "During a linked retry a permission-denied inspection does not block the operation: the retry still dispatches and succeeds",
+  "given": {"capabilities": {"version": 1, "supported": ["list", "copy", "create", "search_filename", "trash"], "containment": {"ancestors": ["mock://host/root"]}}},
+  "steps": [
+    {"do": "submit", "subject": "operations", "id": 1, "kind": "copy", "sources": ["file:///source-1"], "destination": "file:///destination", "as": "op1"},
+    {"port": "capabilities", "request": 1, "respond": {"failed": {"kind": "permission_denied"}}},
+    {"do": "retry_elevated", "subject": "operations", "ref": "$op1", "id": 2, "as": "op2"},
+    {"port": "capabilities", "request": 2, "respond": {"failed": {"kind": "permission_denied"}}},
+    {"port": "capabilities", "request": 3, "respond": {"succeeded": {}}},
+    {"expect": "port_requests", "port": "operations", "count": 1, "last": {"id": 2}},
+    {"port": "operations", "request": 1, "emit": [{"succeeded": {"effect": "unchanged"}}]},
+    {"expect": "record", "ref": "$op2", "state": "succeeded"},
+    {"expect": "record", "ref": "$op1", "events": ["failed"]}
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "id": "domain/operations/elevated-retry-needs-a-new-id-and-succeeds-when-eligible",
+  "kind": "domain",
+  "summary": "After an unchanged local permission failure a linked retry is allowed only under a new operation id; it records what it retried and leaves the original untouched",
+  "given": {"capabilities": {"version": 1, "supported": ["list", "copy", "create"], "containment": "opaque"}},
+  "steps": [
+    {"do": "submit", "subject": "operations", "id": 1, "kind": "copy", "sources": ["file:///source"], "destination": "file:///destination", "as": "op1"},
+    {"port": "capabilities", "request": 1, "respond": {"succeeded": {}}},
+    {"port": "capabilities", "request": 2, "respond": {"succeeded": {}}},
+    {"port": "operations", "request": 1, "emit": ["started", {"failed": {"kind": "permission_denied", "effect": "unchanged", "remaining": ["file:///source"]}}]},
+    {"expect": "record", "ref": "$op1", "state": "failed", "error": "permission_denied"},
+    {"do": "retry_elevated", "subject": "operations", "ref": "$op1", "id": 1, "as_result": "same"},
+    {"expect": "submit_result", "ref": "$same", "is": "refused"},
+    {"do": "retry_elevated", "subject": "operations", "ref": "$op1", "id": 2, "as": "op2", "as_result": "retry"},
+    {"expect": "submit_result", "ref": "$retry", "is": "accepted"},
+    {"port": "capabilities", "request": 3, "respond": {"succeeded": {}}},
+    {"port": "capabilities", "request": 4, "respond": {"succeeded": {}}},
+    {"port": "operations", "request": 2, "emit": ["started", {"succeeded": {"effect": "changed", "completed": ["file:///source"]}}]},
+    {"expect": "record", "ref": "$op2", "state": "succeeded", "retry_of": "$op1"},
+    {"expect": "record", "ref": "$op1", "state": "failed", "events": ["started", "failed"]}
+  ]
+}

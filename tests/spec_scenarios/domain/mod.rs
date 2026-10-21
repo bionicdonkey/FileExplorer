@@ -16,7 +16,11 @@ use zorin_explorer::core::navigation::{NavigationStatus, TabState};
 use zorin_explorer::core::ports::*;
 use zorin_explorer::core::{Location, ResolvedLocation};
 
+use std::collections::HashMap;
+
 use crate::{effective_steps, Check, Mode};
+
+mod ops;
 
 type SharedSink = Rc<RefCell<DirectoryPageSink>>;
 
@@ -41,11 +45,11 @@ impl DirectoryRepository for ScriptedDirectory {
     }
 }
 
-fn location(uri: &str) -> Result<Location, String> {
+pub fn location(uri: &str) -> Result<Location, String> {
     Location::from_uri(uri).map_err(|e| format!("bad location {uri:?}: {e:?}"))
 }
 
-fn error_kind(name: &str) -> Result<OperationErrorKind, String> {
+pub fn error_kind(name: &str) -> Result<OperationErrorKind, String> {
     use OperationErrorKind::*;
     Ok(match name {
         "permission_denied" => PermissionDenied,
@@ -73,10 +77,20 @@ fn status_name(status: &NavigationStatus) -> &'static str {
     }
 }
 
-struct World {
+/// What a step's `as` name stands for.
+pub enum Bound {
+    Op(OperationId),
+    Submit(Result<OperationId, OperationErrorKind>),
+    Cancel(zorin_explorer::application::operations::CancelResult),
+}
+
+pub struct World {
     directory: Rc<ScriptedDirectory>,
     tab: Rc<RefCell<TabState>>,
     navigation: NavigationCoordinator,
+    ops: ops::Ops,
+    pub bound: RefCell<HashMap<String, Bound>>,
+    pub default_capabilities: Value,
 }
 
 pub fn run(scenario: &Value, mode: Mode) -> Check {
@@ -90,6 +104,9 @@ pub fn run(scenario: &Value, mode: Mode) -> Check {
         navigation: NavigationCoordinator::new(tab.clone(), directory.clone()),
         directory,
         tab,
+        ops: ops::Ops::new(),
+        bound: RefCell::new(HashMap::new()),
+        default_capabilities: scenario["given"]["capabilities"].clone(),
     };
     for (index, step) in effective_steps(scenario).iter().enumerate() {
         step_once(&world, step).map_err(|e| format!("step {index}: {e}"))?;
@@ -102,13 +119,24 @@ fn step_once(world: &World, step: &Value) -> Check {
         let subject = step["subject"].as_str().ok_or("`do` needs a `subject`")?;
         return match subject {
             "navigation" => navigation_action(world, action, step),
+            "operations" => ops::action(world, action, step),
+            "reducer" => ops::reducer_action(world, action, step),
             other => Err(format!("subject {other:?} is not implemented by the domain runner yet")),
         };
     }
     if step["port"].is_string() && step["expect"].is_null() {
-        return script_port(world, step);
+        return match step["port"].as_str() {
+            Some("capabilities") | Some("operations") => ops::script_port(world, step),
+            _ => script_port(world, step),
+        };
     }
     match step["expect"].as_str() {
+        Some("record") | Some("lock_keys") | Some("submit_result") | Some("cancel_result") | Some("reducer") => {
+            ops::expectation(world, step)
+        }
+        Some("port_requests") if matches!(step["port"].as_str(), Some("capabilities") | Some("operations")) => {
+            ops::expect_port_requests(world, step)
+        }
         Some("port_requests") => expect_port_requests(world, step),
         Some("request_cancelled") => expect_cancelled(world, step),
         Some("view") => expect_view(world, step),

@@ -1,0 +1,15 @@
+{
+  "id": "domain/operations/elevated-retry-refused-for-a-remote-location",
+  "kind": "domain",
+  "summary": "A permission failure on a non-file location is never offered an elevated retry",
+  "given": {"capabilities": {"version": 1, "supported": ["list", "copy", "create", "search_filename", "trash"], "containment": {"ancestors": ["mock://host/root"]}}},
+  "steps": [
+    {"do": "submit", "subject": "operations", "id": 1, "kind": "copy", "sources": ["mock://host/remote"], "destination": "file:///destination", "as": "op1"},
+    {"port": "capabilities", "request": 1, "respond": {"succeeded": {}}},
+    {"port": "capabilities", "request": 2, "respond": {"succeeded": {}}},
+    {"port": "operations", "request": 1, "emit": ["started", {"failed": {"kind": "permission_denied", "effect": "unchanged", "remaining": ["mock://host/remote"]}}]},
+    {"expect": "record", "ref": "$op1", "state": "failed", "error": "permission_denied"},
+    {"do": "retry_elevated", "subject": "operations", "ref": "$op1", "id": 2, "as_result": "retry"},
+    {"expect": "submit_result", "ref": "$retry", "is": "refused"}
+  ]
+}

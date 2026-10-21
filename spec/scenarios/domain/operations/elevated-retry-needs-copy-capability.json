@@ -1,0 +1,19 @@
+{
+  "id": "domain/operations/elevated-retry-needs-copy-capability",
+  "kind": "domain",
+  "summary": "A linked elevated retry whose fresh inspection lacks copy fails as capability_changed without starting, and leaves the original record alone",
+  "given": {"capabilities": {"version": 1, "supported": ["list", "copy", "create", "search_filename", "trash"], "containment": {"ancestors": ["mock://host/root"]}}},
+  "steps": [
+    {"do": "submit", "subject": "operations", "id": 1, "kind": "copy", "sources": ["file:///source-1"], "destination": "file:///destination", "as": "op1"},
+    {"port": "capabilities", "request": 1, "respond": {"failed": {"kind": "permission_denied"}}},
+    {"expect": "record", "ref": "$op1", "state": "failed", "error": "permission_denied", "change": "unchanged", "events": ["failed"]},
+    {"do": "retry_elevated", "subject": "operations", "ref": "$op1", "id": 2, "as": "op2", "as_result": "retry"},
+    {"expect": "submit_result", "ref": "$retry", "is": "accepted"},
+    {"port": "capabilities", "request": 2, "respond": {"succeeded": {"without": ["copy"]}}},
+    {"expect": "record", "ref": "$op2", "state": "failed", "error": "capability_changed", "change": "unchanged", "lacks_events": ["started"]},
+    {"expect": "port_requests", "port": "operations", "count": 0},
+    {"expect": "port_requests", "port": "capabilities", "count": 2},
+    {"expect": "lock_keys", "active_count_is": "zero"},
+    {"expect": "record", "ref": "$op1", "events": ["failed"]}
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "id": "domain/operations/cancel-race-preserves-the-backend-outcome",
+  "kind": "domain",
+  "summary": "Cancelling a running operation only requests cancellation; a backend that commits anyway wins. A queued operation cancels before it starts. Locks stay held until the terminal event",
+  "given": {"capabilities": {"version": 1, "supported": ["list", "copy", "create", "search_filename", "trash"], "containment": {"ancestors": ["mock://host/root"]}}},
+  "steps": [
+    {"do": "submit", "subject": "operations", "id": 90, "kind": "copy", "sources": ["file:///a"], "destination": "file:///a/child", "as_result": "recursive"},
+    {"expect": "submit_result", "ref": "$recursive", "is": "refused"},
+    {"do": "submit", "subject": "operations", "id": 1, "kind": "copy", "sources": ["mock://host/source-0"], "destination": "mock://host/destination", "as": "op1"},
+    {"do": "submit", "subject": "operations", "id": 2, "kind": "copy", "sources": ["mock://host/source-0"], "destination": "mock://host/destination", "as": "op2"},
+    {"port": "capabilities", "request": 1, "respond": {"succeeded": {}}},
+    {"port": "capabilities", "request": 2, "respond": {"succeeded": {}}},
+    {"port": "operations", "request": 1, "emit": ["started"]},
+    {"expect": "record", "ref": "$op2", "state": "queued"},
+    {"expect": "lock_keys", "active_count_is": "non_zero"},
+    {"do": "cancel", "subject": "operations", "ref": "$op1", "as_result": "first"},
+    {"expect": "cancel_result", "ref": "$first", "is": "requested"},
+    {"expect": "record", "ref": "$op1", "state": "cancel_requested"},
+    {"expect": "lock_keys", "active_count_is": "non_zero"},
+    {"do": "cancel", "subject": "operations", "ref": "$op2", "as_result": "second"},
+    {"expect": "cancel_result", "ref": "$second", "is": "cancelled_before_start"},
+    {"port": "operations", "request": 1, "emit": [{"succeeded": {"effect": "changed", "completed": ["mock://host/source-0"]}}]},
+    {"expect": "record", "ref": "$op1", "state": "succeeded", "terminal_events": 1},
+    {"expect": "lock_keys", "active_count_is": "zero"}
+  ]
+}

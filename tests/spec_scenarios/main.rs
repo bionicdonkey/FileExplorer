@@ -25,9 +25,13 @@ fn spec_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("spec")
 }
 
+fn try_read_json(path: &Path) -> Result<Value, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))
+}
+
 fn read_json(path: &Path) -> Value {
-    let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-    serde_json::from_str(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+    try_read_json(path).unwrap_or_else(|e| panic!("{e}"))
 }
 
 /// How a feature's state decides what a scenario must do on this platform.
@@ -57,7 +61,9 @@ fn selected_scenarios() -> Vec<Selected> {
             _ => Mode::Normal,
         };
         for id in feature["scenarios"].as_array().into_iter().flatten().filter_map(Value::as_str) {
-            let scenario = read_json(&spec.join("scenarios").join(format!("{id}.json")));
+            // An unreadable scenario fails on its own line; the others still run.
+            let scenario = try_read_json(&spec.join("scenarios").join(format!("{id}.json")))
+                .unwrap_or_else(|e| serde_json::json!({ "kind": "unreadable", "error": e }));
             out.push(Selected {
                 id: id.to_string(),
                 feature: feature["id"].as_str().unwrap_or("?").to_string(),
@@ -95,6 +101,7 @@ fn run_one(selected: &Selected) -> Check {
     match kind {
         "adapter" => adapter::run(&selected.scenario, selected.mode),
         "domain" => domain::run(&selected.scenario, selected.mode),
+        "unreadable" => Err(selected.scenario["error"].as_str().unwrap_or("unreadable").to_string()),
         other => Err(format!("scenario kind {other:?} is not implemented by this runner yet")),
     }
 }

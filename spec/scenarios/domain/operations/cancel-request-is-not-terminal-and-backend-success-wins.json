@@ -1,0 +1,13 @@
+{
+  "id": "domain/operations/cancel-request-is-not-terminal-and-backend-success-wins",
+  "kind": "domain",
+  "summary": "A cancel request event is not terminal; a later backend success is accepted and terminal",
+  "steps": [
+    {"do": "start", "subject": "reducer", "id": 1},
+    {"do": "apply", "subject": "reducer", "event": {"kind": "started", "id": 1, "sequence": 1}, "accepted": true},
+    {"do": "apply", "subject": "reducer", "event": {"kind": "cancel_requested", "id": 1, "sequence": 2}, "accepted": true},
+    {"expect": "reducer", "terminal": false},
+    {"do": "apply", "subject": "reducer", "event": {"kind": "succeeded", "id": 1, "sequence": 3}, "accepted": true},
+    {"expect": "reducer", "terminal": true}
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "id": "domain/operations/decision-skip-never-reaches-the-backend",
+  "kind": "domain",
+  "summary": "Submitting with the skip decision completes without dispatching: nothing started, nothing changed, the source stays remaining",
+  "given": {"capabilities": {"version": 1, "supported": ["list", "copy", "create", "search_filename", "trash"], "containment": {"ancestors": ["mock://host/root"]}}},
+  "steps": [
+    {"do": "submit", "subject": "operations", "id": 1, "kind": "copy", "sources": ["mock://host/source-0"], "destination": "mock://host/destination", "decision": "skip", "as": "op1"},
+    {"expect": "port_requests", "port": "operations", "count": 0},
+    {"expect": "record", "ref": "$op1", "change": "unchanged", "remaining": ["mock://host/source-0"], "lacks_events": ["started"], "events_count": 1}
+  ]
+}

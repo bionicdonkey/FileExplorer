@@ -1,0 +1,17 @@
+{
+  "id": "domain/operations/reducer-rejects-duplicate-out-of-order-wrong-id-and-post-terminal-events",
+  "kind": "domain",
+  "summary": "The event reducer accepts only new, in-order, same-id events before the terminal one",
+  "steps": [
+    {"do": "start", "subject": "reducer", "id": 7},
+    {"do": "apply", "subject": "reducer", "event": {"kind": "started", "id": 7, "sequence": 1}, "accepted": true},
+    {"do": "apply", "subject": "reducer", "event": {"kind": "started", "id": 7, "sequence": 1}, "accepted": false},
+    {"do": "apply", "subject": "reducer", "event": {"kind": "started", "id": 8, "sequence": 2}, "accepted": false},
+    {"do": "apply", "subject": "reducer", "event": {"kind": "progress", "id": 7, "sequence": 3}, "accepted": true},
+    {"do": "apply", "subject": "reducer", "event": {"kind": "progress", "id": 7, "sequence": 2}, "accepted": false},
+    {"do": "apply", "subject": "reducer", "event": {"kind": "succeeded", "id": 7, "sequence": 4}, "accepted": true},
+    {"do": "apply", "subject": "reducer", "event": {"kind": "progress", "id": 7, "sequence": 5}, "accepted": false},
+    {"do": "apply", "subject": "reducer", "event": {"kind": "succeeded", "id": 7, "sequence": 6}, "accepted": false},
+    {"expect": "reducer", "events": 3, "terminal": true}
+  ]
+}

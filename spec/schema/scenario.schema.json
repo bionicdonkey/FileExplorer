@@ -32,17 +32,19 @@
             "type", "submit", "clear",
             "retry_elevated",
             "cut", "copy", "paste", "external_payload",
-            "advance"
+            "advance",
+            "start", "apply"
           ]
         },
         "expect": {
           "enum": [
             "outcome", "events", "effect", "entries", "pages", "tree", "search", "changed", "capability",
-            "port_requests", "request_cancelled", "view", "record", "clipboard"
+            "port_requests", "request_cancelled", "view", "record", "clipboard",
+            "lock_keys", "submit_result", "cancel_result", "reducer"
           ]
         },
-        "port": { "enum": ["directory", "operations", "search"] },
-        "subject": { "enum": ["navigation", "search", "operations", "clipboard", "clock"] },
+        "port": { "enum": ["directory", "capabilities", "operations", "search"] },
+        "subject": { "enum": ["navigation", "search", "operations", "reducer", "clipboard", "clock", "location", "file_types"] },
         "as": { "type": "string" },
         "note": { "type": "string" }
       },

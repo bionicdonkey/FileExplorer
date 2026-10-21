@@ -1,0 +1,12 @@
+{
+  "id": "domain/operations/callbacks-cannot-impersonate-another-request",
+  "kind": "domain",
+  "summary": "An inspection answer that carries another request's id is ignored: nothing is dispatched and the record stays untouched",
+  "given": {"capabilities": {"version": 1, "supported": ["list", "copy", "create", "search_filename", "trash"], "containment": {"ancestors": ["mock://host/root"]}}},
+  "steps": [
+    {"do": "submit", "subject": "operations", "id": 1, "kind": "copy", "sources": ["file:///source-1"], "destination": "file:///destination", "as": "op1"},
+    {"port": "capabilities", "request": 1, "as_id": 999, "respond": {"succeeded": {}}},
+    {"expect": "port_requests", "port": "operations", "count": 0},
+    {"expect": "record", "ref": "$op1", "events": []}
+  ]
+}

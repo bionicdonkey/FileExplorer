@@ -152,7 +152,11 @@
       "id": "operations.progress",
       "title": "Running operations in the status bar with progress and cancel",
       "readme": "Everything running",
-      "scenarios": [],
+      "scenarios": [
+        "domain/operations/cancel-race-preserves-the-backend-outcome",
+        "domain/operations/reducer-rejects-duplicate-out-of-order-wrong-id-and-post-terminal-events",
+        "domain/operations/cancel-request-is-not-terminal-and-backend-success-wins"
+      ],
       "linux": {
         "state": "parity"
       },
@@ -167,7 +171,16 @@
       "scenarios": [
         "adapter/operations/copy-conflict-no-overwrite",
         "adapter/operations/copy-conflict-replace",
-        "adapter/operations/copy-conflict-keep-both"
+        "adapter/operations/copy-conflict-keep-both",
+        "domain/operations/callbacks-cannot-impersonate-another-request",
+        "domain/operations/operation-events-for-another-id-change-nothing",
+        "domain/operations/remote-descendant-and-unproven-targets-are-refused",
+        "domain/operations/refreshed-target-ancestry-blocks-remote-descendant",
+        "domain/operations/create-and-rename-share-locks-and-reinspect-before-mutation",
+        "domain/operations/partial-failure-keeps-completed-items-and-refuses-unconfirmed-delete",
+        "domain/operations/decision-skip-never-reaches-the-backend",
+        "domain/operations/decision-cancel-remaining-never-reaches-the-backend",
+        "domain/operations/opaque-request-blocks-a-trusted-request-and-local-lock-keys-are-sorted"
       ],
       "linux": {
         "state": "parity"
@@ -216,7 +229,14 @@
       "id": "operations.elevation",
       "title": "Retry permission-denied operations with elevation",
       "readme": "Permission-denied operations can be retried with elevation",
-      "scenarios": [],
+      "scenarios": [
+        "domain/operations/elevated-retry-needs-copy-capability",
+        "domain/operations/elevated-retry-needs-create-capability",
+        "domain/operations/linked-elevation-keeps-permission-denied-exception",
+        "domain/operations/elevated-retry-needs-a-new-id-and-succeeds-when-eligible",
+        "domain/operations/elevated-retry-refused-for-a-remote-location",
+        "domain/operations/elevated-retry-refused-when-the-effect-is-uncertain"
+      ],
       "linux": {
         "state": "parity"
       },
