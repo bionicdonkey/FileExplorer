@@ -6,13 +6,18 @@ use crate::core::{
     FileItem,
 };
 use gio::prelude::*;
-use std::{cell::RefCell, collections::HashSet, rc::Rc, time::Duration};
+use std::{cell::RefCell, collections::HashSet, future::Future, pin::Pin, rc::Rc, time::Duration};
+
+/// Waits out the typing debounce. Production waits on a GLib timeout; tests inject their own
+/// so that time can be advanced by hand instead of slept.
+pub type DelayFn = Rc<dyn Fn(Duration) -> Pin<Box<dyn Future<Output = ()>>>>;
 
 #[derive(Clone)]
 pub struct SearchCoordinator {
     tab: Rc<RefCell<TabState>>,
     repository: Rc<dyn SearchRepository>,
     state: Rc<RefCell<SearchState>>,
+    delay: DelayFn,
 }
 
 #[derive(Default)]
@@ -30,7 +35,14 @@ impl SearchCoordinator {
             tab,
             repository,
             state: Rc::new(RefCell::new(SearchState::default())),
+            delay: Rc::new(|duration| Box::pin(glib::timeout_future(duration))),
         }
+    }
+
+    /// Replaces how the debounce delay is awaited. Intended for tests.
+    pub fn with_delay(mut self, delay: DelayFn) -> Self {
+        self.delay = delay;
+        self
     }
 
     pub fn outcome(&self) -> Option<SearchOutcome> {
@@ -94,8 +106,9 @@ impl SearchCoordinator {
             return false;
         };
         let search = self.clone();
+        let delay = (self.delay)(Duration::from_millis(180));
         glib::MainContext::ref_thread_default().spawn_local(async move {
-            glib::timeout_future(Duration::from_millis(180)).await;
+            delay.await;
             if !request.cancellable.is_cancelled() {
                 search.dispatch(request, changed);
             }
