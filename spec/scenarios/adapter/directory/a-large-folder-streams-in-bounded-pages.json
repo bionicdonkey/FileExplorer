@@ -1,0 +1,11 @@
+{
+  "id": "adapter/directory/a-large-folder-streams-in-bounded-pages",
+  "kind": "adapter",
+  "summary": "A folder of ten thousand files arrives as pages with a small first page and exactly one terminal page",
+  "given": {"tree": [{"generate": "big", "count": 10000, "pattern": "file-{n:05}.txt"}]},
+  "steps": [
+    {"do": "list_pages", "path": "big", "as": "pages"},
+    {"expect": "outcome", "ref": "$pages", "is": "succeeded"},
+    {"expect": "pages", "ref": "$pages", "first_page_max": 500, "total": 10000, "terminal": "exactly_one"}
+  ]
+}

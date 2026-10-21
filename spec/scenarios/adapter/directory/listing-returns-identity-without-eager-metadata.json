@@ -1,0 +1,15 @@
+{
+  "id": "adapter/directory/listing-returns-identity-without-eager-metadata",
+  "kind": "adapter",
+  "summary": "A listing returns identity, kind and access rights for every entry, hidden ones included, but leaves size, date and content type for the rows that become visible",
+  "given": {"tree": [{"file": "data.txt", "content": "hello"}, {"dir": "folder"}, {"file": ".hidden", "content": "x"}]},
+  "steps": [
+    {"do": "list", "path": ".", "as": "list"},
+    {"expect": "outcome", "ref": "$list", "is": "succeeded"},
+    {"expect": "entries", "ref": "$list", "names": [".hidden", "data.txt", "folder"], "order": "any"},
+    {"expect": "pages", "ref": "$list", "terminal": "exactly_one"},
+    {"expect": "entry", "ref": "$list", "name": "data.txt", "kind": "file", "size": null, "modified": null, "content_type": null, "has": ["open", "copy", "move", "rename", "trash", "delete"], "path": "data.txt"},
+    {"expect": "entry", "ref": "$list", "name": "folder", "kind": "directory"},
+    {"expect": "capability", "ref": "$list", "has": ["list", "rename"], "stable_order": false}
+  ]
+}

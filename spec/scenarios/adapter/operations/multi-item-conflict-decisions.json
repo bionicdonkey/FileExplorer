@@ -1,0 +1,16 @@
+{
+  "id": "adapter/operations/multi-item-conflict-decisions",
+  "kind": "adapter",
+  "summary": "Copying two files onto existing names: KeepBoth adds numbered siblings, Replace overwrites, and Skip changes nothing and leaves both sources remaining",
+  "given": {"tree": [{"file": "source/a.txt", "content": "new"}, {"file": "source/b.txt", "content": "new"}, {"file": "destination/a.txt", "content": "old"}, {"file": "destination/b.txt", "content": "old"}]},
+  "steps": [
+    {"do": "operate", "kind": "copy", "sources": ["source/a.txt", "source/b.txt"], "destination": "destination", "decision": "keep_both", "as": "keep"},
+    {"expect": "outcome", "ref": "$keep", "is": "succeeded"},
+    {"expect": "tree", "contains": ["destination/a (2).txt", "destination/b (2).txt"], "contents": {"destination/a.txt": "old", "destination/a (2).txt": "new"}},
+    {"do": "operate", "kind": "copy", "sources": ["source/a.txt", "source/b.txt"], "destination": "destination", "decision": "replace", "as": "replace"},
+    {"expect": "outcome", "ref": "$replace", "is": "succeeded"},
+    {"expect": "tree", "contents": {"destination/a.txt": "new", "destination/b.txt": "new"}},
+    {"do": "operate", "kind": "copy", "sources": ["source/a.txt", "source/b.txt"], "destination": "destination", "decision": "skip", "as": "skip"},
+    {"expect": "effect", "ref": "$skip", "is": "unchanged", "completed": [], "remaining": ["source/a.txt", "source/b.txt"]}
+  ]
+}

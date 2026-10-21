@@ -79,6 +79,18 @@ impl Sandbox {
         Ok(())
     }
 
+    /// True when this process can read a mode-000 file, so it cannot see permission failures.
+    pub fn is_privileged(&self) -> Result<bool, String> {
+        use std::os::unix::fs::PermissionsExt;
+        let probe = self.path(".privilege-probe");
+        std::fs::write(&probe, b"x").map_err(|e| e.to_string())?;
+        std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0)).map_err(|e| e.to_string())?;
+        let readable = std::fs::read(&probe).is_ok();
+        let _ = std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o644));
+        let _ = std::fs::remove_file(&probe);
+        Ok(readable)
+    }
+
     pub fn remove(&self, relative: &str) -> Check {
         let path = self.path(relative);
         let result = if path.is_dir() { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) };

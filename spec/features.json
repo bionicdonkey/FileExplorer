@@ -86,7 +86,11 @@
       "id": "browsing.streaming",
       "title": "Incremental directory streaming with bounded paging",
       "readme": "Incremental directory streaming with bounded paging",
-      "scenarios": [],
+      "scenarios": [
+        "adapter/directory/listing-returns-identity-without-eager-metadata",
+        "adapter/directory/cancelled-missing-and-offset-listings-are-explicit",
+        "adapter/directory/a-large-folder-streams-in-bounded-pages"
+      ],
       "linux": {
         "state": "parity"
       },
@@ -211,7 +215,12 @@
         "domain/operations/opaque-request-blocks-a-trusted-request-and-local-lock-keys-are-sorted",
         "domain/clipboard/uri-payload-rejects-unsafe-input-and-deduplicates",
         "domain/clipboard/external-payload-keeps-cut-and-rejects-unknown-actions",
-        "domain/clipboard/a-cut-is-cleared-only-by-its-own-terminal-paste"
+        "domain/clipboard/a-cut-is-cleared-only-by-its-own-terminal-paste",
+        "adapter/operations/local-copy-move-conflict-and-delete-effects",
+        "adapter/operations/remote-requests-are-refused-without-mutation",
+        "adapter/operations/capability-inspection-reports-a-missing-parent",
+        "adapter/operations/a-symlink-back-into-the-source-is-refused-before-writing",
+        "adapter/operations/multi-item-conflict-decisions"
       ],
       "linux": {
         "state": "parity"
@@ -266,7 +275,8 @@
         "domain/operations/linked-elevation-keeps-permission-denied-exception",
         "domain/operations/elevated-retry-needs-a-new-id-and-succeeds-when-eligible",
         "domain/operations/elevated-retry-refused-for-a-remote-location",
-        "domain/operations/elevated-retry-refused-when-the-effect-is-uncertain"
+        "domain/operations/elevated-retry-refused-when-the-effect-is-uncertain",
+        "adapter/operations/permission-denied-leaves-everything-unchanged"
       ],
       "linux": {
         "state": "parity"
@@ -283,7 +293,8 @@
         "domain/search/debounce-sends-only-the-latest-query-and-close-cancels",
         "domain/search/typing-while-loading-neither-cancels-navigation-nor-binds-to-the-old-root",
         "domain/search/newest-query-wins-and-clear-restores-the-saved-selection",
-        "domain/search/incomplete-keeps-results-and-rejects-a-navigation-race"
+        "domain/search/incomplete-keeps-results-and-rejects-a-navigation-race",
+        "adapter/search/cancellation-failure-and-unavailable-modes-are-explicit"
       ],
       "linux": {
         "state": "parity"
@@ -296,7 +307,10 @@
       "id": "search.modes-and-bounds",
       "title": "Filename and content search with depth and time bounds",
       "readme": "Filename and content modes",
-      "scenarios": [],
+      "scenarios": [
+        "adapter/search/depth-order-result-and-time-bounds",
+        "adapter/search/never-follows-symlinks-or-decodes-names-as-uris"
+      ],
       "linux": {
         "state": "parity"
       },

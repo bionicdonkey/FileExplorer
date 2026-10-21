@@ -1,0 +1,10 @@
+{
+  "id": "adapter/operations/capability-inspection-reports-a-missing-parent",
+  "kind": "adapter",
+  "summary": "Inspecting a location whose parent does not exist fails as not_found instead of claiming support",
+  "given": {"tree": []},
+  "steps": [
+    {"do": "inspect", "path": "absent/child", "as": "inspection"},
+    {"expect": "outcome", "ref": "$inspection", "is": "failed", "error": {"kind": "not_found"}}
+  ]
+}

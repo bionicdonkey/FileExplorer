@@ -1,0 +1,12 @@
+{
+  "id": "adapter/operations/a-symlink-back-into-the-source-is-refused-before-writing",
+  "kind": "adapter",
+  "summary": "Copying a folder to a target that resolves through a symbolic link to inside the folder itself fails as invalid_request and creates nothing",
+  "given": {"tree": [{"dir": "source"}, {"file": "source/a", "content": "x"}, {"symlink": "alias", "target": "source"}]},
+  "steps": [
+    {"do": "operate", "kind": "copy", "sources": ["source"], "target": "alias/nested", "as": "copy"},
+    {"expect": "outcome", "ref": "$copy", "is": "failed", "error": {"kind": "invalid_request"}},
+    {"expect": "effect", "ref": "$copy", "is": "unchanged"},
+    {"expect": "tree", "absent": ["source/nested"]}
+  ]
+}

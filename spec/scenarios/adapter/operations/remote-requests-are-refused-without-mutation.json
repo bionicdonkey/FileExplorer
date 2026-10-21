@@ -1,0 +1,11 @@
+{
+  "id": "adapter/operations/remote-requests-are-refused-without-mutation",
+  "kind": "adapter",
+  "summary": "The local adapter refuses a request for a remote location as unsupported and changes nothing",
+  "given": {"tree": []},
+  "steps": [
+    {"do": "operate", "kind": "trash", "sources": ["smb://host/share/item"], "as": "trash"},
+    {"expect": "outcome", "ref": "$trash", "is": "failed", "error": {"kind": "unsupported"}},
+    {"expect": "effect", "ref": "$trash", "is": "unchanged"}
+  ]
+}

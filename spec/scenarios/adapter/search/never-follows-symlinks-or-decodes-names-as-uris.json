@@ -1,0 +1,11 @@
+{
+  "id": "adapter/search/never-follows-symlinks-or-decodes-names-as-uris",
+  "kind": "adapter",
+  "summary": "A search does not descend through a symbolic link, and a file name containing a percent sign and a space is returned as that exact path",
+  "note": "outside/ sits beside the search root and is reachable only through root/shortcut, so a search that followed the link would also return report-secret. Non-UTF-8 names stay in the Linux-only tests: APFS cannot hold them.",
+  "given": {"tree": [{"dir": "root"}, {"dir": "outside"}, {"file": "outside/report-secret", "content": "private"}, {"symlink": "root/shortcut", "target": "outside"}, {"file": "root/report-% space"}]},
+  "steps": [
+    {"do": "search", "root": "root", "query": "report", "max_depth": 5, "as": "found"},
+    {"expect": "search", "ref": "$found", "is": "completed", "names": ["report-% space"], "paths": ["root/report-% space"]}
+  ]
+}

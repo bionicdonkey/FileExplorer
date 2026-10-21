@@ -1,0 +1,22 @@
+{
+  "id": "adapter/operations/local-copy-move-conflict-and-delete-effects",
+  "kind": "adapter",
+  "summary": "Copy, a conflicting move that changes nothing, a move, and a delete that stops at a missing item and reports exactly what it did",
+  "given": {"tree": [{"file": "source", "content": "data"}]},
+  "steps": [
+    {"do": "operate", "kind": "copy", "sources": ["source"], "target": "target", "as": "copy"},
+    {"expect": "outcome", "ref": "$copy", "is": "succeeded"},
+    {"expect": "tree", "contains": ["source", "target"], "contents": {"target": "data"}},
+    {"do": "operate", "kind": "move", "sources": ["source"], "target": "target", "as": "conflict"},
+    {"expect": "outcome", "ref": "$conflict", "is": "failed", "error": {"kind": "conflict"}},
+    {"expect": "effect", "ref": "$conflict", "is": "unchanged"},
+    {"expect": "tree", "contains": ["source"], "contents": {"target": "data"}},
+    {"do": "operate", "kind": "move", "sources": ["source"], "target": "moved", "as": "move"},
+    {"expect": "outcome", "ref": "$move", "is": "succeeded"},
+    {"expect": "tree", "contains": ["moved"], "absent": ["source"]},
+    {"do": "operate", "kind": "delete", "sources": ["moved", "source"], "as": "delete"},
+    {"expect": "outcome", "ref": "$delete", "is": "failed"},
+    {"expect": "effect", "ref": "$delete", "is": "partially_changed", "completed": ["moved"]},
+    {"expect": "tree", "absent": ["moved"]}
+  ]
+}

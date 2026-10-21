@@ -1,0 +1,14 @@
+{
+  "id": "adapter/directory/cancelled-missing-and-offset-listings-are-explicit",
+  "kind": "adapter",
+  "summary": "A cancelled listing reports cancelled, a missing folder not_found, and an offset request on an unstably ordered folder unsupported; each reaches its callback after the call returns",
+  "given": {"tree": []},
+  "steps": [
+    {"do": "list", "path": ".", "cancel": "immediately", "as": "cancelled"},
+    {"expect": "outcome", "ref": "$cancelled", "is": "cancelled"},
+    {"do": "list", "path": "missing", "as": "missing"},
+    {"expect": "outcome", "ref": "$missing", "is": "failed", "error": {"kind": "not_found"}},
+    {"do": "list", "path": ".", "offset": 1, "limit": 10, "as": "offset"},
+    {"expect": "outcome", "ref": "$offset", "is": "failed", "error": {"kind": "unsupported"}}
+  ]
+}

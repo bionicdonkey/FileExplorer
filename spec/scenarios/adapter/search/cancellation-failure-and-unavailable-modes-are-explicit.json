@@ -1,0 +1,16 @@
+{
+  "id": "adapter/search/cancellation-failure-and-unavailable-modes-are-explicit",
+  "kind": "adapter",
+  "summary": "Content search without an index is unsupported, a cancelled search is incomplete with reason cancelled, a remote root is unsupported, and a missing root is incomplete with a provider failure",
+  "given": {"tree": [{"file": "unrelated", "content": "report secret contents"}]},
+  "steps": [
+    {"do": "search", "root": ".", "query": "report", "mode": "content", "as": "content"},
+    {"expect": "search", "ref": "$content", "is": "unsupported"},
+    {"do": "search", "root": ".", "query": "report", "cancel": "immediately", "as": "cancelled"},
+    {"expect": "search", "ref": "$cancelled", "is": "incomplete", "reason": "cancelled"},
+    {"do": "search", "root": "smb://host/share", "query": "report", "as": "remote"},
+    {"expect": "search", "ref": "$remote", "is": "unsupported"},
+    {"do": "search", "root": "missing", "query": "report", "as": "missing"},
+    {"expect": "search", "ref": "$missing", "is": "incomplete", "reason": "provider_failure"}
+  ]
+}

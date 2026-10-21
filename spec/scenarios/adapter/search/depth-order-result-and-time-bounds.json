@@ -1,0 +1,18 @@
+{
+  "id": "adapter/search/depth-order-result-and-time-bounds",
+  "kind": "adapter",
+  "summary": "A filename search respects depth, returns matches in name order, stops at the result limit and at the time limit, and says which limit applied",
+  "given": {"tree": [{"dir": "child"}, {"file": "report-z"}, {"file": "report-a"}, {"file": "child/report-nested"}]},
+  "steps": [
+    {"do": "search", "root": ".", "query": "report", "as": "default"},
+    {"expect": "search", "ref": "$default", "is": "completed", "names": ["report-a", "report-z"], "scope_limited": true},
+    {"do": "search", "root": ".", "query": "report", "max_depth": 0, "as": "root_only"},
+    {"expect": "search", "ref": "$root_only", "is": "completed", "names": []},
+    {"do": "search", "root": ".", "query": "report", "max_depth": 2, "as": "deep"},
+    {"expect": "search", "ref": "$deep", "is": "completed", "names": ["report-a", "report-z", "report-nested"]},
+    {"do": "search", "root": ".", "query": "report", "max_depth": 2, "max_results": 1, "as": "one"},
+    {"expect": "search", "ref": "$one", "is": "completed", "names": ["report-a"], "limits": ["result_count"]},
+    {"do": "search", "root": ".", "query": "report", "max_depth": 2, "max_results": 1, "timeout_ms": 0, "as": "expired"},
+    {"expect": "search", "ref": "$expired", "is": "completed", "names": [], "limits": ["time"]}
+  ]
+}
