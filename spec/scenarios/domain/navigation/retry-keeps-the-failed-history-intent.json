@@ -1,0 +1,18 @@
+{
+  "id": "domain/navigation/retry-keeps-the-failed-history-intent",
+  "kind": "domain",
+  "summary": "Retrying a failed back repeats the back movement, so history ends where a successful back would have",
+  "given": {"location": "file:///a"},
+  "steps": [
+    {"do": "navigate", "subject": "navigation", "to": "file:///a"},
+    {"port": "directory", "request": 1, "respond": {"succeeded": {"entries": []}}},
+    {"do": "navigate", "subject": "navigation", "to": "file:///b"},
+    {"port": "directory", "request": 2, "respond": {"succeeded": {"entries": []}}},
+    {"do": "back", "subject": "navigation"},
+    {"port": "directory", "request": 3, "respond": {"failed": {"kind": "mount_unavailable"}}},
+    {"do": "retry", "subject": "navigation"},
+    {"expect": "port_requests", "port": "directory", "count": 4, "last": {"path": "file:///a"}},
+    {"port": "directory", "request": 4, "respond": {"succeeded": {"entries": []}}},
+    {"expect": "view", "subject": "navigation", "can_go_back": false, "forward": "file:///b"}
+  ]
+}

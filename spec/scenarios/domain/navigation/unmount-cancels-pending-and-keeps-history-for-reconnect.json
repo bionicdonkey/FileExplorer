@@ -1,0 +1,26 @@
+{
+  "id": "domain/navigation/unmount-cancels-pending-and-keeps-history-for-reconnect",
+  "kind": "domain",
+  "summary": "Unmounting the current share cancels the pending refresh and keeps its history; retrying reconnects, and a failed reconnect stays unavailable",
+  "given": {"location": "file:///home"},
+  "steps": [
+    {"do": "navigate", "subject": "navigation", "to": "file:///home"},
+    {"port": "directory", "request": 1, "respond": {"succeeded": {"entries": []}}},
+    {"do": "navigate", "subject": "navigation", "to": "smb://host/share/folder"},
+    {"port": "directory", "request": 2, "respond": {"succeeded": {"entries": []}}},
+    {"do": "refresh", "subject": "navigation"},
+    {"do": "unmount", "subject": "navigation", "location": "smb://other/share", "accepted": false},
+    {"do": "unmount", "subject": "navigation", "location": "smb://host/share", "accepted": true},
+    {"expect": "request_cancelled", "port": "directory", "request": 3},
+    {"expect": "view", "subject": "navigation", "content": "unavailable:smb://host/share/folder", "current": "smb://host/share/folder", "back": "file:///home", "has_directory": false},
+    {"do": "retry", "subject": "navigation"},
+    {"expect": "port_requests", "port": "directory", "count": 4, "last": {"path": "smb://host/share/folder"}},
+    {"port": "directory", "request": 3, "respond": {"succeeded": {"entries": ["smb://host/share/folder/x"]}}},
+    {"expect": "view", "subject": "navigation", "content": "unavailable:smb://host/share/folder"},
+    {"port": "directory", "request": 4, "respond": {"failed": {"kind": "mount_unavailable"}}},
+    {"expect": "view", "subject": "navigation", "content": "unavailable:smb://host/share/folder", "location": "smb://host/share/folder", "current": "smb://host/share/folder", "back": "file:///home", "has_directory": false},
+    {"do": "retry", "subject": "navigation"},
+    {"port": "directory", "request": 5, "respond": {"succeeded": {"entries": []}}},
+    {"expect": "view", "subject": "navigation", "back": "file:///home", "content": "directory:smb://host/share/folder"}
+  ]
+}

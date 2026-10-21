@@ -19,7 +19,18 @@
       "title": "Per-tab navigation: the latest request wins and history commits only on success",
       "readme": "Tabs with overflow handling",
       "scenarios": [
-        "domain/navigation/latest-request-wins"
+        "domain/navigation/latest-request-wins",
+        "domain/navigation/refresh-from-a-section-replaces-the-pending-request",
+        "domain/navigation/failure-and-failed-back-keep-view-history-and-retry-target",
+        "domain/navigation/refresh-replaces-the-pending-target-and-close-rejects-late-answers",
+        "domain/navigation/refresh-keeps-existing-selection-and-a-redirect-commits-once",
+        "domain/navigation/retry-keeps-the-failed-history-intent",
+        "domain/navigation/wrong-duplicate-and-mismatched-answers-are-rejected",
+        "domain/navigation/unmount-cancels-pending-and-keeps-history-for-reconnect",
+        "domain/navigation/first-reconnect-commits-initial-history-only-after-success",
+        "domain/navigation/removed-mount-under-a-pending-navigation-keeps-the-unrelated-view",
+        "domain/navigation/removed-current-mount-keeps-an-unrelated-pending-navigation",
+        "domain/navigation/section-overlay-does-not-restore-directory-availability"
       ],
       "linux": {
         "state": "parity"

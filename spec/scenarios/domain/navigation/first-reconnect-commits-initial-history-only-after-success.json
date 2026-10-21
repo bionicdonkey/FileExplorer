@@ -1,0 +1,14 @@
+{
+  "id": "domain/navigation/first-reconnect-commits-initial-history-only-after-success",
+  "kind": "domain",
+  "summary": "A tab that was never loaded has no history until a retry succeeds",
+  "given": {"location": "smb://host/share"},
+  "steps": [
+    {"do": "unmount", "subject": "navigation", "location": "smb://host/share"},
+    {"expect": "view", "subject": "navigation", "current": null},
+    {"do": "retry", "subject": "navigation"},
+    {"expect": "view", "subject": "navigation", "current": null},
+    {"port": "directory", "request": 1, "respond": {"succeeded": {"entries": []}}},
+    {"expect": "view", "subject": "navigation", "current": "smb://host/share"}
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "id": "domain/navigation/refresh-from-a-section-replaces-the-pending-request",
+  "kind": "domain",
+  "summary": "Refreshing while a navigation is pending replaces it with a request for the same target; the section overlay stays until the new request lands",
+  "given": {"location": "file:///home"},
+  "steps": [
+    {"do": "navigate", "subject": "navigation", "to": "file:///home"},
+    {"port": "directory", "request": 1, "respond": {"succeeded": {"entries": []}}},
+    {"do": "show_section", "subject": "navigation", "title": "Network & online"},
+    {"do": "navigate", "subject": "navigation", "to": "smb://host/share"},
+    {"expect": "view", "subject": "navigation", "pending": true},
+    {"do": "refresh", "subject": "navigation"},
+    {"expect": "request_cancelled", "port": "directory", "request": 2},
+    {"expect": "port_requests", "port": "directory", "count": 3, "last": {"path": "smb://host/share"}},
+    {"expect": "view", "subject": "navigation", "pending": true, "content": "section"},
+    {"port": "directory", "request": 2, "respond": {"succeeded": {"entries": []}}},
+    {"expect": "view", "subject": "navigation", "pending": true, "location": "file:///home"},
+    {"port": "directory", "request": 3, "respond": {"succeeded": {"entries": []}}},
+    {"expect": "view", "subject": "navigation", "pending": false, "location": "smb://host/share"}
+  ]
+}

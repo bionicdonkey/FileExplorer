@@ -1,0 +1,20 @@
+{
+  "id": "domain/navigation/refresh-replaces-the-pending-target-and-close-rejects-late-answers",
+  "kind": "domain",
+  "summary": "A refresh cancels the pending request and re-requests the same target; answering the cancelled one commits nothing; closing the tab cancels and further navigation is refused",
+  "given": {"location": "file:///home"},
+  "steps": [
+    {"do": "navigate", "subject": "navigation", "to": "smb://host/share"},
+    {"do": "refresh", "subject": "navigation"},
+    {"expect": "request_cancelled", "port": "directory", "request": 1},
+    {"expect": "port_requests", "port": "directory", "count": 2, "last": {"path": "smb://host/share"}},
+    {"port": "directory", "request": 1, "respond": {"succeeded": {"entries": []}}},
+    {"expect": "view", "subject": "navigation", "current": null},
+    {"do": "close", "subject": "navigation"},
+    {"expect": "request_cancelled", "port": "directory", "request": 2},
+    {"port": "directory", "request": 2, "respond": {"succeeded": {"entries": []}}},
+    {"expect": "view", "subject": "navigation", "current": null, "status": "closed"},
+    {"do": "navigate", "subject": "navigation", "to": "file:///reopened"},
+    {"expect": "port_requests", "port": "directory", "count": 2}
+  ]
+}

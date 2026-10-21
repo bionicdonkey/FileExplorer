@@ -173,6 +173,22 @@ fn navigation_action(world: &World, action: &str, step: &Value) -> Check {
             world.navigation.close_tab();
             true
         }
+        "unmount" => {
+            let handled = world.tab.borrow_mut().mark_unavailable(&location(step["location"].as_str().ok_or("unmount needs `location`")?)?);
+            match step["accepted"].as_bool() {
+                Some(want) if want != handled => return Err(format!("unmount handled is {handled}, expected {want}")),
+                _ => {}
+            }
+            true
+        }
+        "show_section" => {
+            world.tab.borrow_mut().show_section(zorin_explorer::core::sidebar_model::SidebarSection {
+                title: step["title"].as_str().unwrap_or("Section").into(),
+                nodes: vec![],
+                mountables: vec![],
+            });
+            true
+        }
         "select" => {
             world.tab.borrow_mut().selection_keys = step["items"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect();
             true
@@ -240,8 +256,12 @@ fn script_port(world: &World, step: &Value) -> Check {
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
+        let requested = match done["snapshot_for"].as_str() {
+            Some(uri) => location(uri)?,
+            None => request.location.clone(),
+        };
         RequestOutcome::Succeeded(DirectorySnapshot {
-            location: ResolvedLocation { requested: request.location.clone(), resolved },
+            location: ResolvedLocation { requested, resolved: if done["snapshot_for"].is_string() && done["resolved"].is_null() { location(done["snapshot_for"].as_str().unwrap())? } else { resolved } },
             entries,
             capabilities: CapabilitySnapshot::default(),
             next_page: None,
@@ -249,7 +269,8 @@ fn script_port(world: &World, step: &Value) -> Check {
     } else {
         return Err(format!("unknown `respond`: {respond}"));
     };
-    (sink.borrow_mut())(RequestCompletion { id: request.id, outcome });
+    let id = step["as_id"].as_u64().map(RequestId).unwrap_or(request.id);
+    (sink.borrow_mut())(RequestCompletion { id, outcome });
     Ok(())
 }
 
@@ -314,6 +335,56 @@ fn expect_view(world: &World, step: &Value) -> Check {
             if !matches {
                 return Err(mismatch(field, format!("{got:?}"), want));
             }
+        }
+    }
+    if let Some(want) = step.get("content") {
+        let got = match &tab.content {
+            zorin_explorer::core::navigation::TabContent::Directory(l) => format!("directory:{}", l.uri()),
+            zorin_explorer::core::navigation::TabContent::SectionOverview { .. } => "section".to_string(),
+            zorin_explorer::core::navigation::TabContent::Search { .. } => "search".to_string(),
+            zorin_explorer::core::navigation::TabContent::Unavailable(l) => format!("unavailable:{}", l.uri()),
+        };
+        if want.as_str() != Some(got.as_str()) {
+            return Err(mismatch("content", got, want));
+        }
+    }
+    for (field, got) in [
+        ("has_directory", tab.directory.is_some()),
+        ("available", tab.has_available_directory()),
+        ("pending", tab.has_pending_navigation()),
+        ("can_go_back", tab.history.can_go_back()),
+        ("can_go_forward", tab.history.can_go_forward()),
+    ] {
+        if let Some(want) = step.get(field) {
+            if want.as_bool() != Some(got) {
+                return Err(mismatch(field, got.to_string(), want));
+            }
+        }
+    }
+    if let Some(want) = step.get("current") {
+        let got = tab.history.current().map(|l| l.uri().to_string());
+        let matches = match (want, &got) {
+            (Value::Null, None) => true,
+            (Value::String(w), Some(g)) => w == g,
+            _ => false,
+        };
+        if !matches {
+            return Err(mismatch("current", format!("{got:?}"), want));
+        }
+    }
+    if let Some(want) = step.get("selection") {
+        let wanted: Vec<String> = want.as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect();
+        if tab.selection_keys != wanted {
+            return Err(mismatch("selection", format!("{:?}", tab.selection_keys), want));
+        }
+    }
+    if let Some(want) = step.get("failed_location") {
+        let got = match &tab.status {
+            NavigationStatus::Failed { location, .. } => Some(location.uri().to_string()),
+            _ => None,
+        };
+        if got.as_deref() != want.as_str() {
+            return Err(mismatch("failed_location", format!("{got:?}"), want));
         }
     }
     if let Some(want) = step.get("error") {

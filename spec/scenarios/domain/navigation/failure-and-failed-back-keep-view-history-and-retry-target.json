@@ -1,0 +1,24 @@
+{
+  "id": "domain/navigation/failure-and-failed-back-keep-view-history-and-retry-target",
+  "kind": "domain",
+  "summary": "A failed navigation or failed back leaves the view and history untouched and remembers the target; history branches drop the forward entry",
+  "given": {"location": "file:///home"},
+  "steps": [
+    {"do": "navigate", "subject": "navigation", "to": "file:///home"},
+    {"port": "directory", "request": 1, "respond": {"succeeded": {"entries": []}}},
+    {"do": "navigate", "subject": "navigation", "to": "smb://host/share"},
+    {"port": "directory", "request": 2, "respond": {"succeeded": {"entries": []}}},
+    {"do": "navigate", "subject": "navigation", "to": "smb://host/missing"},
+    {"port": "directory", "request": 3, "respond": {"failed": {"kind": "not_found"}}},
+    {"expect": "view", "subject": "navigation", "location": "smb://host/share", "current": "smb://host/share", "status": "failed", "failed_location": "smb://host/missing", "content": "directory:smb://host/share"},
+    {"do": "back", "subject": "navigation"},
+    {"port": "directory", "request": 4, "respond": {"failed": {"kind": "not_found"}}},
+    {"expect": "view", "subject": "navigation", "location": "smb://host/share", "current": "smb://host/share", "status": "failed", "failed_location": "file:///home", "content": "directory:smb://host/share"},
+    {"do": "back", "subject": "navigation"},
+    {"port": "directory", "request": 5, "respond": {"succeeded": {"entries": []}}},
+    {"expect": "view", "subject": "navigation", "location": "file:///home", "forward": "smb://host/share"},
+    {"do": "navigate", "subject": "navigation", "to": "file:///branch"},
+    {"port": "directory", "request": 6, "respond": {"succeeded": {"entries": []}}},
+    {"expect": "view", "subject": "navigation", "forward": null}
+  ]
+}

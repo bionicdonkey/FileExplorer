@@ -1,0 +1,18 @@
+{
+  "id": "domain/navigation/removed-mount-under-a-pending-navigation-keeps-the-unrelated-view",
+  "kind": "domain",
+  "summary": "Unmounting the share a pending navigation targets cancels it but leaves the successfully loaded view, its selection and history alone",
+  "given": {"location": "file:///home"},
+  "steps": [
+    {"do": "navigate", "subject": "navigation", "to": "file:///home"},
+    {"port": "directory", "request": 1, "respond": {"succeeded": {"entries": ["file:///home/selected"]}}},
+    {"do": "select", "subject": "navigation", "items": ["file:///home/selected"]},
+    {"do": "navigate", "subject": "navigation", "to": "smb://host/share/folder"},
+    {"do": "unmount", "subject": "navigation", "location": "smb://host/share", "accepted": true},
+    {"expect": "request_cancelled", "port": "directory", "request": 2},
+    {"port": "directory", "request": 2, "respond": {"succeeded": {"entries": []}}},
+    {"expect": "view", "subject": "navigation", "location": "file:///home", "current": "file:///home", "content": "directory:file:///home", "has_directory": true, "selection": ["file:///home/selected"]},
+    {"do": "retry", "subject": "navigation"},
+    {"expect": "port_requests", "port": "directory", "count": 3, "last": {"path": "smb://host/share/folder"}}
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "id": "domain/navigation/removed-current-mount-keeps-an-unrelated-pending-navigation",
+  "kind": "domain",
+  "summary": "Unmounting the current share does not cancel a pending navigation to somewhere else, which still lands",
+  "given": {"location": "smb://host/share"},
+  "steps": [
+    {"do": "navigate", "subject": "navigation", "to": "smb://host/share"},
+    {"port": "directory", "request": 1, "respond": {"succeeded": {"entries": []}}},
+    {"do": "navigate", "subject": "navigation", "to": "file:///home"},
+    {"do": "unmount", "subject": "navigation", "location": "smb://host/share", "accepted": true},
+    {"expect": "request_cancelled", "port": "directory", "request": 2, "is": false},
+    {"port": "directory", "request": 2, "respond": {"succeeded": {"entries": []}}},
+    {"expect": "view", "subject": "navigation", "location": "file:///home"}
+  ]
+}

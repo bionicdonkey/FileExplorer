@@ -1,0 +1,17 @@
+{
+  "id": "domain/navigation/refresh-keeps-existing-selection-and-a-redirect-commits-once",
+  "kind": "domain",
+  "summary": "A refresh keeps the selected entries that still exist; a redirected navigation commits the resolved location once and clears the selection",
+  "given": {"location": "file:///a"},
+  "steps": [
+    {"do": "navigate", "subject": "navigation", "to": "file:///a"},
+    {"port": "directory", "request": 1, "respond": {"succeeded": {"entries": ["file:///a/keep", "file:///a/gone"]}}},
+    {"do": "select", "subject": "navigation", "items": ["file:///a/keep", "file:///a/gone"]},
+    {"do": "refresh", "subject": "navigation"},
+    {"port": "directory", "request": 2, "respond": {"succeeded": {"entries": ["file:///a/keep"]}}},
+    {"expect": "view", "subject": "navigation", "selection": ["file:///a/keep"], "can_go_back": false},
+    {"do": "navigate", "subject": "navigation", "to": "smb://host/alias"},
+    {"port": "directory", "request": 3, "respond": {"succeeded": {"entries": [], "resolved": "smb://host/resolved"}}},
+    {"expect": "view", "subject": "navigation", "selection": [], "current": "smb://host/resolved", "back": "file:///a"}
+  ]
+}

@@ -33,7 +33,7 @@
             "retry_elevated",
             "cut", "copy", "paste", "external_payload",
             "advance",
-            "start", "apply", "select", "expand_scope", "record_submitted"
+            "start", "apply", "select", "expand_scope", "record_submitted", "unmount", "show_section"
           ]
         },
         "expect": {

@@ -1,0 +1,14 @@
+{
+  "id": "domain/navigation/section-overlay-does-not-restore-directory-availability",
+  "kind": "domain",
+  "summary": "Showing a section over an unmounted location does not make its directory available again",
+  "given": {"location": "file:///mounted"},
+  "steps": [
+    {"do": "navigate", "subject": "navigation", "to": "file:///mounted"},
+    {"port": "directory", "request": 1, "respond": {"succeeded": {"entries": []}}},
+    {"expect": "view", "subject": "navigation", "available": true},
+    {"do": "unmount", "subject": "navigation", "location": "file:///mounted"},
+    {"do": "show_section", "subject": "navigation", "title": "This PC"},
+    {"expect": "view", "subject": "navigation", "available": false}
+  ]
+}

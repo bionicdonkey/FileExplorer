@@ -1,0 +1,15 @@
+{
+  "id": "domain/navigation/wrong-duplicate-and-mismatched-answers-are-rejected",
+  "kind": "domain",
+  "summary": "An answer with another request's id is ignored; an answer for a different location fails the navigation without committing; a repeated answer is ignored",
+  "given": {"location": "file:///home"},
+  "steps": [
+    {"do": "navigate", "subject": "navigation", "to": "smb://host/share"},
+    {"port": "directory", "request": 1, "as_id": 18446744073709551615, "respond": {"succeeded": {}}},
+    {"expect": "view", "subject": "navigation", "status": "loading"},
+    {"port": "directory", "request": 1, "respond": {"succeeded": {"snapshot_for": "file:///wrong"}}},
+    {"expect": "view", "subject": "navigation", "status": "failed", "current": null},
+    {"port": "directory", "request": 1, "respond": {"succeeded": {"entries": []}}},
+    {"expect": "view", "subject": "navigation", "status": "failed", "current": null}
+  ]
+}
