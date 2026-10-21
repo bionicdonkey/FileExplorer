@@ -220,7 +220,8 @@
         "adapter/operations/remote-requests-are-refused-without-mutation",
         "adapter/operations/capability-inspection-reports-a-missing-parent",
         "adapter/operations/a-symlink-back-into-the-source-is-refused-before-writing",
-        "adapter/operations/multi-item-conflict-decisions"
+        "adapter/operations/multi-item-conflict-decisions",
+        "domain/errors/the-table-agrees-with-the-code"
       ],
       "linux": {
         "state": "parity"

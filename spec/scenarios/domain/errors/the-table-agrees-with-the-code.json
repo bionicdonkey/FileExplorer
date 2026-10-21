@@ -1,0 +1,8 @@
+{
+  "id": "domain/errors/the-table-agrees-with-the-code",
+  "kind": "domain",
+  "summary": "Every error kind has the message key and retry class contracts/errors.json gives it, every listed backend failure maps to the listed kind, and no backend text is kept",
+  "steps": [
+    {"expect": "error_table"}
+  ]
+}

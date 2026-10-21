@@ -272,6 +272,24 @@ fn run_check(repo: &Path) -> ExitCode {
     if !uncovered.is_empty() {
         warnings.push(format!("{} feature(s) have no scenarios or ui_tests yet", uncovered.len()));
     }
+    // 6. Scenario ids that the contract documents cite must exist (one `*` matches any text).
+    if let Ok(entries) = fs::read_dir(spec.join("contracts")) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "md") {
+                for cited in cited_scenarios(&fs::read_to_string(&path).unwrap_or_default()) {
+                    let found = match cited.split_once('*') {
+                        Some((prefix, suffix)) => scenarios.keys().any(|id| id.starts_with(prefix) && id.ends_with(suffix)),
+                        None => scenarios.contains_key(&cited),
+                    };
+                    if !found {
+                        problems.push(format!("{}: cites scenario {cited}, which does not exist", path.display()));
+                    }
+                }
+            }
+        }
+    }
+
     for warning in &warnings {
         println!("warning: {warning}");
     }
@@ -290,6 +308,16 @@ fn run_check(repo: &Path) -> ExitCode {
         eprintln!("spec check failed: {} problem(s)", problems.len());
         ExitCode::FAILURE
     }
+}
+
+/// Backtick-quoted `adapter/...` and `domain/...` ids in a document.
+fn cited_scenarios(text: &str) -> Vec<String> {
+    text.split('`')
+        .skip(1)
+        .step_by(2)
+        .filter(|quoted| quoted.starts_with("adapter/") || quoted.starts_with("domain/"))
+        .map(str::to_string)
+        .collect()
 }
 
 fn run_status(repo: &Path) -> ExitCode {

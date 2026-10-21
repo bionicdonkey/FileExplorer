@@ -166,6 +166,7 @@ fn step_once(world: &World, step: &Value) -> Check {
         Some("clipboard_payload") => pure::expect_clipboard_payload(world, step),
         Some("clipboard") => pure::expect_clipboard(world, step),
         Some("pins") => pure::expect_pins(world, step),
+        Some("error_table") => pure::expect_error_table(world, step),
         Some("activation") => filetypes::expect_activation(world, step),
         Some("file_types_table") => filetypes::expect_table(world, step),
         Some("port_requests") => expect_port_requests(world, step),

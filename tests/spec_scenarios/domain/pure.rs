@@ -253,3 +253,63 @@ pub fn expect_pins(world: &World, step: &Value) -> Check {
     }
     Ok(())
 }
+
+// contracts/errors.json against the code.
+
+fn kind_of(name: &str) -> Result<zorin_explorer::core::contracts::OperationErrorKind, String> {
+    super::error_kind(name)
+}
+
+fn retry_of(name: &str) -> Result<zorin_explorer::core::contracts::RetryClass, String> {
+    use zorin_explorer::core::contracts::RetryClass::*;
+    Ok(match name {
+        "never" => Never,
+        "after_refresh" => AfterRefresh,
+        "after_user_action" => AfterUserAction,
+        "transient" => Transient,
+        other => return Err(format!("unknown retry class {other:?}")),
+    })
+}
+
+fn gio_failure(name: &str) -> Result<gio::IOErrorEnum, String> {
+    use gio::IOErrorEnum as E;
+    Ok(match name {
+        "permission_denied" => E::PermissionDenied,
+        "not_mounted" => E::NotMounted,
+        "host_not_found" => E::HostNotFound,
+        "not_connected" => E::NotConnected,
+        "exists" => E::Exists,
+        "would_merge" => E::WouldMerge,
+        "not_found" => E::NotFound,
+        "read_only" => E::ReadOnly,
+        "not_supported" => E::NotSupported,
+        "invalid_argument" => E::InvalidArgument,
+        "invalid_filename" => E::InvalidFilename,
+        "other" => E::Failed,
+        other => return Err(format!("unknown failure {other:?}")),
+    })
+}
+
+/// Every kind's message key and retry class, and every failure's kind, as the code has them.
+pub fn expect_error_table(_world: &World, _step: &Value) -> Check {
+    use zorin_explorer::core::contracts::OperationError;
+    let path = crate::spec_dir().join("contracts/errors.json");
+    let table: Value = serde_json::from_str(&std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    for entry in table["kinds"].as_array().ok_or("kinds must be an array")? {
+        let name = entry["kind"].as_str().unwrap_or("?");
+        let error = OperationError::new(kind_of(name)?, None, None);
+        eq(&format!("{name} message key"), error.message_key, entry["message_key"].as_str().ok_or("needs message_key")?)?;
+        eq(&format!("{name} retry"), error.retry, retry_of(entry["retry"].as_str().ok_or("needs retry")?)?)?;
+    }
+    for entry in table["failures"].as_array().ok_or("failures must be an array")? {
+        let name = entry["failure"].as_str().unwrap_or("?");
+        let raw = glib::Error::new(gio_failure(name)?, "backend text that must not survive");
+        let error = OperationError::from_gio(&raw, None, None);
+        eq(&format!("failure {name}"), error.kind, kind_of(entry["kind"].as_str().ok_or("needs kind")?)?)?;
+        eq(&format!("failure {name} shows only its message key"), error.to_string(), error.message_key.to_string())?;
+    }
+    // Every kind the code has appears in the table, so a new one cannot be added silently.
+    let listed = table["kinds"].as_array().map_or(0, Vec::len);
+    eq("number of error kinds", listed, 11)
+}

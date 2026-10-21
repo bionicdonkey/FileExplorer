@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "note": "Every failure an adapter reports is one of these kinds. The kind fixes the message key and the retry class; nothing else about the underlying error (its text, code or paths) crosses a port. `retry` says what the caller may do next: never = do not offer a retry; after_refresh = refresh, then try again; after_user_action = ask the user (credentials, a permission, a decision); transient = try again as is. Messages are looked up by key, never taken from the platform.",
+  "retry_classes": ["never", "after_refresh", "after_user_action", "transient"],
+  "kinds": [
+    { "kind": "permission_denied", "message_key": "operation.permission-denied", "retry": "after_user_action" },
+    { "kind": "authentication_required", "message_key": "operation.authentication-required", "retry": "after_user_action" },
+    { "kind": "mount_unavailable", "message_key": "operation.mount-unavailable", "retry": "after_user_action" },
+    { "kind": "conflict", "message_key": "operation.conflict", "retry": "after_user_action", "note": "The target already exists and no decision was given. Never overwritten by default." },
+    { "kind": "not_found", "message_key": "operation.not-found", "retry": "after_refresh" },
+    { "kind": "read_only", "message_key": "operation.read-only", "retry": "after_user_action" },
+    { "kind": "unsupported", "message_key": "operation.unsupported", "retry": "never", "note": "Also the explicit outcome for an excluded feature." },
+    { "kind": "capability_changed", "message_key": "operation.capability-changed", "retry": "after_refresh", "note": "The capability snapshot the request was made against is stale, or the action is not supported." },
+    { "kind": "partial_completion", "message_key": "operation.partial-completion", "retry": "after_refresh" },
+    { "kind": "invalid_request", "message_key": "operation.invalid-request", "retry": "never" },
+    { "kind": "unknown", "message_key": "operation.failed", "retry": "after_refresh" }
+  ],
+  "failures": [
+    { "failure": "permission_denied", "kind": "permission_denied" },
+    { "failure": "not_mounted", "kind": "mount_unavailable" },
+    { "failure": "host_not_found", "kind": "mount_unavailable" },
+    { "failure": "not_connected", "kind": "mount_unavailable" },
+    { "failure": "exists", "kind": "conflict" },
+    { "failure": "would_merge", "kind": "conflict" },
+    { "failure": "not_found", "kind": "not_found" },
+    { "failure": "read_only", "kind": "read_only" },
+    { "failure": "not_supported", "kind": "unsupported" },
+    { "failure": "invalid_argument", "kind": "invalid_request" },
+    { "failure": "invalid_filename", "kind": "invalid_request" },
+    { "failure": "other", "kind": "unknown", "note": "Any failure not listed." }
+  ]
+}
