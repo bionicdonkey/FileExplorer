@@ -1,0 +1,11 @@
+{
+  "id": "domain/file-types/seven-zip-browses-locally-and-leaves-when-remote",
+  "kind": "domain",
+  "summary": "A local 7z opens in the window and can be extracted; a remote one leaves the window but can still be extracted; a plain text file is neither",
+  "steps": [
+    {"expect": "activation", "name": "backup.7z", "is": "browse", "content_type": "application/x-7z-compressed", "browses_archive": true, "extractable": true},
+    {"expect": "activation", "name": "backup.7z", "is": "browse", "extractable": true},
+    {"expect": "activation", "name": "notes.txt", "is": "launch_externally", "content_type": "text/plain", "extractable": false},
+    {"expect": "activation", "name": "backup.7z", "is": "launch_externally", "uri": "smb://server/backup.7z", "content_type": "application/x-7z-compressed", "extractable": true}
+  ]
+}

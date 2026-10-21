@@ -1,0 +1,8 @@
+{
+  "id": "domain/file-types/the-table-agrees-with-the-code",
+  "kind": "domain",
+  "summary": "Every mime type and extension in contracts/file-types.json behaves as its rule says, locally and remotely",
+  "steps": [
+    {"expect": "file_types_table"}
+  ]
+}

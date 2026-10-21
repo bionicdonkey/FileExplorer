@@ -1,0 +1,12 @@
+{
+  "id": "domain/file-types/zip-based-documents-belong-to-their-application",
+  "kind": "domain",
+  "summary": "A zip-based document is never browsed as an archive, with or without a content type",
+  "steps": [
+    {"expect": "activation", "name": "report.docx", "is": "launch_externally"},
+    {"expect": "activation", "name": "notes.odt", "is": "launch_externally"},
+    {"expect": "activation", "name": "book.epub", "is": "launch_externally"},
+    {"expect": "activation", "name": "app.apk", "is": "launch_externally"},
+    {"expect": "activation", "name": "report.docx", "is": "launch_externally", "content_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "extractable": false}
+  ]
+}

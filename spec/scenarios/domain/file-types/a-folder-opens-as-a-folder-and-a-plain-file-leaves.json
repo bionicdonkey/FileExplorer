@@ -1,0 +1,9 @@
+{
+  "id": "domain/file-types/a-folder-opens-as-a-folder-and-a-plain-file-leaves",
+  "kind": "domain",
+  "summary": "A directory is shown in the window as itself; an ordinary file is handed to the desktop",
+  "steps": [
+    {"expect": "activation", "name": "Pictures", "is": "browse", "kind": "directory"},
+    {"expect": "activation", "name": "notes.txt", "is": "launch_externally", "content_type": "text/plain"}
+  ]
+}

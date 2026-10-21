@@ -40,7 +40,7 @@
           "enum": [
             "outcome", "events", "effect", "entries", "pages", "tree", "search", "changed", "capability",
             "port_requests", "request_cancelled", "view", "record", "clipboard",
-            "lock_keys", "submit_result", "cancel_result", "reducer", "search_history", "location", "session", "named_child", "clipboard_payload", "pins"
+            "lock_keys", "submit_result", "cancel_result", "reducer", "search_history", "location", "session", "named_child", "clipboard_payload", "pins", "activation", "file_types_table"
           ]
         },
         "port": { "enum": ["directory", "capabilities", "operations", "search"] },

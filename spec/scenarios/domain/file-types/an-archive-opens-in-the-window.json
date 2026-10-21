@@ -1,0 +1,8 @@
+{
+  "id": "domain/file-types/an-archive-opens-in-the-window",
+  "kind": "domain",
+  "summary": "A zip opens inside the window, as a location inside the archive named after the file",
+  "steps": [
+    {"expect": "activation", "name": "holiday.zip", "is": "browse", "content_type": "application/zip", "browses_archive": true}
+  ]
+}

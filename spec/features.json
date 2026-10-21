@@ -113,7 +113,13 @@
       "scenarios": [
         "domain/location/an-archive-is-addressed-by-its-own-escaped-uri",
         "domain/location/a-location-in-an-archive-is-named-not-redacted",
-        "domain/location/leaving-an-archive-returns-to-the-folder-it-is-in"
+        "domain/location/leaving-an-archive-returns-to-the-folder-it-is-in",
+        "domain/file-types/an-archive-opens-in-the-window",
+        "domain/file-types/seven-zip-browses-locally-and-leaves-when-remote",
+        "domain/file-types/an-archive-is-recognised-before-its-type-arrives",
+        "domain/file-types/zip-based-documents-belong-to-their-application",
+        "domain/file-types/a-folder-opens-as-a-folder-and-a-plain-file-leaves",
+        "domain/file-types/the-table-agrees-with-the-code"
       ],
       "linux": {
         "state": "parity"

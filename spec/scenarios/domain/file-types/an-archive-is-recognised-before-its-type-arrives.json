@@ -1,0 +1,8 @@
+{
+  "id": "domain/file-types/an-archive-is-recognised-before-its-type-arrives",
+  "kind": "domain",
+  "summary": "An entry with no content type yet is classified by its name, so a row opened straight after it appears still browses",
+  "steps": [
+    {"expect": "activation", "name": "holiday.tar.gz", "is": "browse", "browses_archive": true}
+  ]
+}

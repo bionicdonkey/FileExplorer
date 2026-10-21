@@ -1,0 +1,74 @@
+{
+  "version": 1,
+  "note": "What opening an entry does. Rules are matched by exact type, never by subtype: a zip-based document is a subtype of zip, and a subtype test would send a report to the archive browser instead of the application that owns it. First match wins, so the document rule comes before the archive rules. An entry whose type has not arrived yet is classified by the type its name implies. `browsable` says whether the application shows the contents in its own window; `local_only` means only when the file is on this machine. `extractable` says whether Extract is offered (never for an archive seen inside another archive). The uti lists name the macOS equivalents and still have to be confirmed against Apple's documentation by the macOS branch that implements them.",
+  "rules": [
+    {
+      "id": "zip-based-documents",
+      "match": {
+        "mime": [
+          "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+          "application/vnd.oasis.opendocument.text",
+          "application/epub+zip",
+          "application/vnd.android.package-archive"
+        ],
+        "uti": [
+          "org.openxmlformats.wordprocessingml.document",
+          "org.openxmlformats.spreadsheetml.sheet",
+          "org.openxmlformats.presentationml.presentation",
+          "org.oasis-open.opendocument.text",
+          "org.idpf.epub-container",
+          "com.android.package-archive"
+        ],
+        "extensions": ["docx", "xlsx", "pptx", "odt", "epub", "apk"]
+      },
+      "family": "document",
+      "browsable": false,
+      "extractable": false,
+      "ownership": "external",
+      "note": "Zip underneath, but opened by the application that owns the format."
+    },
+    {
+      "id": "browsable-archives",
+      "match": {
+        "mime": [
+          "application/zip",
+          "application/x-zip-compressed",
+          "application/vnd.rar",
+          "application/x-rar",
+          "application/x-rar-compressed",
+          "application/x-tar",
+          "application/x-compressed-tar",
+          "application/x-bzip-compressed-tar",
+          "application/x-bzip2-compressed-tar",
+          "application/x-xz-compressed-tar",
+          "application/x-lzma-compressed-tar",
+          "application/x-zstd-compressed-tar",
+          "application/x-tarz",
+          "application/x-cpio",
+          "application/x-xar"
+        ],
+        "uti": ["public.zip-archive", "public.tar-archive", "org.gnu.gnu-zip-tar-archive", "public.cpio-archive"],
+        "extensions": ["zip", "tar", "tar.gz", "tgz", "tar.bz2", "tar.xz", "rar", "cpio"]
+      },
+      "family": "archive",
+      "browsable": true,
+      "extractable": true,
+      "ownership": "app"
+    },
+    {
+      "id": "seven-zip",
+      "match": {
+        "mime": ["application/x-7z-compressed", "application/x-7z-compressed-tar"],
+        "uti": ["org.7-zip.7-zip-archive"],
+        "extensions": ["7z"]
+      },
+      "family": "archive",
+      "browsable": "local_only",
+      "extractable": true,
+      "ownership": "app",
+      "note": "Read from its own local file, because the reader has to seek. A remote 7z leaves the window but can still be extracted once it is local."
+    }
+  ]
+}

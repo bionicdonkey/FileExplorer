@@ -28,7 +28,8 @@
             }
           },
           "family": { "type": "string" },
-          "browsable": { "type": "boolean" },
+          "browsable": { "enum": [true, false, "local_only"] },
+          "extractable": { "type": "boolean" },
           "ownership": { "enum": ["app", "external"] },
           "note": { "type": "string" }
         }
