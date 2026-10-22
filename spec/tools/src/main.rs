@@ -15,6 +15,8 @@ use std::process::ExitCode;
 use serde_json::Value;
 
 const PLATFORMS: [&str; 2] = ["linux", "macos"];
+/// Where the macOS app lives, for resolving its `ui_tests`.
+const MACOS_DIR: &str = "macos";
 const STATES: [&str; 4] = ["parity", "approximate", "excluded", "pending"];
 
 fn main() -> ExitCode {
@@ -273,19 +275,26 @@ fn run_check(repo: &Path) -> ExitCode {
     if !uncovered.is_empty() {
         warnings.push(format!("{} feature(s) have no scenarios or ui_tests yet", uncovered.len()));
     }
-    // 7. A Linux `ui_tests` entry is `path/to/file.rs::function`; both must exist.
+    // 7. A `ui_tests` entry names a test function in a file: Linux entries are `path/to/file.rs::function`
+    //    from the repository root, macOS entries `path/to/File.swift::testFunction` from the macOS app's
+    //    folder. Both must exist. (The macOS folder is skipped when this checkout does not have it.)
     if let Some(registry) = &registry {
         for feature in &registry.features {
             let id = feature["id"].as_str().unwrap_or("?");
-            for test in feature["ui_tests"]["linux"].as_array().into_iter().flatten().filter_map(Value::as_str) {
-                let Some((file, name)) = test.split_once("::") else {
-                    problems.push(format!("{id}: ui test {test:?} is not `file::function`"));
+            for (platform, base, keyword) in [("linux", repo.to_path_buf(), "fn "), ("macos", repo.join(MACOS_DIR), "func ")] {
+                if !base.is_dir() {
                     continue;
-                };
-                match fs::read_to_string(repo.join(file)) {
-                    Ok(text) if text.contains(&format!("fn {name}(")) => {}
-                    Ok(_) => problems.push(format!("{id}: {file} has no function {name}")),
-                    Err(e) => problems.push(format!("{id}: ui test file {file}: {e}")),
+                }
+                for test in feature["ui_tests"][platform].as_array().into_iter().flatten().filter_map(Value::as_str) {
+                    let Some((file, name)) = test.split_once("::") else {
+                        problems.push(format!("{id}: ui test {test:?} is not `file::function`"));
+                        continue;
+                    };
+                    match fs::read_to_string(base.join(file)) {
+                        Ok(text) if text.contains(&format!("{keyword}{name}(")) => {}
+                        Ok(_) => problems.push(format!("{id}: {file} has no function {name}")),
+                        Err(e) => problems.push(format!("{id}: ui test file {file}: {e}")),
+                    }
                 }
             }
         }

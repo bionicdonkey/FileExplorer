@@ -11,7 +11,8 @@
         "state": "parity"
       },
       "macos": {
-        "state": "pending"
+        "state": "approximate",
+        "note": "Tabs are native macOS window tabs (one window per tab, grouped by the system tab bar), so overflow, the tab strip and the titlebar are the system's rather than the app's own. Each tab keeps its own location, history, selection and view options. The tests drive the window controllers in process; dragging a tab out or merging windows is the system's behaviour and is not driven by a test."
       },
       "ui_tests": {
         "linux": [
@@ -25,6 +26,12 @@
           "src/ui/window.rs::matching_index_tracks_a_tab_after_a_preceding_tab_is_removed",
           "src/ui/window.rs::utility_tabs_never_trigger_the_last_file_tab_close_rule",
           "tests/headless_gtk.rs::slice5_cold_warm_local_remote_frames_and_fifty_tabs_meet_p95_budgets"
+        ],
+        "macos": [
+          "Tests/UnitTests/WindowBehaviorTests.swift::testNewTabJoinsTheWindowsTabGroup",
+          "Tests/UnitTests/WindowBehaviorTests.swift::testClosingATabForgetsItsController",
+          "Tests/UnitTests/WindowBehaviorTests.swift::testEachTabKeepsItsOwnLocationAndHistory",
+          "Tests/UnitTests/WindowBehaviorTests.swift::testSessionRestoreRoundTripsOpenTabs"
         ]
       }
     },
@@ -51,6 +58,12 @@
       },
       "macos": {
         "state": "parity"
+      },
+      "ui_tests": {
+        "macos": [
+          "Tests/UnitTests/TabModelTests.swift::testBackAndUpWalkTheHistory",
+          "Tests/UnitTests/TabModelTests.swift::testAMissingFolderReportsAReasonAndKeepsTheTabUsable"
+        ]
       }
     },
     {
@@ -62,7 +75,8 @@
         "state": "parity"
       },
       "macos": {
-        "state": "pending"
+        "state": "approximate",
+        "note": "All four modes (detailed list, compact list, icon grid, hybrid) with sorting, grouping, resizable and reorderable list columns, hidden files, thumbnails and per-folder memory. Tile geometry, spacing and type follow AppKit rather than GTK, and the performance budgets are not compared across platforms."
       },
       "ui_tests": {
         "linux": [
@@ -80,6 +94,13 @@
           "tests/headless_gtk.rs::slice5_hidden_filter_keeps_the_complete_incremental_source_model",
           "tests/headless_gtk.rs::slice5_large_grid_recycles_visible_rows",
           "tests/headless_gtk.rs::slice5_incremental_grouping_and_hidden_filter_preserve_all_visible_rows"
+        ],
+        "macos": [
+          "Tests/UnitTests/WindowBehaviorTests.swift::testSwitchingViewModesSwapsTheListAndTheGrid",
+          "Tests/UnitTests/WindowBehaviorTests.swift::testListColumnsFollowTheSavedLayout",
+          "Tests/UnitTests/WindowBehaviorTests.swift::testHiddenFilesToggleFromTheMenuAction",
+          "Tests/UnitTests/TabModelTests.swift::testViewOptionsAreRememberedPerFolder",
+          "Tests/UnitTests/TabModelTests.swift::testHiddenFilesAppearWhenTheOptionIsOn"
         ]
       }
     },
@@ -100,6 +121,13 @@
       },
       "macos": {
         "state": "parity"
+      },
+      "ui_tests": {
+        "macos": [
+          "Tests/UnitTests/WindowBehaviorTests.swift::testTypingAPathIntoTheLocationBarNavigates",
+          "Tests/UnitTests/WindowBehaviorTests.swift::testAnInvalidLocationIsRejectedWithoutNavigating",
+          "Tests/UnitTests/WindowBehaviorTests.swift::testBreadcrumbReflectsTheLocation"
+        ]
       }
     },
     {
@@ -111,7 +139,8 @@
         "state": "parity"
       },
       "macos": {
-        "state": "pending"
+        "state": "approximate",
+        "note": "Quick access pins, the user's folders, drives and attached volumes (mount and eject through DiskArbitration and NSWorkspace), expandable folder tree and drop-to-pin. Pins, defaults and expansion state are the shared SidebarPreferences logic; mounting and ejecting a real volume is not exercised by a test."
       },
       "ui_tests": {
         "linux": [
@@ -146,6 +175,9 @@
           "tests/accessibility.rs::slice4_sidebar_duplicate_home_restores_the_user_section_occurrence",
           "tests/accessibility.rs::slice4_sidebar_duplicate_tree_expander_restores_its_ancestor_occurrence",
           "tests/accessibility.rs::slice4_sidebar_expanders_expose_state_and_refresh_keeps_keyboard_focus"
+        ],
+        "macos": [
+          "Tests/UnitTests/WindowBehaviorTests.swift::testSidebarListsQuickAccessAndThisMac"
         ]
       }
     },
@@ -288,6 +320,11 @@
       },
       "macos": {
         "state": "parity"
+      },
+      "ui_tests": {
+        "macos": [
+          "Tests/UnitTests/WindowBehaviorTests.swift::testAConflictIsResolvedByTheRememberedChoice"
+        ]
       }
     },
     {
@@ -324,6 +361,14 @@
       "macos": {
         "state": "parity",
         "note": "Trash moves items to the user's Trash with FileManager.trashItem; unlike on Linux there is no put-back metadata, which no scenario covers."
+      },
+      "ui_tests": {
+        "macos": [
+          "Tests/UnitTests/WindowBehaviorTests.swift::testCopyAndPasteMakesACopyBesideTheOriginal",
+          "Tests/UnitTests/WindowBehaviorTests.swift::testCutAndPasteMovesTheFile",
+          "Tests/UnitTests/WindowBehaviorTests.swift::testRenameFromTheViewRenamesOnDisk",
+          "Tests/UnitTests/WindowBehaviorTests.swift::testNewFolderCreatesAnUntitledFolderThenNumbersTheNext"
+        ]
       }
     },
     {
@@ -349,7 +394,8 @@
         "state": "parity"
       },
       "macos": {
-        "state": "pending"
+        "state": "approximate",
+        "note": "Drops use file URLs, so they work from and to Finder; the destination decides copy or move (option copies, command moves, otherwise a move on one volume and a copy across volumes) and refuses a folder dropped into itself. Dragging items out of an archive is not offered (no file promise). The tests call the drop path directly; the mouse gesture itself is not synthesised in process."
       },
       "ui_tests": {
         "linux": [
@@ -358,6 +404,11 @@
           "src/ui/window.rs::slice3_drop_acknowledgement_waits_for_every_terminal_item",
           "tests/headless_gtk.rs::slice3_multiple_selection_routes_one_uri_command_and_drag_payload",
           "tests/navigation_search_contract.rs::daily_selection_capabilities_and_drag_action_are_uri_based"
+        ],
+        "macos": [
+          "Tests/UnitTests/WindowBehaviorTests.swift::testDroppingOnAFolderMovesTheFileIntoIt",
+          "Tests/UnitTests/WindowBehaviorTests.swift::testDroppingWithCopyKeepsTheOriginal",
+          "Tests/UnitTests/WindowBehaviorTests.swift::testAFolderCannotBeDroppedIntoItself"
         ]
       }
     },
@@ -370,7 +421,8 @@
         "state": "parity"
       },
       "macos": {
-        "state": "pending"
+        "state": "approximate",
+        "note": "A Get Info window with General and Permissions tabs: kind, size (folders are totalled on a worker), location, dates, owner, group and editable permission bits for the owner. Layout follows AppKit; the tests read the window's fields and apply a permission change."
       },
       "ui_tests": {
         "linux": [
@@ -378,6 +430,10 @@
           "tests/properties.rs::property_details_include_owner_and_group",
           "tests/headless_gtk.rs::slice3_properties_reports_async_errors_and_unavailable_fields",
           "tests/headless_gtk.rs::slice3_properties_close_restores_focus_and_operation_center_reports_completion"
+        ],
+        "macos": [
+          "Tests/UnitTests/WindowBehaviorTests.swift::testPropertiesWindowShowsTheFilesDetails",
+          "Tests/UnitTests/WindowBehaviorTests.swift::testPropertiesPermissionChangeIsApplied"
         ]
       }
     },
@@ -434,6 +490,13 @@
       },
       "macos": {
         "state": "parity"
+      },
+      "ui_tests": {
+        "macos": [
+          "Tests/UnitTests/WindowBehaviorTests.swift::testSearchFromTheToolbarShowsMatchesWithRelativePaths",
+          "Tests/UnitTests/WindowBehaviorTests.swift::testContentSearchIsRefusedUntilItIsTurnedOn",
+          "Tests/UnitTests/TabModelTests.swift::testSearchFindsMatchesAndClearingRestoresTheFolder"
+        ]
       }
     },
     {
@@ -496,6 +559,12 @@
       },
       "macos": {
         "state": "parity"
+      },
+      "ui_tests": {
+        "macos": [
+          "Tests/UnitTests/WindowBehaviorTests.swift::testSessionRestoreRoundTripsOpenTabs",
+          "Tests/UnitTests/WindowBehaviorTests.swift::testPreferencesPersistAcrossAServicesRestart"
+        ]
       }
     },
     {

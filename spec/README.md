@@ -28,7 +28,7 @@ sh scripts/check-separation.sh
 `check` fails when a file breaks its schema, a README feature has no registry entry, a registry
 entry's `readme` text matches no README line, a feature names a scenario that does not exist (or a
 scenario no feature names), an `approximate` or `excluded` state has no `note`, a contract cites a
-scenario that does not exist, or a Linux `ui_tests` entry names a function that is not there. A
+scenario that does not exist, or a `ui_tests` entry names a function that is not there (a Linux entry is `path/to/file.rs::function` from the repository root, a macOS entry `path/to/File.swift::testFunction` from the macOS app's own folder). A
 feature with neither scenarios nor `ui_tests` is reported as a warning.
 
 ## Adding a feature
