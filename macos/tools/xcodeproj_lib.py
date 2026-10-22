@@ -69,6 +69,11 @@ def build(spec):
         add(fw, f"isa = PBXFrameworksBuildPhase;\n\t\t\tbuildActionMask = 2147483647;\n\t\t\tfiles = ({files}\n\t\t\t);\n\t\t\trunOnlyForDeploymentPostprocessing = 0;", 'Frameworks')
         add(res, "isa = PBXResourcesBuildPhase;\n\t\t\tbuildActionMask = 2147483647;\n\t\t\tfiles = (\n\t\t\t);\n\t\t\trunOnlyForDeploymentPostprocessing = 0;", 'Resources')
         phases = [f"{src} /* Sources */", f"{fw} /* Frameworks */", f"{res} /* Resources */"]
+        for n, script in enumerate(t.get('scripts', [])):
+            sid = oid('script' + tn + str(n))
+            body = script['body'].replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
+            add(sid, f"isa = PBXShellScriptBuildPhase;\n\t\t\talwaysOutOfDate = 1;\n\t\t\tbuildActionMask = 2147483647;\n\t\t\tfiles = (\n\t\t\t);\n\t\t\tinputFileListPaths = (\n\t\t\t);\n\t\t\tinputPaths = (\n\t\t\t);\n\t\t\tname = {q(script['name'])};\n\t\t\toutputFileListPaths = (\n\t\t\t);\n\t\t\toutputPaths = (\n\t\t\t);\n\t\t\trunOnlyForDeploymentPostprocessing = 0;\n\t\t\tshellPath = /bin/sh;\n\t\t\tshellScript = \"{body}\";", script['name'])
+            phases.append(f"{sid} /* {script['name']} */")
         # build settings
         base = dict(spec.get('target_settings', {}))
         base.update(t['settings'])
@@ -112,7 +117,7 @@ def build(spec):
     out = ['// !$*UTF8*$!', '{', '\tarchiveVersion = 1;', '\tclasses = {', '\t};', '\tobjectVersion = 77;', '\tobjects = {', '']
     # group by isa for conventional sections
     def isa_of(body): return body.split('isa = ')[1].split(';')[0]
-    order = ['PBXBuildFile','PBXContainerItemProxy','PBXFileReference','PBXFileSystemSynchronizedBuildFileExceptionSet','PBXFileSystemSynchronizedRootGroup','PBXFrameworksBuildPhase','PBXGroup','PBXNativeTarget','PBXProject','PBXResourcesBuildPhase','PBXSourcesBuildPhase','PBXTargetDependency','XCBuildConfiguration','XCConfigurationList','XCLocalSwiftPackageReference','XCSwiftPackageProductDependency']
+    order = ['PBXBuildFile','PBXContainerItemProxy','PBXFileReference','PBXFileSystemSynchronizedBuildFileExceptionSet','PBXFileSystemSynchronizedRootGroup','PBXFrameworksBuildPhase','PBXGroup','PBXNativeTarget','PBXProject','PBXResourcesBuildPhase','PBXShellScriptBuildPhase','PBXSourcesBuildPhase','PBXTargetDependency','XCBuildConfiguration','XCConfigurationList','XCLocalSwiftPackageReference','XCSwiftPackageProductDependency']
     for isa in order:
         sec = [l for l in lines if isa_of(l[1]) == isa]
         if not sec: continue

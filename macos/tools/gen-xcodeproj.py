@@ -35,19 +35,41 @@ SPEC = {
         "ENABLE_HARDENED_RUNTIME": "YES",
         "MARKETING_VERSION": "0.1.0",
         "CURRENT_PROJECT_VERSION": "1",
+        # Set to the signing team's identifier for release builds; empty pins only identifiers.
+        "MORIN_TEAM_ID": "",
     },
     "project_settings_debug": {
         "ONLY_ACTIVE_ARCH": "YES",
+        "ENABLE_TESTABILITY": "YES",
         "SWIFT_OPTIMIZATION_LEVEL": "-Onone",
         "SWIFT_ACTIVE_COMPILATION_CONDITIONS": "DEBUG",
     },
     "targets": [
         {
+            "name": "MorinExplorerHelper", "kind": "tool", "folders": ["Helper"],
+            "exclude": ["casa.alera.MorinExplorer.helper.plist"],
+            "products": ["ExplorerDomain", "ExplorerAdapters"],
+            "settings": {
+                "PRODUCT_NAME": "MorinExplorerHelper",
+                "PRODUCT_MODULE_NAME": "MorinExplorerHelper",
+                "PRODUCT_BUNDLE_IDENTIFIER": "casa.alera.MorinExplorer.helper",
+                "SKIP_INSTALL": "YES",
+                "GENERATE_INFOPLIST_FILE": "YES",
+                "CREATE_INFOPLIST_SECTION_IN_BINARY": "YES",
+                "INFOPLIST_KEY_MorinTeamIdentifier": "$(MORIN_TEAM_ID)",
+                "ENABLE_HARDENED_RUNTIME": "YES",
+            },
+        },
+        {
             "name": "MorinExplorer", "kind": "app", "folders": ["App"], "product_name": APP,
+            "depends": ["MorinExplorerHelper"],
+            "scripts": [{"name": "Embed the privileged helper", "body": "set -e\nlib=\"$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Library/LaunchDaemons\"\nmkdir -p \"$lib\"\ncp \"$BUILT_PRODUCTS_DIR/MorinExplorerHelper\" \"$TARGET_BUILD_DIR/$EXECUTABLE_FOLDER_PATH/MorinExplorerHelper\"\ncp \"$SRCROOT/Helper/casa.alera.MorinExplorer.helper.plist\" \"$lib/\""}],
             "products": ["ExplorerDomain", "ExplorerAdapters"],
             "settings": {
                 "PRODUCT_BUNDLE_IDENTIFIER": "casa.alera.MorinExplorer",
                 "PRODUCT_NAME": APP,
+                "PRODUCT_MODULE_NAME": "MorinExplorer",
+                "INFOPLIST_KEY_MorinTeamIdentifier": "$(MORIN_TEAM_ID)",
                 "GENERATE_INFOPLIST_FILE": "YES",
                 "INFOPLIST_KEY_CFBundleDisplayName": APP,
                 "INFOPLIST_KEY_NSPrincipalClass": "NSApplication",

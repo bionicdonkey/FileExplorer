@@ -16,10 +16,15 @@ xcodebuild -project MorinExplorer.xcodeproj -scheme MorinExplorer -configuration
 app="$derived/Build/Products/Debug/Morin Explorer.app"
 lipo -info "$app/Contents/MacOS/Morin Explorer"
 
+# Unit tests run the .xctest bundle directly. `xcodebuild test` needs testmanagerd, which refuses to
+# start sessions while Developer mode is off; the direct run needs neither and tests the same code.
 echo "== unit tests ($arch)"
 xcodebuild -project MorinExplorer.xcodeproj -scheme MorinExplorer -destination "platform=macOS,arch=$arch" \
-    -derivedDataPath "$derived" test -only-testing:MorinExplorerUnitTests 2>&1 \
-    | grep -E "error:|Executed .* tests|TEST (SUCCEEDED|FAILED)"
+    -derivedDataPath "$derived" build-for-testing 2>&1 | grep -E "error:|BUILD|TEST BUILD" || true
+products="$PWD/$derived/Build/Products/Debug/Morin Explorer.app/Contents"
+DYLD_FRAMEWORK_PATH="$products/MacOS:$products/Frameworks" DYLD_LIBRARY_PATH="$products/MacOS" \
+    perl -e 'alarm 600; exec @ARGV' xcrun xctest "$products/PlugIns/MorinExplorerUnitTests.xctest" 2>&1 \
+    | grep -E "error:|Executed .* tests" | tail -20
 
 if [ "${UI:-0}" = "1" ]; then
     echo "== UI tests ($arch)"

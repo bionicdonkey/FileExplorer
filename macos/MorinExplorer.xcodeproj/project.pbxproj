@@ -7,6 +7,10 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		08EED4419DB43C5F9AA51ACD /* ExplorerAdapters in Frameworks */ = {
+			isa = PBXBuildFile;
+			productRef = 1A0D0663CA34E23593655F75 /* ExplorerAdapters */;
+		};
 		2CD0CD88505349E315A1AC3B /* ExplorerDomain in Frameworks */ = {
 			isa = PBXBuildFile;
 			productRef = 205DBDDD2C83C0D32E38D95A /* ExplorerDomain */;
@@ -19,6 +23,10 @@
 			isa = PBXBuildFile;
 			productRef = 1A0D0663CA34E23593655F75 /* ExplorerAdapters */;
 		};
+		5B183C725A1737E3EF523448 /* ExplorerDomain in Frameworks */ = {
+			isa = PBXBuildFile;
+			productRef = 205DBDDD2C83C0D32E38D95A /* ExplorerDomain */;
+		};
 		FFA3556C68D68F3575CD4D69 /* ExplorerDomain in Frameworks */ = {
 			isa = PBXBuildFile;
 			productRef = 205DBDDD2C83C0D32E38D95A /* ExplorerDomain */;
@@ -26,6 +34,13 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
+		0BDF70BC6FA96226C59CD512 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 46F86FAA6BBF9AC94A7E4595 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = E41AA98866BA92F0C95AE4A0;
+			remoteInfo = MorinExplorerHelper;
+		};
 		C53D00EED467BC2C44E0F04E /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 46F86FAA6BBF9AC94A7E4595 /* Project object */;
@@ -64,7 +79,24 @@
 			path = MorinExplorerUITests.xctest;
 			sourceTree = BUILT_PRODUCTS_DIR;
 		};
+		D352E828B89A57C9D38DE2DA /* MorinExplorerHelper */ = {
+			isa = PBXFileReference;
+			explicitFileType = compiled.mach-o.executable;
+			includeInIndex = 0;
+			path = MorinExplorerHelper;
+			sourceTree = BUILT_PRODUCTS_DIR;
+		};
 /* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		565683751CD90CFBB79E8B89 /* Exceptions for "Helper" folder in "MorinExplorerHelper" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				casa.alera.MorinExplorer.helper.plist,
+			);
+			target = E41AA98866BA92F0C95AE4A0 /* MorinExplorerHelper */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		101EDBBA62FD19420715F107 /* App */ = {
@@ -75,6 +107,14 @@
 		47045D9290CB58BF84B98E4B /* Tests/UnitTests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = Tests/UnitTests;
+			sourceTree = "<group>";
+		};
+		61C6D89E01243943E72BEF7F /* Helper */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				565683751CD90CFBB79E8B89 /* Exceptions for "Helper" folder in "MorinExplorerHelper" target */,
+			);
+			path = Helper;
 			sourceTree = "<group>";
 		};
 		D7AE5A822958498F1AA3AD0A /* Tests/UITests */ = {
@@ -110,12 +150,22 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		AB99ED00C62A2D9D885DC61D /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				5B183C725A1737E3EF523448 /* ExplorerDomain in Frameworks */,
+				08EED4419DB43C5F9AA51ACD /* ExplorerAdapters in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
 		0A2C978E52A76F0AA9F68BB5 /* Products */ = {
 			isa = PBXGroup;
 			children = (
+				D352E828B89A57C9D38DE2DA /* MorinExplorerHelper */,
 				199404010ECBA036A0A1579D /* Morin Explorer.app */,
 				25F61C9F56AB29A8044B6BA1 /* MorinExplorerUnitTests.xctest */,
 				6542403B0247DB26BAF589DA /* MorinExplorerUITests.xctest */,
@@ -126,6 +176,7 @@
 		2B731CEFC6751AAE0EC69B98 = {
 			isa = PBXGroup;
 			children = (
+				61C6D89E01243943E72BEF7F /* Helper */,
 				101EDBBA62FD19420715F107 /* App */,
 				47045D9290CB58BF84B98E4B /* Tests/UnitTests */,
 				D7AE5A822958498F1AA3AD0A /* Tests/UITests */,
@@ -143,10 +194,12 @@
 				87F410A00F0B1E37B0AFF0B1 /* Sources */,
 				24BDBF185AF6705D57210F4C /* Frameworks */,
 				64138C4F8948F155D75CDF82 /* Resources */,
+				0F543BCF6A44779BE0DD87B2 /* Embed the privileged helper */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				7BF18028A3FFF0A1C72B968F /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				101EDBBA62FD19420715F107 /* App */,
@@ -208,6 +261,30 @@
 			productReference = 25F61C9F56AB29A8044B6BA1 /* MorinExplorerUnitTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
 		};
+		E41AA98866BA92F0C95AE4A0 /* MorinExplorerHelper */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 6FEAF705E1D3A65F64A53C1B /* Build configuration list for PBXNativeTarget "MorinExplorerHelper" */;
+			buildPhases = (
+				954F8226B31CBC28E32E959C /* Sources */,
+				AB99ED00C62A2D9D885DC61D /* Frameworks */,
+				9DEC51CBE9D8F025870F2302 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				61C6D89E01243943E72BEF7F /* Helper */,
+			);
+			name = MorinExplorerHelper;
+			packageProductDependencies = (
+				205DBDDD2C83C0D32E38D95A /* ExplorerDomain */,
+				1A0D0663CA34E23593655F75 /* ExplorerAdapters */,
+			);
+			productName = MorinExplorerHelper;
+			productReference = D352E828B89A57C9D38DE2DA /* MorinExplorerHelper */;
+			productType = "com.apple.product-type.tool";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -236,6 +313,7 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
+				E41AA98866BA92F0C95AE4A0 /* MorinExplorerHelper */,
 				42BE064A86BEA4E0A28D09AA /* MorinExplorer */,
 				AF183303B19EAABA230E2252 /* MorinExplorerUnitTests */,
 				42E411C910D047DE4585860C /* MorinExplorerUITests */,
@@ -258,6 +336,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		9DEC51CBE9D8F025870F2302 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		DF5C8165146F5865C4936182 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -267,8 +352,37 @@
 		};
 /* End PBXResourcesBuildPhase section */
 
+/* Begin PBXShellScriptBuildPhase section */
+		0F543BCF6A44779BE0DD87B2 /* Embed the privileged helper */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Embed the privileged helper";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -e\nlib=\"$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Library/LaunchDaemons\"\nmkdir -p \"$lib\"\ncp \"$BUILT_PRODUCTS_DIR/MorinExplorerHelper\" \"$TARGET_BUILD_DIR/$EXECUTABLE_FOLDER_PATH/MorinExplorerHelper\"\ncp \"$SRCROOT/Helper/casa.alera.MorinExplorer.helper.plist\" \"$lib/\"";
+		};
+/* End PBXShellScriptBuildPhase section */
+
 /* Begin PBXSourcesBuildPhase section */
 		87F410A00F0B1E37B0AFF0B1 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		954F8226B31CBC28E32E959C /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -297,6 +411,11 @@
 			target = 42BE064A86BEA4E0A28D09AA /* MorinExplorer */;
 			targetProxy = C53D00EED467BC2C44E0F04E /* PBXContainerItemProxy */;
 		};
+		7BF18028A3FFF0A1C72B968F /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = E41AA98866BA92F0C95AE4A0 /* MorinExplorerHelper */;
+			targetProxy = 0BDF70BC6FA96226C59CD512 /* PBXContainerItemProxy */;
+		};
 		A04EEF19FBF717541B5CE24D /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = 42BE064A86BEA4E0A28D09AA /* MorinExplorer */;
@@ -317,6 +436,7 @@
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MARKETING_VERSION = 0.1.0;
+				MORIN_TEAM_ID = "";
 				ONLY_ACTIVE_ARCH = NO;
 				SDKROOT = macosx;
 				SWIFT_VERSION = 5.0;
@@ -353,9 +473,11 @@
 				CODE_SIGN_STYLE = Manual;
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_TESTABILITY = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MARKETING_VERSION = 0.1.0;
+				MORIN_TEAM_ID = "";
 				ONLY_ACTIVE_ARCH = YES;
 				SDKROOT = macosx;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
@@ -375,6 +497,20 @@
 			};
 			name = Debug;
 		};
+		85301FDEEB0A0955CF61BED6 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CREATE_INFOPLIST_SECTION_IN_BINARY = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_MorinTeamIdentifier = "$(MORIN_TEAM_ID)";
+				PRODUCT_BUNDLE_IDENTIFIER = casa.alera.MorinExplorer.helper;
+				PRODUCT_MODULE_NAME = MorinExplorerHelper;
+				PRODUCT_NAME = MorinExplorerHelper;
+				SKIP_INSTALL = YES;
+			};
+			name = Debug;
+		};
 		8BF8CF27B6611188CCEDFAB3 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -383,12 +519,28 @@
 				INFOPLIST_KEY_CFBundleDisplayName = "Morin Explorer";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_LSMinimumSystemVersion = 14.0;
+				INFOPLIST_KEY_MorinTeamIdentifier = "$(MORIN_TEAM_ID)";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "GPL-3.0-or-later";
 				INFOPLIST_KEY_NSPrincipalClass = NSApplication;
 				PRODUCT_BUNDLE_IDENTIFIER = casa.alera.MorinExplorer;
+				PRODUCT_MODULE_NAME = MorinExplorer;
 				PRODUCT_NAME = "Morin Explorer";
 			};
 			name = Debug;
+		};
+		A89BF37F6D46A766963241AD /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CREATE_INFOPLIST_SECTION_IN_BINARY = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_MorinTeamIdentifier = "$(MORIN_TEAM_ID)";
+				PRODUCT_BUNDLE_IDENTIFIER = casa.alera.MorinExplorer.helper;
+				PRODUCT_MODULE_NAME = MorinExplorerHelper;
+				PRODUCT_NAME = MorinExplorerHelper;
+				SKIP_INSTALL = YES;
+			};
+			name = Release;
 		};
 		AB6E4740348E8BDEB124A7EB /* Release */ = {
 			isa = XCBuildConfiguration;
@@ -408,9 +560,11 @@
 				INFOPLIST_KEY_CFBundleDisplayName = "Morin Explorer";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_LSMinimumSystemVersion = 14.0;
+				INFOPLIST_KEY_MorinTeamIdentifier = "$(MORIN_TEAM_ID)";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "GPL-3.0-or-later";
 				INFOPLIST_KEY_NSPrincipalClass = NSApplication;
 				PRODUCT_BUNDLE_IDENTIFIER = casa.alera.MorinExplorer;
+				PRODUCT_MODULE_NAME = MorinExplorer;
 				PRODUCT_NAME = "Morin Explorer";
 			};
 			name = Release;
@@ -432,6 +586,15 @@
 			buildConfigurations = (
 				8BF8CF27B6611188CCEDFAB3 /* Debug */,
 				BDC6028D4ED3B024164DF3F3 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		6FEAF705E1D3A65F64A53C1B /* Build configuration list for PBXNativeTarget "MorinExplorerHelper" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				85301FDEEB0A0955CF61BED6 /* Debug */,
+				A89BF37F6D46A766963241AD /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
