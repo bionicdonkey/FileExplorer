@@ -1,0 +1,485 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		2CD0CD88505349E315A1AC3B /* ExplorerDomain in Frameworks */ = {
+			isa = PBXBuildFile;
+			productRef = 205DBDDD2C83C0D32E38D95A /* ExplorerDomain */;
+		};
+		31B4256242D1A0C4CA326EFB /* ExplorerAdapters in Frameworks */ = {
+			isa = PBXBuildFile;
+			productRef = 1A0D0663CA34E23593655F75 /* ExplorerAdapters */;
+		};
+		5527B4DE63CD5B5EE9BE5F76 /* ExplorerAdapters in Frameworks */ = {
+			isa = PBXBuildFile;
+			productRef = 1A0D0663CA34E23593655F75 /* ExplorerAdapters */;
+		};
+		FFA3556C68D68F3575CD4D69 /* ExplorerDomain in Frameworks */ = {
+			isa = PBXBuildFile;
+			productRef = 205DBDDD2C83C0D32E38D95A /* ExplorerDomain */;
+		};
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		C53D00EED467BC2C44E0F04E /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 46F86FAA6BBF9AC94A7E4595 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 42BE064A86BEA4E0A28D09AA;
+			remoteInfo = MorinExplorer;
+		};
+		F49889A9A8BCE3C85651F645 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 46F86FAA6BBF9AC94A7E4595 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 42BE064A86BEA4E0A28D09AA;
+			remoteInfo = MorinExplorer;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		199404010ECBA036A0A1579D /* Morin Explorer.app */ = {
+			isa = PBXFileReference;
+			explicitFileType = wrapper.application;
+			includeInIndex = 0;
+			path = "Morin Explorer.app";
+			sourceTree = BUILT_PRODUCTS_DIR;
+		};
+		25F61C9F56AB29A8044B6BA1 /* MorinExplorerUnitTests.xctest */ = {
+			isa = PBXFileReference;
+			explicitFileType = wrapper.cfbundle;
+			includeInIndex = 0;
+			path = MorinExplorerUnitTests.xctest;
+			sourceTree = BUILT_PRODUCTS_DIR;
+		};
+		6542403B0247DB26BAF589DA /* MorinExplorerUITests.xctest */ = {
+			isa = PBXFileReference;
+			explicitFileType = wrapper.cfbundle;
+			includeInIndex = 0;
+			path = MorinExplorerUITests.xctest;
+			sourceTree = BUILT_PRODUCTS_DIR;
+		};
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		101EDBBA62FD19420715F107 /* App */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = App;
+			sourceTree = "<group>";
+		};
+		47045D9290CB58BF84B98E4B /* Tests/UnitTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Tests/UnitTests;
+			sourceTree = "<group>";
+		};
+		D7AE5A822958498F1AA3AD0A /* Tests/UITests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Tests/UITests;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		190A25659ED3F1353F5C3858 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				FFA3556C68D68F3575CD4D69 /* ExplorerDomain in Frameworks */,
+				5527B4DE63CD5B5EE9BE5F76 /* ExplorerAdapters in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		24BDBF185AF6705D57210F4C /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				2CD0CD88505349E315A1AC3B /* ExplorerDomain in Frameworks */,
+				31B4256242D1A0C4CA326EFB /* ExplorerAdapters in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		8FCF3FD93D5DC45A897317CD /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		0A2C978E52A76F0AA9F68BB5 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				199404010ECBA036A0A1579D /* Morin Explorer.app */,
+				25F61C9F56AB29A8044B6BA1 /* MorinExplorerUnitTests.xctest */,
+				6542403B0247DB26BAF589DA /* MorinExplorerUITests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		2B731CEFC6751AAE0EC69B98 = {
+			isa = PBXGroup;
+			children = (
+				101EDBBA62FD19420715F107 /* App */,
+				47045D9290CB58BF84B98E4B /* Tests/UnitTests */,
+				D7AE5A822958498F1AA3AD0A /* Tests/UITests */,
+				0A2C978E52A76F0AA9F68BB5 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		42BE064A86BEA4E0A28D09AA /* MorinExplorer */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 4A886DC2610D60133564CDDC /* Build configuration list for PBXNativeTarget "MorinExplorer" */;
+			buildPhases = (
+				87F410A00F0B1E37B0AFF0B1 /* Sources */,
+				24BDBF185AF6705D57210F4C /* Frameworks */,
+				64138C4F8948F155D75CDF82 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				101EDBBA62FD19420715F107 /* App */,
+			);
+			name = MorinExplorer;
+			packageProductDependencies = (
+				205DBDDD2C83C0D32E38D95A /* ExplorerDomain */,
+				1A0D0663CA34E23593655F75 /* ExplorerAdapters */,
+			);
+			productName = MorinExplorer;
+			productReference = 199404010ECBA036A0A1579D /* Morin Explorer.app */;
+			productType = "com.apple.product-type.application";
+		};
+		42E411C910D047DE4585860C /* MorinExplorerUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 9B79ADA8AFE4CD7C736C6385 /* Build configuration list for PBXNativeTarget "MorinExplorerUITests" */;
+			buildPhases = (
+				F533BF1B4FB15B74D0F1F55F /* Sources */,
+				8FCF3FD93D5DC45A897317CD /* Frameworks */,
+				6B9EF106504F7F5D1858EDEC /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				4DB37962E143C9F080086FBD /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				D7AE5A822958498F1AA3AD0A /* Tests/UITests */,
+			);
+			name = MorinExplorerUITests;
+			packageProductDependencies = (
+			);
+			productName = MorinExplorerUITests;
+			productReference = 6542403B0247DB26BAF589DA /* MorinExplorerUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+		AF183303B19EAABA230E2252 /* MorinExplorerUnitTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = D2CE7A411090E52CF4C52F02 /* Build configuration list for PBXNativeTarget "MorinExplorerUnitTests" */;
+			buildPhases = (
+				CCB9669D30B88B2F2E739277 /* Sources */,
+				190A25659ED3F1353F5C3858 /* Frameworks */,
+				DF5C8165146F5865C4936182 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				A04EEF19FBF717541B5CE24D /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				47045D9290CB58BF84B98E4B /* Tests/UnitTests */,
+			);
+			name = MorinExplorerUnitTests;
+			packageProductDependencies = (
+				205DBDDD2C83C0D32E38D95A /* ExplorerDomain */,
+				1A0D0663CA34E23593655F75 /* ExplorerAdapters */,
+			);
+			productName = MorinExplorerUnitTests;
+			productReference = 25F61C9F56AB29A8044B6BA1 /* MorinExplorerUnitTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		46F86FAA6BBF9AC94A7E4595 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1600;
+				LastUpgradeCheck = 1600;
+			};
+			buildConfigurationList = 4704357D31391BE81C31195C /* Build configuration list for PBXProject "MorinExplorer" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 2B731CEFC6751AAE0EC69B98;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				7F818884778926707ADAC9AF /* XCLocalSwiftPackageReference */,
+				33D802006A579A230C954986 /* XCLocalSwiftPackageReference */,
+			);
+			productRefGroup = 0A2C978E52A76F0AA9F68BB5 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				42BE064A86BEA4E0A28D09AA /* MorinExplorer */,
+				AF183303B19EAABA230E2252 /* MorinExplorerUnitTests */,
+				42E411C910D047DE4585860C /* MorinExplorerUITests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		64138C4F8948F155D75CDF82 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		6B9EF106504F7F5D1858EDEC /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		DF5C8165146F5865C4936182 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		87F410A00F0B1E37B0AFF0B1 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CCB9669D30B88B2F2E739277 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		F533BF1B4FB15B74D0F1F55F /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		4DB37962E143C9F080086FBD /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 42BE064A86BEA4E0A28D09AA /* MorinExplorer */;
+			targetProxy = C53D00EED467BC2C44E0F04E /* PBXContainerItemProxy */;
+		};
+		A04EEF19FBF717541B5CE24D /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 42BE064A86BEA4E0A28D09AA /* MorinExplorer */;
+			targetProxy = F49889A9A8BCE3C85651F645 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		01ECB329B304881A251A593F /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ARCHS = "arm64 x86_64";
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 0.1.0;
+				ONLY_ACTIVE_ARCH = NO;
+				SDKROOT = macosx;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		22E64CBA323A3E94B4971048 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = casa.alera.MorinExplorer.unit;
+				PRODUCT_NAME = MorinExplorerUnitTests;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Morin Explorer.app/Contents/MacOS/Morin Explorer";
+			};
+			name = Release;
+		};
+		2C30FE0AB39CE58FC752A913 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				GENERATE_INFOPLIST_FILE = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = casa.alera.MorinExplorer.ui;
+				PRODUCT_NAME = MorinExplorerUITests;
+				TEST_TARGET_NAME = "Morin Explorer";
+			};
+			name = Debug;
+		};
+		7E2A64B7D21C324C672EA134 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ARCHS = "arm64 x86_64";
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 0.1.0;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		816524B051A1006E2469B773 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = casa.alera.MorinExplorer.unit;
+				PRODUCT_NAME = MorinExplorerUnitTests;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Morin Explorer.app/Contents/MacOS/Morin Explorer";
+			};
+			name = Debug;
+		};
+		8BF8CF27B6611188CCEDFAB3 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ENABLE_APP_SANDBOX = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "Morin Explorer";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+				INFOPLIST_KEY_LSMinimumSystemVersion = 14.0;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "GPL-3.0-or-later";
+				INFOPLIST_KEY_NSPrincipalClass = NSApplication;
+				PRODUCT_BUNDLE_IDENTIFIER = casa.alera.MorinExplorer;
+				PRODUCT_NAME = "Morin Explorer";
+			};
+			name = Debug;
+		};
+		AB6E4740348E8BDEB124A7EB /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				GENERATE_INFOPLIST_FILE = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = casa.alera.MorinExplorer.ui;
+				PRODUCT_NAME = MorinExplorerUITests;
+				TEST_TARGET_NAME = "Morin Explorer";
+			};
+			name = Release;
+		};
+		BDC6028D4ED3B024164DF3F3 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ENABLE_APP_SANDBOX = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "Morin Explorer";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+				INFOPLIST_KEY_LSMinimumSystemVersion = 14.0;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "GPL-3.0-or-later";
+				INFOPLIST_KEY_NSPrincipalClass = NSApplication;
+				PRODUCT_BUNDLE_IDENTIFIER = casa.alera.MorinExplorer;
+				PRODUCT_NAME = "Morin Explorer";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		4704357D31391BE81C31195C /* Build configuration list for PBXProject "MorinExplorer" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				7E2A64B7D21C324C672EA134 /* Debug */,
+				01ECB329B304881A251A593F /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		4A886DC2610D60133564CDDC /* Build configuration list for PBXNativeTarget "MorinExplorer" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				8BF8CF27B6611188CCEDFAB3 /* Debug */,
+				BDC6028D4ED3B024164DF3F3 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		9B79ADA8AFE4CD7C736C6385 /* Build configuration list for PBXNativeTarget "MorinExplorerUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				2C30FE0AB39CE58FC752A913 /* Debug */,
+				AB6E4740348E8BDEB124A7EB /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		D2CE7A411090E52CF4C52F02 /* Build configuration list for PBXNativeTarget "MorinExplorerUnitTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				816524B051A1006E2469B773 /* Debug */,
+				22E64CBA323A3E94B4971048 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		33D802006A579A230C954986 /* XCLocalSwiftPackageReference "Packages/ExplorerAdapters" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/ExplorerAdapters;
+		};
+		7F818884778926707ADAC9AF /* XCLocalSwiftPackageReference "Packages/ExplorerDomain" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/ExplorerDomain;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		1A0D0663CA34E23593655F75 /* ExplorerAdapters */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 33D802006A579A230C954986 /* XCLocalSwiftPackageReference "Packages/ExplorerAdapters" */;
+			productName = ExplorerAdapters;
+		};
+		205DBDDD2C83C0D32E38D95A /* ExplorerDomain */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 7F818884778926707ADAC9AF /* XCLocalSwiftPackageReference "Packages/ExplorerDomain" */;
+			productName = ExplorerDomain;
+		};
+/* End XCSwiftPackageProductDependency section */
+
+	};
+	rootObject = 46F86FAA6BBF9AC94A7E4595 /* Project object */;
+}

@@ -1,0 +1,79 @@
+name: macOS
+
+# Builds and tests the macOS app on the self-hosted Mac mini. The runner works in host mode, so
+# jobs run directly on the Mac as the runner's user; there is no container, and no node, so
+# actions/checkout cannot be used and the commit is fetched with git.
+#
+# The Mac is an Intel machine (label macos-x86_64). The app is built universal, so CI compiles
+# arm64 and runs the x86_64 half. See the plan's D4 for what that does and does not prove.
+on:
+  push:
+    paths:
+      - 'macos/**'
+      - 'spec/**'
+      - 'scripts/check-separation.sh'
+      - '.gitea/workflows/macos.yml'
+    tags:
+      - 'macos-v*'
+  workflow_dispatch:
+
+# One Mac, one job at a time; a newer push to the same ref replaces a queued older one.
+concurrency:
+  group: macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    runs-on: macos-x86_64
+    steps:
+      - name: Fetch the commit
+        # A fixed checkout directory, so SwiftPM and Xcode keep their incremental builds between
+        # runs. Ignored files (.build, .dd) survive the clean.
+        env:
+          TOKEN: ${{ github.token }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}.git
+          SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          dir="$HOME/ci/FileExplorer"
+          mkdir -p "$dir"
+          cd "$dir"
+          [ -d .git ] || git init -q .
+          git -c http.extraHeader="Authorization: token ${TOKEN}" fetch -q --depth 1 "$REPO_URL" "$SHA"
+          git checkout -q -f FETCH_HEAD
+          git clean -fdq
+          git log --oneline -1
+          echo "$dir" > "$RUNNER_TEMP/checkout-dir" 2>/dev/null || true
+
+      - name: Host
+        run: |
+          sw_vers
+          uname -m
+          xcodebuild -version
+          swift --version
+
+      - name: The two apps stay separate
+        run: cd "$HOME/ci/FileExplorer" && sh scripts/check-separation.sh
+
+      - name: Swift packages
+        # The domain, adapters and scenario runner build and test without Xcode.
+        run: |
+          set -eu
+          cd "$HOME/ci/FileExplorer/macos"
+          export SPEC_ROOT="$HOME/ci/FileExplorer/spec"
+          for package in ExplorerDomain ExplorerAdapters ExplorerSpecRunner; do
+            echo "== $package"
+            (cd "Packages/$package" && swift test)
+          done
+
+      - name: Behaviour scenarios and parity status
+        run: |
+          set -eu
+          cd "$HOME/ci/FileExplorer/macos/Packages/ExplorerSpecRunner"
+          SPEC_ROOT="$HOME/ci/FileExplorer/spec" swift run spec-runner
+
+      - name: Universal app build and unit tests
+        run: |
+          set -eu
+          cd "$HOME/ci/FileExplorer/macos"
+          sh scripts/xcode-test.sh
