@@ -77,3 +77,83 @@ jobs:
           set -eu
           cd "$HOME/ci/FileExplorer/macos"
           sh scripts/xcode-test.sh
+
+  release:
+    # Only for a `macos-vX.Y.Z` tag, and only after the job above passed. Builds the universal app,
+    # signs it with the Developer ID, notarizes, staples and publishes the .dmg as a release.
+    #
+    # Repository secrets this job reads (none is ever written to the repository or the log):
+    #   MACOS_SIGNING_CERT_P12_BASE64   the Developer ID Application certificate and key, as a base64 .p12
+    #   MACOS_SIGNING_CERT_PASSWORD     the .p12 password
+    #   MACOS_SIGNING_IDENTITY          "Developer ID Application: Name (TEAMID)"
+    #   MACOS_TEAM_ID                   the team identifier
+    #   MACOS_NOTARY_KEY_P8_BASE64      the App Store Connect API key (.p8), base64
+    #   MACOS_NOTARY_KEY_ID, MACOS_NOTARY_ISSUER
+    #   MACOS_RELEASE_TOKEN             a token allowed to create releases (falls back to the job token)
+    #
+    # Unverified: this job needs those secrets, so it has not run. `scripts/release.sh` itself was run
+    # without them and produces the universal, ad-hoc-signed .dmg.
+    needs: macos
+    if: startsWith(github.ref, 'refs/tags/macos-v')
+    runs-on: macos-x86_64
+    steps:
+      - name: Fetch the commit
+        env:
+          TOKEN: ${{ github.token }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}.git
+          SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          dir="$HOME/ci/FileExplorer-release"
+          mkdir -p "$dir"
+          cd "$dir"
+          [ -d .git ] || git init -q .
+          git -c http.extraHeader="Authorization: token ${TOKEN}" fetch -q --depth 1 "$REPO_URL" "$SHA"
+          git checkout -q -f FETCH_HEAD
+          git clean -fdxq
+
+      - name: Sign, notarize and package
+        env:
+          CERT_P12: ${{ secrets.MACOS_SIGNING_CERT_P12_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.MACOS_SIGNING_CERT_PASSWORD }}
+          MORIN_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          MORIN_TEAM_ID: ${{ secrets.MACOS_TEAM_ID }}
+          NOTARY_KEY_P8: ${{ secrets.MACOS_NOTARY_KEY_P8_BASE64 }}
+          MORIN_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          MORIN_NOTARY_ISSUER: ${{ secrets.MACOS_NOTARY_ISSUER }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -eu
+          [ -n "$CERT_P12" ] && [ -n "$MORIN_SIGNING_IDENTITY" ] || { echo "the signing secrets are not set"; exit 1; }
+          cd "$HOME/ci/FileExplorer-release/macos"
+          work="$(mktemp -d)"
+          keychain="$work/release.keychain-db"
+          password="$(uuidgen)"
+          cleanup() { security delete-keychain "$keychain" >/dev/null 2>&1 || true; rm -rf "$work"; }
+          trap cleanup EXIT
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          printf '%s' "$CERT_P12" | base64 -D > "$work/cert.p12"
+          security import "$work/cert.p12" -k "$keychain" -P "$CERT_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          printf '%s' "$NOTARY_KEY_P8" | base64 -D > "$work/notary.p8"
+          export MORIN_NOTARY_KEY_PATH="$work/notary.p8"
+          sh scripts/release.sh --version "${TAG#macos-v}"
+
+      - name: Publish the release
+        env:
+          TOKEN: ${{ secrets.MACOS_RELEASE_TOKEN || github.token }}
+          API: ${{ github.server_url }}/api/v1/repos/${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -eu
+          cd "$HOME/ci/FileExplorer-release/macos/build/release"
+          dmg="$(ls Morin-Explorer-*.dmg)"
+          id="$(curl -fsS -X POST -H "Authorization: token $TOKEN" -H 'Content-Type: application/json' \
+                 -d "{\"tag_name\":\"$TAG\",\"name\":\"Morin Explorer ${TAG#macos-v}\",\"draft\":true}" "$API/releases" \
+                 | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
+          curl -fsS -X POST -H "Authorization: token $TOKEN" -F "attachment=@$dmg" "$API/releases/$id/assets?name=$dmg" > /dev/null
+          curl -fsS -X POST -H "Authorization: token $TOKEN" -F "attachment=@$dmg.sha256" "$API/releases/$id/assets?name=$dmg.sha256" > /dev/null
+          echo "A draft release for $TAG has the .dmg attached; publish it from the Releases page."

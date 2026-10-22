@@ -307,4 +307,55 @@ final class WindowBehaviorTests: XCTestCase {
         item.tag = 1
         XCTAssertFalse(controller.validateMenuItem(item))
     }
+
+    // MARK: archives
+
+    private func makeArchive() throws -> URL {
+        let source = root.appendingPathComponent("payload")
+        try FileManager.default.createDirectory(at: source.appendingPathComponent("inner"), withIntermediateDirectories: true)
+        try "a".write(to: source.appendingPathComponent("a.txt"), atomically: true, encoding: .utf8)
+        try "b".write(to: source.appendingPathComponent("inner/b.txt"), atomically: true, encoding: .utf8)
+        let path = try ArchiveTools.compressBlocking(sources: [source.path], format: .zip, progress: { _, _ in }, cancelled: { false })
+        let target = folder.appendingPathComponent("bundle.zip")
+        try FileManager.default.moveItem(atPath: path, toPath: target.path)
+        return target
+    }
+
+    func testOpeningAnArchiveBrowsesItLikeAFolder() throws {
+        _ = try makeArchive()
+        let controller = openWindow()
+        let archive = try XCTUnwrap(controller.tab.displayed.first { $0.name == "bundle.zip" })
+        controller.tab.open(archive)
+        wait { controller.tab.location.isInsideArchive && controller.tab.displayed.map(\.name) == ["payload"] }
+        controller.tab.open(controller.tab.displayed[0])
+        wait { controller.tab.displayed.map(\.name).contains("a.txt") }
+        XCTAssertTrue(controller.tab.displayed.map(\.name).contains("inner"))
+    }
+
+    func testExtractHereUnpacksNextToTheArchive() throws {
+        _ = try makeArchive()
+        let controller = openWindow()
+        controller.tab.setSelection(controller.tab.displayed.filter { $0.name == "bundle.zip" })
+        controller.extractHere(nil)
+        wait { self.exists("a.txt", in: self.folder.appendingPathComponent("bundle")) || self.exists("a.txt", in: self.folder.appendingPathComponent("payload")) || self.exists("payload", in: self.folder.appendingPathComponent("bundle")) }
+    }
+
+    func testCompressCreatesAnArchiveBesideTheSelection() {
+        write("pack.txt")
+        let controller = openWindow()
+        controller.tab.setSelection(controller.tab.displayed.filter { $0.name == "pack.txt" })
+        controller.compressZip(nil)
+        wait { ((try? FileManager.default.contentsOfDirectory(atPath: self.folder.path)) ?? []).contains { $0.hasPrefix("pack") && $0.hasSuffix(".zip") } }
+    }
+
+    // MARK: search history
+
+    func testSubmittedSearchesAreRememberedOnlyWhileThePrivacySettingAllowsIt() throws {
+        let controller = openWindow()
+        controller.tab.recordSearchTerm("budget")
+        XCTAssertEqual(services.searchHistory.entries.map(\.term), ["budget"])
+        try services.preferences.update { $0.recordSearchHistory = false }
+        controller.tab.recordSearchTerm("secret")
+        XCTAssertTrue(services.searchHistory.entries.isEmpty, "turning history off forgets what was kept")
+    }
 }

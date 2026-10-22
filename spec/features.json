@@ -232,6 +232,11 @@
       },
       "macos": {
         "state": "parity"
+      },
+      "ui_tests": {
+        "macos": [
+          "Tests/UnitTests/WindowBehaviorTests.swift::testOpeningAnArchiveBrowsesItLikeAFolder"
+        ]
       }
     },
     {
@@ -269,6 +274,11 @@
       },
       "macos": {
         "state": "parity"
+      },
+      "ui_tests": {
+        "macos": [
+          "Tests/UnitTests/WindowBehaviorTests.swift::testExtractHereUnpacksNextToTheArchive"
+        ]
       }
     },
     {
@@ -287,6 +297,11 @@
       },
       "macos": {
         "state": "parity"
+      },
+      "ui_tests": {
+        "macos": [
+          "Tests/UnitTests/WindowBehaviorTests.swift::testCompressCreatesAnArchiveBesideTheSelection"
+        ]
       }
     },
     {
@@ -511,6 +526,11 @@
       },
       "macos": {
         "state": "parity"
+      },
+      "ui_tests": {
+        "macos": [
+          "Tests/UnitTests/WindowBehaviorTests.swift::testSubmittedSearchesAreRememberedOnlyWhileThePrivacySettingAllowsIt"
+        ]
       }
     },
     {

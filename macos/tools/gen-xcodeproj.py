@@ -34,6 +34,7 @@ SPEC = {
         "ENABLE_USER_SCRIPT_SANDBOXING": "NO",
         "ENABLE_HARDENED_RUNTIME": "YES",
         "MARKETING_VERSION": "0.1.0",
+        "ASSETCATALOG_COMPILER_APPICON_NAME": "AppIcon",
         "CURRENT_PROJECT_VERSION": "1",
         # Set to the signing team's identifier for release builds; empty pins only identifiers.
         "MORIN_TEAM_ID": "",

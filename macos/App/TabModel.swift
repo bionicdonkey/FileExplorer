@@ -271,6 +271,7 @@ final class TabModel {
     func recordSearchTerm(_ text: String) {
         let prefs = services.preferences.preferences
         try? services.searchHistory.recordSubmitted(text, enabled: prefs.recordSearchHistory, retentionDays: prefs.searchHistoryRetentionDays)
+        try? services.searchHistory.save()
     }
 
     // MARK: status

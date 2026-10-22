@@ -216,6 +216,7 @@ final class ExplorerWindowController: NSWindowController, NSWindowDelegate, NSTo
             (item.searchField.cell as? NSSearchFieldCell)?.searchMenuTemplate = searchModeMenu()
             item.resignsFirstResponderWithCancel = true
             searchItem = item
+            refreshRecentSearches()
             return item
         default:
             return nil
@@ -271,6 +272,18 @@ final class ExplorerWindowController: NSWindowController, NSWindowDelegate, NSTo
         let contents = menu.addItem(withTitle: "File Contents", action: #selector(chooseSearchMode(_:)), keyEquivalent: "")
         contents.tag = 1
         contents.target = self
+        // Recent searches, which the field fills in from `recentSearches` (kept only if the privacy setting allows).
+        menu.addItem(.separator())
+        let title = menu.addItem(withTitle: "Recent Searches", action: nil, keyEquivalent: "")
+        title.tag = 1000 /* NSSearchFieldRecentsTitleMenuItemTag */
+        let recent = menu.addItem(withTitle: "Recent", action: nil, keyEquivalent: "")
+        recent.tag = 1001 /* NSSearchFieldRecentsMenuItemTag */
+        let none = menu.addItem(withTitle: "No Recent Searches", action: nil, keyEquivalent: "")
+        none.tag = 1003 /* NSSearchFieldNoRecentsMenuItemTag */
+        menu.addItem(.separator())
+        let clear = menu.addItem(withTitle: "Clear Recent Searches", action: #selector(clearRecentSearches(_:)), keyEquivalent: "")
+        clear.tag = 1002 /* NSSearchFieldClearRecentsMenuItemTag */
+        clear.target = self
         return menu
     }
 
@@ -278,6 +291,17 @@ final class ExplorerWindowController: NSWindowController, NSWindowDelegate, NSTo
         searchMode = sender.tag == 1 ? .content : .filename
         searchItem?.searchField.placeholderString = searchMode == .content ? "Search contents" : "Search"
         runSearch()
+    }
+
+    private func refreshRecentSearches() {
+        let preferences = services.preferences.preferences
+        searchItem?.searchField.recentSearches = preferences.recordSearchHistory ? services.searchHistory.entries.reversed().map(\.term) : []
+    }
+
+    @objc private func clearRecentSearches(_ sender: Any?) {
+        services.searchHistory.clear()
+        try? services.searchHistory.save()
+        refreshRecentSearches()
     }
 
     func controlTextDidChange(_ obj: Notification) {
@@ -300,6 +324,7 @@ final class ExplorerWindowController: NSWindowController, NSWindowDelegate, NSTo
         guard control === searchItem?.searchField else { return false }
         if selector == #selector(NSResponder.insertNewline(_:)) {
             tab.recordSearchTerm(control.stringValue)
+            refreshRecentSearches()
             runSearch()
             browser.focusFiles()
             return true
