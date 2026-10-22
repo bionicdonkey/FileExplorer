@@ -80,7 +80,7 @@ SPEC = {
             },
         },
         {
-            "name": "MorinExplorerUnitTests", "kind": "unit", "folders": ["Tests/UnitTests"],
+            "name": "MorinExplorerUnitTests", "kind": "unit", "folders": ["Tests/UnitTests", "Tests/Performance"],
             "depends": ["MorinExplorer"], "products": ["ExplorerDomain", "ExplorerAdapters"],
             "settings": {
                 "PRODUCT_BUNDLE_IDENTIFIER": "casa.alera.MorinExplorer.unit",
