@@ -3,6 +3,7 @@
   "kind": "domain",
   "summary": "A search typed while a directory is loading is refused: the load is not cancelled and nothing reaches the search port",
   "given": {"location": "file:///home"},
+  "platforms": {"macos": {"note": "Content search asks Spotlight; the explicit unsupported outcome applies when the folder is not indexed. Filename search and the coordinator behaviour are identical."}},
   "steps": [
     {"do": "navigate", "subject": "navigation", "to": "file:///home"},
     {"do": "submit", "subject": "search", "text": "report", "accepted": false},

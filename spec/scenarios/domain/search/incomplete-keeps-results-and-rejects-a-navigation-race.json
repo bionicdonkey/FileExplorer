@@ -3,6 +3,7 @@
   "kind": "domain",
   "summary": "An incomplete search keeps its de-duplicated results and can be retried with the same query and scope; an answer that arrives after a new navigation began is ignored",
   "given": {"location": "smb://host/share"},
+  "platforms": {"macos": {"note": "Content search asks Spotlight; the explicit unsupported outcome applies when the folder is not indexed. Filename search and the coordinator behaviour are identical."}},
   "steps": [
     {"do": "navigate", "subject": "navigation", "to": "smb://host/share"},
     {"port": "directory", "request": 1, "respond": {"succeeded": {"entries": []}}},

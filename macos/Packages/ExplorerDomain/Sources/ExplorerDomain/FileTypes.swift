@@ -35,7 +35,7 @@ public enum FileTypeTable {
                 "application/x-bzip-compressed-tar", "application/x-bzip2-compressed-tar", "application/x-xz-compressed-tar",
                 "application/x-lzma-compressed-tar", "application/x-zstd-compressed-tar", "application/x-tarz",
                 "application/x-cpio", "application/x-xar",
-                "public.zip-archive", "public.tar-archive", "org.gnu.gnu-zip-tar-archive", "public.cpio-archive",
+                "public.zip-archive", "public.tar-archive", "org.gnu.gnu-zip-tar-archive", "public.cpio-archive", "com.apple.xar-archive",
             ],
             extensions: ["zip", "tar", "tar.gz", "tgz", "tar.bz2", "tar.xz", "rar", "cpio"], browsable: .always, extractable: true),
         FileTypeRule(

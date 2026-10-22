@@ -3,6 +3,7 @@
   "kind": "adapter",
   "summary": "Content search without an index is unsupported, a cancelled search is incomplete with reason cancelled, a remote root is unsupported, and a missing root is incomplete with a provider failure",
   "given": {"tree": [{"file": "unrelated", "content": "report secret contents"}]},
+  "platforms": {"macos": {"note": "Content search asks Spotlight; the explicit unsupported outcome applies when the folder is not indexed. Filename search and the coordinator behaviour are identical."}},
   "steps": [
     {"do": "search", "root": ".", "query": "report", "mode": "content", "as": "content"},
     {"expect": "search", "ref": "$content", "is": "unsupported"},

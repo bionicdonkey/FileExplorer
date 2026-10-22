@@ -3,6 +3,7 @@
   "kind": "domain",
   "summary": "Typing restarts a 180 ms debounce so only the latest query reaches the port; closing the tab cancels it and a late answer is ignored",
   "given": {"location": "file:///home"},
+  "platforms": {"macos": {"note": "Content search asks Spotlight; the explicit unsupported outcome applies when the folder is not indexed. Filename search and the coordinator behaviour are identical."}},
   "steps": [
     {"do": "navigate", "subject": "navigation", "to": "file:///home"},
     {"port": "directory", "request": 1, "respond": {"succeeded": {"entries": []}}},

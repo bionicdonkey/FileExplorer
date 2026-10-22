@@ -162,7 +162,7 @@
         "state": "parity"
       },
       "macos": {
-        "state": "pending"
+        "state": "parity"
       }
     },
     {
@@ -176,7 +176,7 @@
         "state": "parity"
       },
       "macos": {
-        "state": "pending"
+        "state": "parity"
       }
     },
     {
@@ -415,7 +415,8 @@
         "state": "parity"
       },
       "macos": {
-        "state": "pending"
+        "state": "approximate",
+        "note": "Search is backed by Spotlight (NSMetadataQuery) for content and by the app's own directory walk for filenames, with an explicit unsupported outcome when the folder is not in Spotlight's index (indexing off, or the folder excluded). Spotlight's index scope and ranking differ from Tracker's, and the scenarios cannot exercise a populated index."
       }
     },
     {
@@ -430,7 +431,7 @@
         "state": "parity"
       },
       "macos": {
-        "state": "pending"
+        "state": "parity"
       }
     },
     {

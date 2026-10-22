@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "note": "What opening an entry does. Rules are matched by exact type, never by subtype: a zip-based document is a subtype of zip, and a subtype test would send a report to the archive browser instead of the application that owns it. First match wins, so the document rule comes before the archive rules. An entry whose type has not arrived yet is classified by the type its name implies. `browsable` says whether the application shows the contents in its own window; `local_only` means only when the file is on this machine. `extractable` says whether Extract is offered (never for an archive seen inside another archive). The table-agrees scenario checks every type and extension listed here against the code. It cannot see the other direction: a type added to the code and left out of this table is not detected, so a change to the code's rules must update this table by hand. The uti lists name the macOS equivalents and still have to be confirmed against Apple's documentation by the macOS branch that implements them.",
+  "note": "What opening an entry does. Rules are matched by exact type, never by subtype: a zip-based document is a subtype of zip, and a subtype test would send a report to the archive browser instead of the application that owns it. First match wins, so the document rule comes before the archive rules. An entry whose type has not arrived yet is classified by the type its name implies. `browsable` says whether the application shows the contents in its own window; `local_only` means only when the file is on this machine. `extractable` says whether Extract is offered (never for an archive seen inside another archive). The table-agrees scenario checks every type and extension listed here against the code. It cannot see the other direction: a type added to the code and left out of this table is not detected, so a change to the code's rules must update this table by hand. The uti lists name the macOS equivalents, confirmed on macOS 15 with UTType(filenameExtension:); RAR and APK have no static UTI there (they resolve to dynamic types), so the macOS adapter names them by MIME type.",
   "rules": [
     {
       "id": "zip-based-documents",
@@ -49,7 +49,7 @@
           "application/x-cpio",
           "application/x-xar"
         ],
-        "uti": ["public.zip-archive", "public.tar-archive", "org.gnu.gnu-zip-tar-archive", "public.cpio-archive"],
+        "uti": ["public.zip-archive", "public.tar-archive", "org.gnu.gnu-zip-tar-archive", "public.cpio-archive", "com.apple.xar-archive"],
         "extensions": ["zip", "tar", "tar.gz", "tgz", "tar.bz2", "tar.xz", "rar", "cpio"]
       },
       "family": "archive",

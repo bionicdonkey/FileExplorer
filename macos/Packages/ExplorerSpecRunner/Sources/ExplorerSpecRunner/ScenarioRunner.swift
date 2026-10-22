@@ -11,7 +11,7 @@ public struct ScenarioRunner {
         do {
             switch scenario.kind {
             case .domain: try DomainRunner.run(scenario, mode: mode, specRoot: spec.root)
-            case .adapter: throw RunError("adapter scenarios are not implemented by this runner yet")
+            case .adapter: try AdapterRunner.run(scenario, mode: mode, specRoot: spec.root)
             }
             return nil
         } catch {

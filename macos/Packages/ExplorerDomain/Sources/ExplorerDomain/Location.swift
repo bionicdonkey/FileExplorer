@@ -23,9 +23,20 @@ public struct Location: Hashable, CustomStringConvertible {
 
     /// A local `file:` location at an explicit filesystem boundary. `path` must be absolute.
     public init(localPath path: String) {
-        // Escapes the way a filename-to-URI conversion does, then runs the ordinary canonical form.
-        let escaped = URIText.escape(path, allowing: URIText.pathAllowed)
+        // Normalised lexically first (`.`, `..` and repeated slashes), the way a path-to-file
+        // conversion does, so one file has one identity. Then escaped, then the ordinary canonical form.
+        let escaped = URIText.escape(Location.normalizedPath(path), allowing: URIText.pathAllowed)
         self.uri = (try? Location.canonicalize("file://" + escaped)) ?? "file://" + escaped
+    }
+
+    static func normalizedPath(_ path: String) -> String {
+        var parts: [Substring] = []
+        for segment in path.split(separator: "/", omittingEmptySubsequences: true) {
+            if segment == "." { continue }
+            if segment == ".." { _ = parts.popLast(); continue }
+            parts.append(segment)
+        }
+        return "/" + parts.joined(separator: "/")
     }
 
     /// The current user's home directory.

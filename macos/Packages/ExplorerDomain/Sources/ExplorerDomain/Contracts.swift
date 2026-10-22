@@ -164,7 +164,7 @@ public struct OperationError: Error, Equatable, CustomStringConvertible {
 }
 
 public enum MutationEffect: String, Equatable {
-    case unchanged, changed, partiallyChanged, unknown
+    case unchanged, changed, partiallyChanged = "partially_changed", unknown
 }
 
 /// No rollback or atomicity is implied. `remaining` includes failed and unattempted sources; an
@@ -463,7 +463,7 @@ public enum BackendFailure: String, CaseIterable {
 }
 
 public extension OperationError {
-    init(_ failure: BackendFailure, source: Location? = nil, destination: Location? = nil) {
+    init(failure: BackendFailure, source: Location? = nil, destination: Location? = nil) {
         self.init(failure.kind, source: source, destination: destination)
     }
 }
