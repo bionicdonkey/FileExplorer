@@ -29,7 +29,8 @@ enum DirectoryWatcher {
         let callback: FSEventStreamCallback = { _, info, count, paths, flags, _ in
             guard let info else { return }
             let box = Unmanaged<Box>.fromOpaque(info).takeUnretainedValue()
-            let list = unsafeBitCast(paths, to: NSArray.self) as? [String] ?? []
+            // With UseCFTypes the paths arrive as a CFArray of CFString, not a C string array.
+            let list = Unmanaged<NSArray>.fromOpaque(paths).takeUnretainedValue() as? [String] ?? []
             var affected = false
             for index in 0..<count {
                 let flag = flags[index]
@@ -42,7 +43,7 @@ enum DirectoryWatcher {
             if affected { DispatchQueue.main.async { box.changed() } }
         }
         guard let stream = FSEventStreamCreate(nil, callback, &context, [box.takeUnretainedValue().directory] as CFArray, FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
-                                               0.1, FSEventStreamCreateFlags(kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagNoDefer)) else {
+                                               0.1, FSEventStreamCreateFlags(kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagNoDefer | kFSEventStreamCreateFlagUseCFTypes)) else {
             box.release()
             return nil
         }

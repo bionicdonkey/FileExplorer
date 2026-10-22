@@ -5,7 +5,7 @@ public enum OperationKind: String, Codable, Equatable {
 
     init(_ kind: MutationKind) { self = OperationKind(rawValue: kind.rawValue)! }
 
-    var mutation: MutationKind? { MutationKind(rawValue: rawValue) }
+    public var mutation: MutationKind? { MutationKind(rawValue: rawValue) }
 }
 
 public enum RecordState: Equatable {
@@ -130,6 +130,18 @@ public final class OperationManager {
         }
         changed?()
         return id
+    }
+
+    /// Runs a conflicted operation again for what it did not do, with the user's decision.
+    /// Nil unless the record failed on a conflict and something remains.
+    @discardableResult
+    public func resolveConflict(_ id: UInt64, decision: ConflictDecision) -> UInt64? {
+        guard let record = records.first(where: { $0.id == id }), let mutation = record.kind.mutation, let summary = summaries[id],
+              summary.errorKind == OperationErrorKind.conflict.rawValue else { return nil }
+        let remaining = summary.remaining.compactMap { try? Location(uri: $0) }
+        guard !remaining.isEmpty else { return nil }
+        return submit(mutation, sources: remaining, destination: record.destinationURI.flatMap { try? Location(uri: $0) },
+                      explicitTarget: summary.explicitTarget.flatMap { try? Location(uri: $0) }, decision: decision)
     }
 
     private func allocateID() -> UInt64 {

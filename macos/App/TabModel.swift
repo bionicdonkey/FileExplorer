@@ -22,6 +22,8 @@ final class TabModel {
     let navigation: NavigationCoordinator
     let search: SearchCoordinator
     var onChange: ((TabChange) -> Void)?
+    /// Asks the view to start renaming this item (from the menu or the keyboard).
+    var onRenameRequested: ((FileItem) -> Void)?
 
     private(set) var options = ViewOptions()
     /// Items in display order, as groups (one untitled group when not grouped).
@@ -141,6 +143,8 @@ final class TabModel {
 
     private var sourceItems: [FileItem] {
         if case .search(_, let items) = state.content { return items.map(merged) }
+        // While a search is running the folder's own items would be misleading next to "Searching…".
+        if isSearching { return [] }
         return (state.directory?.entries ?? []).map { merged(FileItem(snapshot: $0)) }
     }
 
@@ -245,6 +249,12 @@ final class TabModel {
     }
 
     var searchOutcome: SearchOutcome? { search.outcome }
+
+    /// What to call an item in the list: its name, or while searching its path under the searched folder.
+    func displayName(for item: FileItem) -> String {
+        guard isSearching, let root = underlyingLocation.localPath, let path = item.location.localPath, path.hasPrefix(root + "/") else { return item.name }
+        return String(path.dropFirst(root.count + 1))
+    }
 
     func retrySearch() { search.retry { [weak self] _ in self?.rebuild(); self?.notify([.items, .search]) }; notify([.search]) }
 

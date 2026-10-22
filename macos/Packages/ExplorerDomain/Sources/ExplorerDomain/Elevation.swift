@@ -75,3 +75,16 @@ public extension OperationManager {
         }
     }
 }
+
+public extension OperationManager {
+    /// The single privileged request that would redo a failed record, if it is eligible.
+    func elevatedRequest(for id: UInt64) -> ElevatedRequest? {
+        guard isEligibleForElevatedRetry(id), let record = records.first(where: { $0.id == id }), let mutation = record.kind.mutation,
+              let source = try? Location(uri: record.sourceURIs[0]) else { return nil }
+        let request = OperationRequest(id: OperationID(id), kind: mutation, sources: [source],
+                                       destination: record.destinationURI.flatMap { try? Location(uri: $0) },
+                                       explicitTarget: summary(id)?.explicitTarget.flatMap { try? Location(uri: $0) },
+                                       capabilityVersion: 0, cancellation: CancellationToken())
+        return ElevatedRequest(retrying: request)
+    }
+}
