@@ -2,6 +2,7 @@
   "id": "domain/location/location-bar-input-keeps-remote-identity",
   "kind": "domain",
   "summary": "The location bar keeps trash, network and remote URIs as they are, turns a bare path into a file URI, and refuses credentials",
+  "platforms": {"macos": {"note": "Identity and parsing are identical; the macOS adapters answer unsupported for remote locations (decision D2)."}},
   "steps": [
     {"expect": "location", "via": "input", "input": "trash:///", "canonical": "trash:///"},
     {"expect": "location", "via": "input", "input": "smb://host/share", "canonical": "smb://host/share"},

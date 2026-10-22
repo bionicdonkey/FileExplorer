@@ -3,6 +3,7 @@
   "kind": "domain",
   "summary": "Unmounting the current share cancels the pending refresh and keeps its history; retrying reconnects, and a failed reconnect stays unavailable",
   "given": {"location": "file:///home"},
+  "platforms": {"macos": {"note": "Applies to any volume that goes away (eject, unmount); on macOS the mount itself is Finder's."}},
   "steps": [
     {"do": "navigate", "subject": "navigation", "to": "file:///home"},
     {"port": "directory", "request": 1, "respond": {"succeeded": {"entries": []}}},

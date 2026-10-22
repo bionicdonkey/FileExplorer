@@ -3,9 +3,9 @@ import ExplorerDomain
 
 /// `kind: "domain"` scenarios: the domain state machines over scripted ports.
 enum DomainRunner {
-    static func run(_ scenario: Scenario, mode: RunMode) throws {
+    static func run(_ scenario: Scenario, mode: RunMode, specRoot: URL) throws {
         if mode == .excluded { throw RunError("excluded domain scenarios are not implemented by this runner yet") }
-        let world = try DomainWorld(given: scenario.given)
+        let world = try DomainWorld(given: scenario.given, specRoot: specRoot)
         for (index, step) in try scenario.effectiveSteps(platform: "macos").enumerated() {
             do { try perform(step, in: world) } catch let error as RunError { throw RunError("step \(index): \(error)") }
         }
@@ -20,12 +20,18 @@ enum DomainRunner {
             case "navigation": try navigationAction(world, action, fields)
             case "operations": try world.operations.action(world, action, fields)
             case "reducer": try world.operations.reducerAction(action, fields)
+            case "search": try world.search.action(world, action, fields)
+            case "clock": try world.search.clockAction(action, fields)
+            case "search_history": try world.search.historyAction(action, fields)
+            case "clipboard": try world.pure.clipboardAction(action, fields)
+            case "pins": try world.pure.pinsAction(action, fields)
             default: throw RunError("subject \(subject) is not implemented by the domain runner yet")
             }
         case .portScript(let port):
             switch port {
             case "directory": try scriptDirectory(world, fields)
             case "capabilities", "operations": try world.operations.scriptPort(world, fields)
+            case "search": try world.search.scriptPort(fields)
             default: throw RunError("port \(port) is not implemented by the domain runner yet")
             }
         case .expectation(let name):
@@ -34,6 +40,19 @@ enum DomainRunner {
             case "request_cancelled" where fields.string("port") == "directory": try expectDirectoryCancelled(world, fields)
             case "view" where fields.string("subject") == "navigation": try expectNavigationView(world, fields)
             case "port_requests" where ["capabilities", "operations"].contains(fields.string("port") ?? ""): try world.operations.expectPortRequests(fields)
+            case "port_requests" where fields.string("port") == "search": try world.search.expectPortRequests(fields)
+            case "request_cancelled" where fields.string("port") == "search": try world.search.expectCancelled(fields)
+            case "view" where fields.string("subject") == "search": try world.search.expectView(world, fields)
+            case "search_history": try world.search.expectHistory(fields)
+            case "location": try world.pure.expectLocation(world, fields)
+            case "session": try world.pure.expectSession(fields)
+            case "named_child": try world.pure.expectNamedChild(fields)
+            case "clipboard_payload": try world.pure.expectClipboardPayload(fields)
+            case "clipboard": try world.pure.expectClipboard(fields)
+            case "pins": try world.pure.expectPins(fields)
+            case "activation": try world.pure.expectActivation(fields)
+            case "file_types_table": try world.pure.expectFileTypesTable()
+            case "error_table": try world.pure.expectErrorTable()
             case "record", "lock_keys", "submit_result", "cancel_result", "reducer": try world.operations.expectation(world, name, fields)
             default: throw RunError("expectation \(name) is not implemented by the domain runner yet")
             }

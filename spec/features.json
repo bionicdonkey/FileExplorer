@@ -99,7 +99,7 @@
         "state": "parity"
       },
       "macos": {
-        "state": "pending"
+        "state": "parity"
       }
     },
     {
@@ -444,7 +444,7 @@
         "state": "parity"
       },
       "macos": {
-        "state": "pending"
+        "state": "parity"
       }
     },
     {
@@ -458,7 +458,8 @@
         "state": "parity"
       },
       "macos": {
-        "state": "pending"
+        "state": "approximate",
+        "note": "Location parsing, canonical form and persistence keep remote URIs (smb://, sftp://, trash://, network://) exactly as on Linux, but the macOS adapters answer unsupported for them: remote locations are excluded for v1 (decision D2). A share mounted by Finder appears under /Volumes and works as a local path."
       }
     },
     {
@@ -472,7 +473,8 @@
         "state": "parity"
       },
       "macos": {
-        "state": "pending"
+        "state": "approximate",
+        "note": "A volume that is unmounted or ejected while a tab is on it, and the retry after it returns, behave as on Linux. The authentication prompt is not the app's: Finder owns mounting and credentials on macOS."
       },
       "note": "Only the retry after a mount becomes unavailable is covered (the scenario). Parenting the authentication dialog on the requesting window (GTK MountOperation) has no automated test on either platform."
     },

@@ -36,12 +36,16 @@ final class DomainWorld {
     var bound: [String: Bound] = [:]
     let defaultCapabilities: JSON
     let operations = OperationsSubject()
+    let search: SearchSubject
+    let pure: PureSubject
 
-    init(given: JSON) throws {
+    init(given: JSON, specRoot: URL) throws {
         let start = try Location(uri: given.string("location") ?? "file:///")
         tab = TabState(location: start)
         navigation = NavigationCoordinator(state: tab, repository: directory)
         defaultCapabilities = given.dict("capabilities") ?? [:]
+        search = SearchSubject(tab: tab)
+        pure = PureSubject(specRoot: specRoot)
     }
 }
 

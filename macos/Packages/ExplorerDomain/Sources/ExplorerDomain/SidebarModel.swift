@@ -21,3 +21,29 @@ public struct SidebarNode: Equatable {
         self.location = location
     }
 }
+
+/// Pinned locations, persisted as canonical URIs so a remote or missing location keeps the
+/// identity it was pinned with. A pin that fails validation on load is skipped, not fatal.
+public final class PinStore {
+    private let file: URL?
+    public private(set) var pins: [Location] = []
+    public private(set) var notices: [RecoverableStateNotice] = []
+
+    public init(file: URL? = nil) {
+        self.file = file
+        guard let file, let data = try? BoundedState.read(file), let state = try? SessionCodec.decodeState(data) else { return }
+        pins = state.locations
+        notices = state.notices
+    }
+
+    public func pin(_ location: Location) {
+        if !pins.contains(location) { pins.append(location) }
+    }
+
+    public func unpin(_ location: Location) { pins.removeAll { $0 == location } }
+
+    public func save() throws {
+        guard let file else { return }
+        try BoundedState.write(try SessionCodec.encode(pins), to: file)
+    }
+}

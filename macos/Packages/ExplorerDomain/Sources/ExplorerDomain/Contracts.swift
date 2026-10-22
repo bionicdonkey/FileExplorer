@@ -438,3 +438,32 @@ public struct SearchCompletion {
         self.outcome = outcome
     }
 }
+
+/// The backend failures an adapter can meet, named independently of any platform
+/// (`spec/contracts/errors.json`, "failures"). An adapter maps its own errors (errno values,
+/// `CocoaError` codes) onto these, and the table below maps them onto an error kind.
+public enum BackendFailure: String, CaseIterable {
+    case permissionDenied = "permission_denied", notMounted = "not_mounted", hostNotFound = "host_not_found"
+    case notConnected = "not_connected", exists, wouldMerge = "would_merge", notFound = "not_found"
+    case readOnly = "read_only", notSupported = "not_supported", invalidArgument = "invalid_argument"
+    case invalidFilename = "invalid_filename", other
+
+    public var kind: OperationErrorKind {
+        switch self {
+        case .permissionDenied: return .permissionDenied
+        case .notMounted, .hostNotFound, .notConnected: return .mountUnavailable
+        case .exists, .wouldMerge: return .conflict
+        case .notFound: return .notFound
+        case .readOnly: return .readOnly
+        case .notSupported: return .unsupported
+        case .invalidArgument, .invalidFilename: return .invalidRequest
+        case .other: return .unknown
+        }
+    }
+}
+
+public extension OperationError {
+    init(_ failure: BackendFailure, source: Location? = nil, destination: Location? = nil) {
+        self.init(failure.kind, source: source, destination: destination)
+    }
+}
