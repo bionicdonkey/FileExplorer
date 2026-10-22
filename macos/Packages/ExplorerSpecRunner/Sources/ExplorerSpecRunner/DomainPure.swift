@@ -7,7 +7,7 @@ final class PureSubject {
     let specRoot: URL
     var clipboard = ClipboardState()
     private var pinsDirectory: URL?
-    private var pins: PinStore?
+    private var pins: SidebarPreferences?
 
     init(specRoot: URL) { self.specRoot = specRoot }
 
@@ -160,11 +160,11 @@ final class PureSubject {
 
     func pinsAction(_ name: String, _ step: JSON) throws {
         let file = try pinsFile()
-        if pins == nil { pins = PinStore(file: file) }
+        if pins == nil { pins = SidebarPreferences(file: file) }
         switch name {
         case "pin": pins!.pin(try location(try require(step.string("uri"), "needs `uri`")))
         case "save": try pins!.save()
-        case "reload": pins = PinStore(file: file)
+        case "reload": pins = SidebarPreferences(file: file)
         default: throw RunError("pins has no action \(name)")
         }
     }
