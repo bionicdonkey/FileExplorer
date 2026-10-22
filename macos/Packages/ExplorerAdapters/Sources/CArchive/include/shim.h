@@ -42,4 +42,16 @@ const char *archive_entry_pathname(struct archive_entry *);
 int64_t archive_entry_size(struct archive_entry *);
 unsigned int archive_entry_filetype(struct archive_entry *);
 const char *archive_format_name(struct archive *);
+int64_t archive_filter_bytes(struct archive *, int);
+time_t archive_entry_mtime(struct archive_entry *);
+mode_t archive_entry_mode(struct archive_entry *);
+mode_t archive_entry_perm(struct archive_entry *);
+const char *archive_entry_symlink(struct archive_entry *);
+const char *archive_entry_hardlink(struct archive_entry *);
+int archive_entry_size_is_set(struct archive_entry *);
+void archive_entry_set_symlink(struct archive_entry *, const char *);
+void archive_entry_set_mtime(struct archive_entry *, time_t, long);
+int archive_write_set_options(struct archive *, const char *);
+int archive_write_add_filter_none(struct archive *);
+int archive_read_support_format_empty(struct archive *);
 #endif

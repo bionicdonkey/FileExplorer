@@ -24,6 +24,10 @@ enum AdapterBound {
     case search(SearchOutcome)
     /// An operation manager that persisted its history to a file of its own.
     case history(HistoryRun)
+    /// Extraction: success, or the reason it gave.
+    case extract(Result<Void, RunError>)
+    /// Compression: the archive's path relative to the sandbox, or the reason it gave.
+    case compress(Result<String, RunError>)
 }
 
 final class HistoryRun {
@@ -46,8 +50,8 @@ final class AdapterWorld {
     let specRoot: URL
     var bound: [String: AdapterBound] = [:]
     var nextOperationID: UInt64 = 1
-    let operations = LocalFileOperations()
-    let directory = LocalDirectoryRepository()
+    let operations: FileOperations = ArchiveFileOperations(wrapping: LocalFileOperations())
+    let directory: DirectoryRepository = DirectoryRouter()
     let searcher = LocalSearchRepository()
 
     init(specRoot: URL) throws {
@@ -57,6 +61,14 @@ final class AdapterWorld {
 
     /// A sandbox-relative path, or a URI when the text names a scheme.
     func locate(_ text: String) throws -> Location {
+        // `in-archive:ARCHIVE!/INNER` names an entry inside a local archive; INNER is URI-escaped.
+        if text.hasPrefix("in-archive:") {
+            let rest = text.dropFirst("in-archive:".count)
+            guard let split = rest.range(of: "!/") else { throw RunError("in-archive: needs `ARCHIVE!/INNER`") }
+            let archive = String(rest[..<split.lowerBound]), inner = String(rest[split.upperBound...])
+            let root = try Location(localPath: sandbox.path(archive)).archiveContents()
+            return try location(root.uri + inner)
+        }
         if text.contains("://") { return try location(text) }
         return Location(localPath: sandbox.path(text))
     }
@@ -111,6 +123,10 @@ enum AdapterRunner {
                     return
                 }
                 world.bound[fields.string("as") ?? "_"] = .search(outcome)
+            case "extract":
+                world.bound[fields.string("as") ?? "_"] = .extract(try extract(world, fields))
+            case "compress":
+                world.bound[fields.string("as") ?? "_"] = .compress(try compress(world, fields))
             case "manage":
                 world.bound[fields.string("as") ?? "_"] = .history(try manage(world, fields))
             case "inspect_visible":
@@ -251,6 +267,41 @@ enum AdapterRunner {
         }
     }
 
+    /// Extracts through the application's own entry point, as a job on an operation manager, and
+    /// waits for it to finish.
+    static func extract(_ world: AdapterWorld, _ step: JSON) throws -> Result<Void, RunError> {
+        let manager = OperationManager(backend: world.operations, capabilities: FileExecutor.localCapabilities)
+        let archive = try world.locate(try require(step.string("archive"), "extract needs `archive`"))
+        let parent = try world.locate(step.string("into") ?? ".")
+        var failure: String?
+        guard ArchiveTools.extract(manager: manager, archive: archive, parent: parent, onFailure: { failure = $0 }) else {
+            return .failure(RunError("extraction did not begin"))
+        }
+        try world.pump { manager.records.allSatisfy { !$0.state.isActive } && !manager.records.isEmpty }
+        // The failure message is delivered just after the job finishes.
+        try world.pump { failure != nil || manager.records.last?.state == .completed }
+        if let failure { return .failure(RunError(failure)) }
+        return manager.records.last?.state == .completed ? .success(()) : .failure(RunError("extraction ended as \(String(describing: manager.records.last?.state))"))
+    }
+
+    static func compress(_ world: AdapterWorld, _ step: JSON) throws -> Result<String, RunError> {
+        let format: ArchiveFormat
+        switch try require(step.string("format"), "compress needs `format`") {
+        case "zip": format = .zip
+        case "7z": format = .sevenZip
+        case "tar_gz": format = .tarGz
+        case let other: throw RunError("unknown archive format \(other)")
+        }
+        var progress: [(UInt64, UInt64)] = []
+        do {
+            let path = try ArchiveTools.compressBlocking(sources: step.strings("sources").map(world.sandbox.path), format: format,
+                                                         progress: { progress.append(($0, $1)) }, cancelled: { false })
+            // Progress climbs to the size of the data and ends there.
+            if let first = progress.first, let last = progress.last, first.0 != 0 || last.0 != last.1 { throw RunError("progress ran \(first) to \(last)") }
+            return .success(String(path.dropFirst(world.sandbox.root.count + 1)))
+        } catch let error as ArchiveError { return .failure(RunError(error.message)) }
+    }
+
     static func inspectVisible(_ world: AdapterWorld, _ step: JSON) throws -> RequestOutcome<[VisibleMetadata]> {
         let cancellation = CancellationToken()
         if step.string("cancel") == "immediately" { cancellation.cancel() }
@@ -343,6 +394,13 @@ enum AdapterRunner {
                 try checkFailure(last, step.dict("error"))
             case .visible(let outcome):
                 try expectEqual("outcome", outcomeLabel(outcome), want)
+            case .extract(let result):
+                let got = { if case .success = result { return "succeeded" } else { return "failed" } }()
+                if got != want { throw RunError("extraction \(got), expected \(want): \(result)") }
+            case .compress(let result):
+                let got = { if case .success = result { return "succeeded" } else { return "failed" } }()
+                if got != want { throw RunError("compression \(got), expected \(want): \(result)") }
+                if case .success(let path) = result, let expected = step.string("archive"), path != expected { throw RunError("archive is \(path.debugDescription), expected \(expected.debugDescription)") }
             case .search, .history: throw RunError("this step has no single outcome")
             }
         case "effect":

@@ -14,7 +14,7 @@ public enum RecordState: Equatable {
     case failed(String)
     case cancelled
 
-    var isActive: Bool {
+    public var isActive: Bool {
         switch self {
         case .queued, .running, .cancelRequested: return true
         default: return false
