@@ -4,11 +4,11 @@ import ExplorerDomain
 
 /// The synchronous core of local file operations. It runs on a worker queue and reports through
 /// a closure; `LocalFileOperations` turns that into main-thread events.
-enum FileExecutor {
+public enum FileExecutor {
     static let capabilityVersion: UInt64 = 1
 
     /// What the local adapter supports before any particular path is looked at.
-    static var localCapabilities: CapabilitySnapshot {
+    public static var localCapabilities: CapabilitySnapshot {
         CapabilitySnapshot(version: capabilityVersion, supported: [.copy, .move, .create, .rename, .trash, .delete, .open],
                            stableOrder: true, containment: .knownAncestors([]))
     }

@@ -22,6 +22,20 @@ enum AdapterBound {
     case pages([RequestOutcome<DirectorySnapshot>])
     case visible(RequestOutcome<[VisibleMetadata]>)
     case search(SearchOutcome)
+    /// An operation manager that persisted its history to a file of its own.
+    case history(HistoryRun)
+}
+
+final class HistoryRun {
+    let file: URL
+    let directory: URL
+    var ids: [UInt64] = []
+    var states: [String] = []
+    init(directory: URL) {
+        self.directory = directory
+        file = directory.appendingPathComponent("history.json")
+    }
+    deinit { try? FileManager.default.removeItem(at: directory) }
 }
 
 /// `kind: "adapter"` scenarios: the real adapters over a real temporary filesystem. Asynchronous
@@ -97,6 +111,8 @@ enum AdapterRunner {
                     return
                 }
                 world.bound[fields.string("as") ?? "_"] = .search(outcome)
+            case "manage":
+                world.bound[fields.string("as") ?? "_"] = .history(try manage(world, fields))
             case "inspect_visible":
                 world.bound[fields.string("as") ?? "_"] = .visible(try inspectVisible(world, fields))
             case "mutate":
@@ -198,6 +214,43 @@ enum AdapterRunner {
         return received!
     }
 
+    /// Runs operations through the operation manager with history saved to a file outside the
+    /// sandbox (so it never shows up in a tree check), and waits for each to finish.
+    static func manage(_ world: AdapterWorld, _ step: JSON) throws -> HistoryRun {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("spec-history-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let run = HistoryRun(directory: directory)
+        let manager = OperationManager(backend: world.operations, capabilities: FileExecutor.localCapabilities, historyFile: run.file, retentionDays: 7)
+        for case let operation as JSON in try require(step.array("operations"), "manage needs `operations`") {
+            let kind = try OperationsSubject.mutationKind(try require(operation.string("kind"), "operation needs `kind`"))
+            let id = manager.submit(kind, sources: try operation.strings("sources").map(world.locate), destination: try operation.string("destination").map(world.locate))
+            try world.pump { manager.records.first { $0.id == id }?.finishedAt != nil }
+            let state: String
+            switch manager.records.first(where: { $0.id == id })!.state {
+            case .completed: state = "completed"
+            case .failed: state = "failed"
+            case .cancelled: state = "cancelled"
+            default: state = "active"
+            }
+            run.ids.append(id)
+            run.states.append(state)
+        }
+        return run
+    }
+
+    static func expectHistory(_ world: AdapterWorld, _ run: HistoryRun, _ step: JSON) throws {
+        if step.has("states") { try expectEqual("operation states", run.states, step.strings("states")) }
+        let forbidden = step.strings("persisted_lacks").map { $0 == "$sandbox" ? world.sandbox.root : $0 }
+        let raw = try String(contentsOf: run.file, encoding: .utf8)
+        for text in forbidden where raw.contains(text) { throw RunError("the saved history reveals \(text.debugDescription)") }
+        if step.has("reloaded_records") || !forbidden.isEmpty {
+            let reloaded = OperationManager(backend: world.operations, capabilities: FileExecutor.localCapabilities, historyFile: run.file, retentionDays: 7)
+            if let count = step.int("reloaded_records") { try expectEqual("reloaded records", reloaded.records.count, count) }
+            let shown = "\(reloaded.records) \(run.ids.map { reloaded.summary($0) as Any })"
+            for text in forbidden where shown.contains(text) { throw RunError("the reloaded history reveals \(text.debugDescription)") }
+        }
+    }
+
     static func inspectVisible(_ world: AdapterWorld, _ step: JSON) throws -> RequestOutcome<[VisibleMetadata]> {
         let cancellation = CancellationToken()
         if step.string("cancel") == "immediately" { cancellation.cancel() }
@@ -290,7 +343,7 @@ enum AdapterRunner {
                 try checkFailure(last, step.dict("error"))
             case .visible(let outcome):
                 try expectEqual("outcome", outcomeLabel(outcome), want)
-            case .search: throw RunError("use `search` to check a search outcome")
+            case .search, .history: throw RunError("this step has no single outcome")
             }
         case "effect":
             let completion = try require(try run().terminal.completion, "no completion")
@@ -352,6 +405,9 @@ enum AdapterRunner {
             for (field, present) in [("has_modified", row.modified != nil), ("has_content_type", row.contentType != nil)] {
                 if let want = step.bool(field) { try expectEqual("\(path) \(field)", present, want) }
             }
+        case "history":
+            guard case .history(let run) = try bound() else { throw RunError("that step did not run the operation manager") }
+            try expectHistory(world, run, step)
         case "search":
             guard case .search(let outcome) = try bound() else { throw RunError("that step did not run a search") }
             var label = "unsupported", matches: [EntrySnapshot]?, limits: [SearchLimit] = [], scopeLimited: Bool?, reason: SearchIncompleteReason?

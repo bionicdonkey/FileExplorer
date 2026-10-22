@@ -322,7 +322,8 @@
         "state": "parity"
       },
       "macos": {
-        "state": "pending"
+        "state": "parity",
+        "note": "Trash moves items to the user's Trash with FileManager.trashItem; unlike on Linux there is no put-back metadata, which no scenario covers."
       }
     },
     {
@@ -336,7 +337,7 @@
         "state": "parity"
       },
       "macos": {
-        "state": "pending"
+        "state": "parity"
       }
     },
     {
@@ -493,7 +494,7 @@
         "state": "parity"
       },
       "macos": {
-        "state": "pending"
+        "state": "parity"
       }
     },
     {
@@ -507,7 +508,7 @@
         "state": "parity"
       },
       "macos": {
-        "state": "pending"
+        "state": "parity"
       }
     }
   ]

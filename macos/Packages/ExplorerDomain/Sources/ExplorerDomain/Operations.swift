@@ -144,6 +144,8 @@ public final class OperationCoordinator {
     public static let maximumRecords = 100
     private let backend: FileOperations
     private var records: [Record] = []
+    /// Told after every accepted event and after a submission, with the record as it now stands.
+    public var observer: ((OperationProjection) -> Void)?
 
     public init(backend: FileOperations) { self.backend = backend }
 
@@ -184,6 +186,7 @@ public final class OperationCoordinator {
         let projection = OperationProjection(id: id, request: request, completion: OperationCompletion(remaining: request.sources), retryOf: retryOf)
         let record = Record(projection: projection, locks: locks, decision: decision)
         records.append(record)
+        observer?(projection)
         if decision == .skip || decision == .cancelRemaining {
             let completion = record.projection.completion
             accept(decision == .skip
@@ -319,6 +322,7 @@ public final class OperationCoordinator {
         }
         p.events.append(event)
         record.projection = p
+        observer?(p)
         guard event.isTerminal else { return }
         var excess = max(0, records.filter { $0.reducer.isTerminal }.count - OperationCoordinator.maximumRecords)
         records.removeAll { record in
