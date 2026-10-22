@@ -62,7 +62,9 @@
       "ui_tests": {
         "macos": [
           "Tests/UnitTests/TabModelTests.swift::testBackAndUpWalkTheHistory",
-          "Tests/UnitTests/TabModelTests.swift::testAMissingFolderReportsAReasonAndKeepsTheTabUsable"
+          "Tests/UnitTests/TabModelTests.swift::testAMissingFolderReportsAReasonAndKeepsTheTabUsable",
+          "Tests/UnitTests/WindowBehaviorTests.swift::testAFileCreatedOutsideTheAppAppearsWithoutARefresh",
+          "Tests/UnitTests/WindowBehaviorTests.swift::testTheDirectoryWatcherReportsCreationModificationAndRemoval"
         ]
       }
     },
@@ -209,6 +211,12 @@
       },
       "macos": {
         "state": "parity"
+      },
+      "ui_tests": {
+        "macos": [
+          "Tests/UnitTests/WindowBehaviorTests.swift::testAFileChangedOutsideTheAppIsShownWithItsNewSize",
+          "Tests/UnitTests/WindowBehaviorTests.swift::testNavigatingAwayForgetsTheFetchedMetadata"
+        ]
       }
     },
     {

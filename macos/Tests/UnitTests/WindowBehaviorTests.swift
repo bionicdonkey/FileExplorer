@@ -358,4 +358,59 @@ final class WindowBehaviorTests: XCTestCase {
         controller.tab.recordSearchTerm("secret")
         XCTAssertTrue(services.searchHistory.entries.isEmpty, "turning history off forgets what was kept")
     }
+
+    // MARK: watching
+
+    func testAFileCreatedOutsideTheAppAppearsWithoutARefresh() {
+        write("first.txt")
+        let controller = openWindow()
+        XCTAssertEqual(controller.tab.displayed.map(\.name), ["first.txt"])
+        write("second.txt")
+        wait({ controller.tab.displayed.map(\.name) == ["first.txt", "second.txt"] }, timeout: 10)
+    }
+
+    func testAFileChangedOutsideTheAppIsShownWithItsNewSize() throws {
+        write("grow.txt")
+        let controller = openWindow()
+        func size() -> UInt64? {
+            controller.tab.requestMetadata(for: controller.tab.displayed)
+            return controller.tab.displayed.first { $0.name == "grow.txt" }?.size
+        }
+        wait { size() == 1 }
+        let handle = try FileHandle(forWritingTo: folder.appendingPathComponent("grow.txt"))
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data(repeating: 0x78, count: 1000))
+        try handle.close()
+        wait({ size() == 1001 }, timeout: 10)
+    }
+
+    func testTheDirectoryWatcherReportsCreationModificationAndRemoval() throws {
+        write("w.txt")
+        let controller = openWindow()
+        var fired = 0
+        let handle = controller.tab.navigation.watch(Location(localPath: folder.path)) { fired += 1 }
+        XCTAssertNotNil(handle)
+        settle(0.5)
+        let before = fired
+        let file = try FileHandle(forWritingTo: folder.appendingPathComponent("w.txt"))
+        try file.seekToEnd()
+        try file.write(contentsOf: Data("more".utf8))
+        try file.close()
+        wait({ fired > before }, timeout: 8)
+        let afterModify = fired
+        try FileManager.default.removeItem(at: folder.appendingPathComponent("w.txt"))
+        wait({ fired > afterModify }, timeout: 8)
+        handle?.cancel()
+    }
+
+    func testNavigatingAwayForgetsTheFetchedMetadata() throws {
+        write("meta.txt")
+        let other = root.appendingPathComponent("other")
+        try FileManager.default.createDirectory(at: other, withIntermediateDirectories: true)
+        let controller = openWindow()
+        controller.tab.requestMetadata(for: controller.tab.displayed)
+        wait { controller.tab.fetchedMetadataCount == 1 }
+        controller.tab.navigate(to: Location(localPath: other.path))
+        XCTAssertEqual(controller.tab.fetchedMetadataCount, 0, "metadata fetched for a folder that was left is dropped at once")
+    }
 }

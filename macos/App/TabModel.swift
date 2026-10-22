@@ -77,17 +77,29 @@ final class TabModel {
         }
     }
 
+    /// Forgets what was fetched for the rows of the folder being left: it is cancelled when the view
+    /// navigates away, and a refreshed listing must not be overlaid with stale size and date.
+    /// How many rows have fetched metadata cached (for tests).
+    var fetchedMetadataCount: Int { metadata.count }
+
+    private func resetMetadata() {
+        cancelMetadata()
+        metadata.removeAll()
+        requestedMetadata.removeAll()
+    }
+
     func navigate(to location: Location) {
+        resetMetadata()
         endSearch(notify: false)
         navigation.navigate(to: location) { [weak self] _ in self?.listingChanged() }
         notify([.navigation])
     }
 
-    func back() { endSearch(notify: false); navigation.back { [weak self] _ in self?.listingChanged() }; notify([.navigation]) }
-    func forward() { endSearch(notify: false); navigation.forward { [weak self] _ in self?.listingChanged() }; notify([.navigation]) }
+    func back() { resetMetadata(); endSearch(notify: false); navigation.back { [weak self] _ in self?.listingChanged() }; notify([.navigation]) }
+    func forward() { resetMetadata(); endSearch(notify: false); navigation.forward { [weak self] _ in self?.listingChanged() }; notify([.navigation]) }
     func up() { if let parent { navigate(to: parent) } }
-    func refresh() { endSearch(notify: false); navigation.refresh { [weak self] _ in self?.listingChanged() }; notify([.navigation]) }
-    func retry() { navigation.retry { [weak self] _ in self?.listingChanged() }; notify([.navigation]) }
+    func refresh() { resetMetadata(); endSearch(notify: false); navigation.refresh { [weak self] _ in self?.listingChanged() }; notify([.navigation]) }
+    func retry() { resetMetadata(); navigation.retry { [weak self] _ in self?.listingChanged() }; notify([.navigation]) }
     func close() { navigation.closeTab(); watch?.cancel(); watch = nil }
 
     /// A removed volume invalidates its listing, never the tab's identity or history.
@@ -134,6 +146,7 @@ final class TabModel {
             self.refreshWork?.cancel()
             let work = DispatchWorkItem { [weak self] in
                 guard let self, !self.isSearching, !self.isLoading else { return }
+                self.resetMetadata()
                 self.navigation.refresh { [weak self] _ in self?.listingChanged() }
             }
             self.refreshWork = work
