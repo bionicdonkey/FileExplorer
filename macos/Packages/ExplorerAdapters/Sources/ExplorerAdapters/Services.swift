@@ -23,7 +23,12 @@ public final class SystemVolumes: VolumeProvider {
         startDiskArbitration()
     }
 
-    deinit { observers.forEach { NSWorkspace.shared.notificationCenter.removeObserver($0) } }
+    private final class WeakVolumes { weak var target: SystemVolumes?; init(_ target: SystemVolumes) { self.target = target } }
+
+    deinit {
+        observers.forEach { NSWorkspace.shared.notificationCenter.removeObserver($0) }
+        if let session { DASessionSetDispatchQueue(session, nil) }
+    }
 
     public func mountedVolumes() -> [MountedVolume] {
         let keys: [URLResourceKey] = [.volumeNameKey, .volumeIsInternalKey, .volumeIsRemovableKey, .volumeIsEjectableKey, .volumeIsLocalKey, .volumeIsBrowsableKey]
@@ -41,18 +46,20 @@ public final class SystemVolumes: VolumeProvider {
     private func startDiskArbitration() {
         guard let session = DASessionCreate(kCFAllocatorDefault) else { return }
         self.session = session
-        let context = Unmanaged.passUnretained(self).toOpaque()
+        // Callbacks already queued on the main queue can run after this object is gone, so they get a
+        // weak reference through a box that is deliberately never freed (a few bytes per instance).
+        let context = Unmanaged.passRetained(WeakVolumes(self)).toOpaque()
         DARegisterDiskAppearedCallback(session, nil, { disk, context in
             guard let context else { return }
-            Unmanaged<SystemVolumes>.fromOpaque(context).takeUnretainedValue().diskChanged(disk)
+            Unmanaged<WeakVolumes>.fromOpaque(context).takeUnretainedValue().target?.diskChanged(disk)
         }, context)
         DARegisterDiskDescriptionChangedCallback(session, nil, nil, { disk, _, context in
             guard let context else { return }
-            Unmanaged<SystemVolumes>.fromOpaque(context).takeUnretainedValue().diskChanged(disk)
+            Unmanaged<WeakVolumes>.fromOpaque(context).takeUnretainedValue().target?.diskChanged(disk)
         }, context)
         DARegisterDiskDisappearedCallback(session, nil, { disk, context in
             guard let context else { return }
-            Unmanaged<SystemVolumes>.fromOpaque(context).takeUnretainedValue().diskGone(disk)
+            Unmanaged<WeakVolumes>.fromOpaque(context).takeUnretainedValue().target?.diskGone(disk)
         }, context)
         DASessionSetDispatchQueue(session, DispatchQueue.main)
     }

@@ -12,8 +12,6 @@ final class FileCommands {
     var openInNewWindow: (Location) -> Void = { _ in }
     var showProperties: (FileItem) -> Void = { _ in }
 
-    static let cutType = NSPasteboard.PasteboardType("casa.alera.morinexplorer.cut")
-
     init(services: AppServices, tab: @escaping () -> TabModel?, window: @escaping () -> NSWindow?) {
         self.services = services
         currentTab = tab
@@ -32,16 +30,15 @@ final class FileCommands {
         pasteboard.clearContents()
         let urls = items.compactMap(\.pasteboardURL)
         if !urls.isEmpty { pasteboard.writeObjects(urls) }
-        pasteboard.setString(String(services.clipboard.generation), forType: Self.cutType)
         pasteboard.setString(items.map(\.name).joined(separator: "\n"), forType: .string)
+        services.clipboardChangeCount = pasteboard.changeCount
     }
 
     /// The pasteboard's sources: our own clipboard when it is still the current one (it knows about cut
     /// and about items inside archives), otherwise whatever file URLs another application put there.
     private func pasteSources() -> (locations: [Location], action: ClipboardAction)? {
         let pasteboard = NSPasteboard.general
-        let marker = pasteboard.string(forType: Self.cutType) ?? ""
-        if let payload = services.clipboard.payload, marker.hasSuffix(String(services.clipboard.generation)) {
+        if let payload = services.clipboard.payload, services.clipboardChangeCount == pasteboard.changeCount {
             return (payload.locations, payload.action)
         }
         let urls = (pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL]) ?? []

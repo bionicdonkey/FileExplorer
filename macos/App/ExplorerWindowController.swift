@@ -70,8 +70,8 @@ final class ExplorerWindowController: NSWindowController, NSWindowDelegate, NSTo
     let services: AppServices
     private unowned let manager: WindowManager
     private(set) var commands: FileCommands!
-    private var browser: BrowserViewController!
-    private var sidebar: SidebarViewController!
+    private(set) var browser: BrowserViewController!
+    private(set) var sidebar: SidebarViewController!
     private var split: NSSplitViewController!
     private var searchItem: NSSearchToolbarItem?
     private var viewModeGroup: NSToolbarItemGroup?

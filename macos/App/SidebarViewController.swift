@@ -69,6 +69,18 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         reload()
     }
 
+    /// The labels of every visible row, top to bottom (used by tests and accessibility checks).
+    var visibleLabels: [String] {
+        (0..<outline.numberOfRows).compactMap { row in
+            switch outline.item(atRow: row) {
+            case let section as SectionItem: return section.section.title
+            case let node as SidebarNode: return node.location.label
+            case let mount as MountItem: return mount.volume.label
+            default: return nil
+            }
+        }
+    }
+
     // MARK: data
 
     func reload() {

@@ -19,6 +19,8 @@ final class AppServices {
     let operations: OperationManager
     let searchRepository: SearchRepository
     let clipboard = ClipboardState()
+    /// The system pasteboard's change count right after our own copy; a different count means another application copied since.
+    var clipboardChangeCount: Int?
     let sidebarPreferences: SidebarPreferences
     let viewPreferences: ViewPreferencesStore
     let searchHistory: SearchHistory
