@@ -4,6 +4,7 @@
   "summary": "An unreadable source and a read-only destination both fail as permission_denied with no effect, so they remain eligible for an elevated retry",
   "note": "Skipped, not failed, when the process can read mode-000 files (root), since permission failures cannot be produced there.",
   "given": {"requires": ["unprivileged"], "tree": [{"file": "private", "content": "x", "mode": "unreadable"}, {"dir": "open"}, {"file": "plain", "content": "y"}, {"dir": "locked", "mode": "readonly"}]},
+  "platforms": {"macos": {"note": "The retry policy is identical. The macOS retry goes through a privileged helper (SMAppService daemon over XPC) instead of pkexec; the helper needs a signed build and user approval, so it is not exercised by the scenarios."}},
   "steps": [
     {"do": "operate", "kind": "copy", "sources": ["private"], "destination": "open", "as": "unreadable"},
     {"expect": "outcome", "ref": "$unreadable", "is": "failed", "error": {"kind": "permission_denied"}},

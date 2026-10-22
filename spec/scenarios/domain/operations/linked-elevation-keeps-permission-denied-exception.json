@@ -3,6 +3,7 @@
   "kind": "domain",
   "summary": "During a linked retry a permission-denied inspection does not block the operation: the retry still dispatches and succeeds",
   "given": {"capabilities": {"version": 1, "supported": ["list", "copy", "create", "search_filename", "trash"], "containment": {"ancestors": ["mock://host/root"]}}},
+  "platforms": {"macos": {"note": "The retry policy is identical. The macOS retry goes through a privileged helper (SMAppService daemon over XPC) instead of pkexec; the helper needs a signed build and user approval, so it is not exercised by the scenarios."}},
   "steps": [
     {"do": "submit", "subject": "operations", "id": 1, "kind": "copy", "sources": ["file:///source-1"], "destination": "file:///destination", "as": "op1"},
     {"port": "capabilities", "request": 1, "respond": {"failed": {"kind": "permission_denied"}}},

@@ -398,7 +398,8 @@
         "state": "parity"
       },
       "macos": {
-        "state": "pending"
+        "state": "approximate",
+        "note": "A permission-denied operation is retried through a privileged helper registered with SMAppService and reached over XPC (Linux re-executes itself through pkexec). The retry policy and the unchanged-effect permission failure are checked by the scenarios; the helper itself needs a signed build and the user's approval in System Settings, so it is built but unverified in CI."
       }
     },
     {

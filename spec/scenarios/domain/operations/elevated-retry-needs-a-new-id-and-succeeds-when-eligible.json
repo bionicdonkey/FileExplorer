@@ -3,6 +3,7 @@
   "kind": "domain",
   "summary": "After an unchanged local permission failure a linked retry is allowed only under a new operation id; it records what it retried and leaves the original untouched",
   "given": {"capabilities": {"version": 1, "supported": ["list", "copy", "create"], "containment": "opaque"}},
+  "platforms": {"macos": {"note": "The retry policy is identical. The macOS retry goes through a privileged helper (SMAppService daemon over XPC) instead of pkexec; the helper needs a signed build and user approval, so it is not exercised by the scenarios."}},
   "steps": [
     {"do": "submit", "subject": "operations", "id": 1, "kind": "copy", "sources": ["file:///source"], "destination": "file:///destination", "as": "op1"},
     {"port": "capabilities", "request": 1, "respond": {"succeeded": {}}},
