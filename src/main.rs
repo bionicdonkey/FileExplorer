@@ -36,6 +36,14 @@ fn main() {
                 gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
             );
         }
+        // A development build shows the icon from this source tree rather than whichever
+        // version is installed system-wide. (The shell's taskbar icon still comes from the
+        // installed desktop file; only icons the app itself draws, like the About page, change.)
+        #[cfg(debug_assertions)]
+        if let Some(display) = gtk::gdk::Display::default() {
+            gtk::IconTheme::for_display(&display)
+                .add_search_path(concat!(env!("CARGO_MANIFEST_DIR"), "/resources/icons"));
+        }
         let window = zorin_explorer::ui::window::ExplorerWindow::new(app);
         window.present();
     });

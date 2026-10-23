@@ -112,9 +112,11 @@ fn about_page() -> GtkBox {
     let identity = GtkBox::new(Orientation::Horizontal, 14);
     let icon = Image::from_icon_name("com.zorin.Explorer");
     icon.set_pixel_size(64);
-    icon.set_valign(gtk::Align::Start);
+    icon.set_valign(gtk::Align::Center);
+    icon.set_halign(gtk::Align::Start);
     identity.append(&icon);
     let text = GtkBox::new(Orientation::Vertical, 4);
+    text.set_valign(gtk::Align::Center);
     let name = Label::new(Some(details.0));
     name.add_css_class("title-2");
     name.set_xalign(0.0);
