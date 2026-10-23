@@ -4295,7 +4295,7 @@ fn open_with_submenu(
         let parent = submenu_parent.clone();
         let view = view.clone();
         other.connect_clicked(move |_| {
-            show_application_chooser(&parent, content_type.clone(), &location, view.clone())
+            show_application_chooser(&parent, content_type.clone(), view.clone())
         });
         menu.append(&other);
         show_submenu(&submenu_parent, &menu);
@@ -4312,33 +4312,13 @@ fn show_submenu(parent: &Button, menu: &GtkBox) {
     submenu.popup();
 }
 
-/// Inside a Flatpak sandbox GIO sees only the sandbox's own applications, so a
-/// chooser built from it lists almost nothing. The desktop portal shows the
-/// host's chooser instead.
-fn running_in_flatpak() -> bool {
-    std::path::Path::new("/.flatpak-info").exists()
-}
-
 #[allow(deprecated)]
 fn show_application_chooser(
     parent: &Button,
     content_type: String,
-    location: &Location,
     view: FileView,
 ) {
     let window = parent.root().and_downcast::<gtk::Window>();
-    if running_in_flatpak() {
-        let launcher = gtk::FileLauncher::new(Some(&gio::File::for_uri(location.uri())));
-        launcher.set_always_ask(true);
-        launcher.launch(window.as_ref(), gio::Cancellable::NONE, |result| {
-            if let Err(error) = result {
-                if !error.matches(gtk::DialogError::Dismissed) {
-                    eprintln!("Open With failed: {error}");
-                }
-            }
-        });
-        return;
-    }
     let dialog = gtk::AppChooserDialog::for_content_type(
         window.as_ref(),
         gtk::DialogFlags::MODAL,
@@ -6208,13 +6188,13 @@ mod tests {
     }
 
     #[test]
-    fn thumbnail_lookup_checks_the_shared_home_cache_before_the_sandbox_cache() {
+    fn thumbnail_lookup_checks_the_home_cache_before_xdg_cache_home() {
         let home = PathBuf::from("/home/tester");
-        let sandbox_cache = PathBuf::from("/home/tester/.var/app/casa.alera.LorinExplorer/cache");
+        let xdg_cache = PathBuf::from("/var/cache/tester");
 
         assert_eq!(
-            thumbnail_cache_homes_from(Some(&home), Some(&sandbox_cache)),
-            vec![home.join(".cache"), sandbox_cache]
+            thumbnail_cache_homes_from(Some(&home), Some(&xdg_cache)),
+            vec![home.join(".cache"), xdg_cache]
         );
     }
 

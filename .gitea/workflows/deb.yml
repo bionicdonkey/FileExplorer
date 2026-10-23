@@ -22,8 +22,9 @@ concurrency:
 
 jobs:
   deb:
-    # The `flatpak` label names the one runner here known to take container
-    # jobs. The job itself needs nothing privileged; the image is what matters.
+    # The `flatpak` label is only the name of the one runner here that takes container
+    # jobs (nothing is built as a Flatpak). The job itself needs nothing privileged;
+    # the image is what matters.
     runs-on: flatpak
     container:
       # Ubuntu 24.04 is the baseline (Zorin OS 18). The Depends line is computed

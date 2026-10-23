@@ -2,7 +2,6 @@
 /target/
 /build/
 /dist/
-/.flatpak-builder/
 *.log
 *.png
 .worktrees/
