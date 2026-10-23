@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Builds zorin-explorer_<version>_<arch>.deb from the current checkout.
+# Builds lorin-explorer_<version>_<arch>.deb from the current checkout.
 #
 #   packaging/deb/build-deb.sh [output-dir]      (default: dist/)
 #
@@ -16,8 +16,8 @@ cd "$root"
 
 version="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
 arch="$(dpkg --print-architecture)"
-name="zorin-explorer"
-app_id="com.zorin.Explorer"
+name="lorin-explorer"
+app_id="casa.alera.LorinExplorer"
 stage="$(mktemp -d)"
 trap 'rm -rf "$stage"' EXIT
 pkg="$stage/pkg"
@@ -36,7 +36,7 @@ install -d "$pkg/usr/share/doc/$name"
 copyright="$pkg/usr/share/doc/$name/copyright"
 cat > "$copyright" <<EOF
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
-Upstream-Name: Zorin Explorer
+Upstream-Name: Lorin Explorer
 Source: https://github.com/bionicdonkey/FileExplorer
 
 Files: *
@@ -78,12 +78,14 @@ Maintainer: Josh Benoit <18510219+bionicdonkey@users.noreply.github.com>
 Installed-Size: $(du -sk "$pkg/usr" | cut -f1)
 Depends: $depends
 Recommends: $recommends
+Replaces: zorin-explorer
+Conflicts: zorin-explorer
 Section: utils
 Priority: optional
 Homepage: https://github.com/bionicdonkey/FileExplorer
 Description: Explorer-style file manager for Linux
- Zorin Explorer is a native Explorer-style file manager for Linux, designed
- for Zorin OS and GNOME. It has tabs, a sidebar with quick access, archive
+ Lorin Explorer is a native Explorer-style file manager for Linux, designed
+ for GNOME and developed on Zorin OS. It has tabs, a sidebar with quick access, archive
  browsing, search and a file operations queue.
 EOF
 

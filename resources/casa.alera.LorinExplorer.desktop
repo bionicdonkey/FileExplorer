@@ -1,8 +1,8 @@
 [Desktop Entry]
-Name=Zorin Explorer
+Name=Lorin Explorer
 Comment=An Explorer-style file manager for Linux
-Exec=zorin-explorer %U
-Icon=com.zorin.Explorer
+Exec=lorin-explorer %U
+Icon=casa.alera.LorinExplorer
 Terminal=false
 Type=Application
 Categories=GTK;GNOME;Utility;FileManager;

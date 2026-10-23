@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use zorin_explorer::core::{
+use lorin_explorer::core::{
     application_preferences::{
         decode_session, decode_session_state, encode_session, import_legacy_local_paths,
         RecoverableStateNotice, UriStateV2,
@@ -57,7 +57,7 @@ fn untrusted_gio_file_input_is_fallible_without_panicking() {
     let untrusted = gio::File::for_uri("smb://user@host/share");
     assert_eq!(
         Location::try_from_file(untrusted),
-        Err(zorin_explorer::core::LocationError::UnsafeLocation)
+        Err(lorin_explorer::core::LocationError::UnsafeLocation)
     );
 }
 

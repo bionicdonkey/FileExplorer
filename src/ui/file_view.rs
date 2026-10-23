@@ -6210,7 +6210,7 @@ mod tests {
     #[test]
     fn thumbnail_lookup_checks_the_shared_home_cache_before_the_sandbox_cache() {
         let home = PathBuf::from("/home/tester");
-        let sandbox_cache = PathBuf::from("/home/tester/.var/app/com.zorin.Explorer/cache");
+        let sandbox_cache = PathBuf::from("/home/tester/.var/app/casa.alera.LorinExplorer/cache");
 
         assert_eq!(
             thumbnail_cache_homes_from(Some(&home), Some(&sandbox_cache)),

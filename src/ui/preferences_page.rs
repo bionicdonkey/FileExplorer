@@ -98,7 +98,7 @@ pub fn build(
 
 fn about_details() -> (&'static str, &'static str, &'static str) {
     (
-        "Zorin Explorer",
+        "Lorin Explorer",
         env!("CARGO_PKG_VERSION"),
         env!("CARGO_PKG_LICENSE"),
     )
@@ -110,7 +110,7 @@ fn about_page() -> GtkBox {
     let details = about_details();
 
     let identity = GtkBox::new(Orientation::Horizontal, 14);
-    let icon = Image::from_icon_name("com.zorin.Explorer");
+    let icon = Image::from_icon_name("casa.alera.LorinExplorer");
     icon.set_pixel_size(64);
     icon.set_valign(gtk::Align::Center);
     icon.set_halign(gtk::Align::Start);
@@ -129,7 +129,7 @@ fn about_page() -> GtkBox {
     page.append(&identity);
 
     let description = Label::new(Some(
-        "A native Explorer-style file manager for Linux, designed for Zorin OS and GNOME.",
+        "A native Explorer-style file manager for Linux, designed for GNOME and developed on Zorin OS.",
     ));
     description.set_wrap(true);
     description.set_xalign(0.0);
@@ -142,7 +142,7 @@ fn about_page() -> GtkBox {
     details_heading.set_margin_top(12);
     page.append(&details_heading);
     for text in [
-        format!("Application ID: com.zorin.Explorer"),
+        format!("Application ID: casa.alera.LorinExplorer"),
         format!("License: {}", details.2),
         "Built with GTK 4 and libadwaita".into(),
     ] {
@@ -165,7 +165,7 @@ fn general_page(
     heading.add_css_class("title-3");
     heading.set_xalign(0.0);
     page.append(&heading);
-    let close = CheckButton::with_label("Close Zorin Explorer when the last tab is closed");
+    let close = CheckButton::with_label("Close Lorin Explorer when the last tab is closed");
     close.set_active(preferences.borrow().close_on_last_tab);
     let stored = preferences.clone();
     close.connect_toggled(move |button| {
@@ -697,7 +697,7 @@ mod tests {
         assert_eq!(
             super::about_details(),
             (
-                "Zorin Explorer",
+                "Lorin Explorer",
                 env!("CARGO_PKG_VERSION"),
                 env!("CARGO_PKG_LICENSE")
             )

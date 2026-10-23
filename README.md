@@ -1,7 +1,11 @@
-# Zorin Explorer
+# Lorin Explorer
 
 A native Linux file manager with a Windows 11 Explorer-inspired interaction model, built with Rust,
-GTK 4, libadwaita and GIO. It targets Zorin OS and GNOME.
+GTK 4, libadwaita and GIO. It targets GNOME and is developed on Zorin OS.
+
+Lorin Explorer was called Zorin Explorer up to 0.7.0. The first run under the new name moves the old
+settings folder (`~/.config/zorin-explorer`) to `~/.config/lorin-explorer`, and the new Debian package
+replaces the old `zorin-explorer` one.
 
 The project is a pre-release (`0.7.0`). Core browsing, file operations, search and preferences are
 implemented and covered by tests. Tagged versions are published as a Debian package.
@@ -131,8 +135,8 @@ sandboxed package format cannot offer a file manager. It is built for Ubuntu 24.
 including Zorin OS 18.
 
 ```bash
-packaging/deb/build-deb.sh          # writes dist/zorin-explorer_<version>_<arch>.deb
-sudo apt install ./dist/zorin-explorer_*.deb
+packaging/deb/build-deb.sh          # writes dist/lorin-explorer_<version>_<arch>.deb
+sudo apt install ./dist/lorin-explorer_*.deb
 ```
 
 The `Depends` line is computed from the libraries the binary links, so the package is built on the
@@ -203,7 +207,7 @@ native faults.
 - Listing a local archive reads its entry headers once and caches the result until the file
   changes. A folder inside a large streaming format such as `.tar.xz` still costs one read of the
   archive the first time; a `.zip` or `.7z` reads only its index.
-- `resources/com.zorin.Explorer.gschema.xml` is present but unused — preferences persist as JSON
+- `resources/casa.alera.LorinExplorer.gschema.xml` is present but unused — preferences persist as JSON
   under `$XDG_CONFIG_HOME`, not GSettings.
 
 ## License

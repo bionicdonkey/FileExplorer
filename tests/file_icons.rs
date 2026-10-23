@@ -2,7 +2,7 @@
 //! fallback icon and is promoted when its metadata arrives. That promotion
 //! must reach small folders and the icon grid, not only large paged lists.
 use gtk::prelude::*;
-use zorin_explorer::{
+use lorin_explorer::{
     core::{Location, ViewMode, ViewOptions},
     ui::file_view::FileView,
 };

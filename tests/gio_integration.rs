@@ -1,5 +1,5 @@
 use std::{cell::RefCell, rc::Rc};
-use zorin_explorer::{
+use lorin_explorer::{
     core::{contracts::*, ports::FileOperations, Location},
     infrastructure::{gio_executor::GioExecutor, gio_operations::GioOperations},
 };
@@ -8,10 +8,10 @@ use gio::prelude::*;
 
 #[test]
 fn daily_uri_adapter_queries_nonlocal_gio_backend_without_a_mount() {
-    use zorin_explorer::core::ports::FileOperations;
+    use lorin_explorer::core::ports::FileOperations;
     let context = glib::MainContext::new();
     context.with_thread_default(|| {
-        let adapter = zorin_explorer::infrastructure::gio_operations::GioOperations::new_uri(context.clone());
+        let adapter = lorin_explorer::infrastructure::gio_operations::GioOperations::new_uri(context.clone());
         let result = std::rc::Rc::new(std::cell::RefCell::new(None));
         let output = result.clone();
         adapter.inspect_capabilities(CapabilityRequest {
@@ -25,7 +25,7 @@ fn daily_uri_adapter_queries_nonlocal_gio_backend_without_a_mount() {
 
 #[test]
 fn daily_registered_gio_uri_backend_executes_transfers_and_preserves_uri_history() {
-    use zorin_explorer::core::{OperationManager, OperationState};
+    use lorin_explorer::core::{OperationManager, OperationState};
     let fixture = tempfile::tempdir().unwrap();
     let root = fixture.path().to_path_buf();
     std::fs::create_dir(root.join("source")).unwrap();
@@ -48,7 +48,7 @@ fn daily_registered_gio_uri_backend_executes_transfers_and_preserves_uri_history
         uri("source").local_path().is_none(),
         "a provider's local projection must not grant local-only application actions"
     );
-    let remote_folder = zorin_explorer::core::FileItem::from_snapshot(&EntrySnapshot {
+    let remote_folder = lorin_explorer::core::FileItem::from_snapshot(&EntrySnapshot {
         location: uri("source"),
         display_name: "source".into(),
         kind: EntryKind::Directory,
@@ -60,7 +60,7 @@ fn daily_registered_gio_uri_backend_executes_transfers_and_preserves_uri_history
             ..Default::default()
         },
     });
-    let availability = zorin_explorer::ui::context_menu::CommandAvailability::for_capabilities(
+    let availability = lorin_explorer::ui::context_menu::CommandAvailability::for_capabilities(
         &[remote_folder],
         None,
     );
@@ -191,7 +191,7 @@ fn daily_registered_gio_uri_backend_executes_transfers_and_preserves_uri_history
     assert!(vfs.unregister_uri_scheme("dailyfixture"));
 }
 fn search_result(scope: SearchScope, mode: SearchMode, cancelled: bool) -> SearchOutcome {
-    use zorin_explorer::{
+    use lorin_explorer::{
         core::ports::SearchRepository, infrastructure::tracker_search::TrackerSearchRepository,
     };
     let context = glib::MainContext::new();
@@ -237,7 +237,7 @@ fn tracker_fallback_waits_for_executor_context_and_keeps_unavailable_explicit() 
         },
         time::Duration,
     };
-    use zorin_explorer::{
+    use lorin_explorer::{
         core::ports::SearchRepository,
         infrastructure::{
             gio_executor::{CancellationSignal, GioExecutor},
@@ -413,7 +413,7 @@ fn directory_result(
     page: PageRequest,
 ) -> RequestOutcome<DirectorySnapshot> {
     use gio::prelude::*;
-    use zorin_explorer::{
+    use lorin_explorer::{
         core::ports::DirectoryRepository, infrastructure::gio_directory::GioDirectoryRepository,
     };
     let context = glib::MainContext::new();
@@ -546,12 +546,12 @@ fn directory_listing_returns_owned_uri_identity_without_eager_advisory_metadata(
         );
     }
     // Exercise the active repository projection, not a hand-built FileInfo.
-    let item = zorin_explorer::core::FileItem::from_snapshot(file);
-    let availability = zorin_explorer::ui::context_menu::CommandAvailability::for_capabilities(
+    let item = lorin_explorer::core::FileItem::from_snapshot(file);
+    let availability = lorin_explorer::ui::context_menu::CommandAvailability::for_capabilities(
         &[item],
         Some(&snapshot.capabilities),
     );
-    use zorin_explorer::application::commands::ContextCommand;
+    use lorin_explorer::application::commands::ContextCommand;
     for command in [
         ContextCommand::Copy,
         ContextCommand::Cut,
@@ -626,7 +626,7 @@ fn directory_cancellation_retains_executor_request_until_terminal_dto_is_release
         },
         time::Duration,
     };
-    use zorin_explorer::{
+    use lorin_explorer::{
         core::ports::DirectoryRepository,
         infrastructure::{
             gio_directory::GioDirectoryRepository,
@@ -744,7 +744,7 @@ fn executor_shutdown_cancels_parallel_owner_requests_without_stale_ui_callbacks(
         },
         time::Duration,
     };
-    use zorin_explorer::{
+    use lorin_explorer::{
         core::ports::{DirectoryRepository, SearchRepository},
         infrastructure::{
             gio_directory::GioDirectoryRepository,
@@ -971,7 +971,7 @@ fn owner_teardown_waits_for_executor_bridges_before_releasing_its_context() {
         },
         time::Duration,
     };
-    use zorin_explorer::{
+    use lorin_explorer::{
         core::ports::DirectoryRepository,
         infrastructure::{
             gio_directory::GioDirectoryRepository,
@@ -1151,7 +1151,7 @@ fn local_adapter_rejects_remote_requests_without_mutation() {
 
 #[test]
 fn explicit_replace_and_keep_both_are_applied_by_the_adapter() {
-    use zorin_explorer::core::contracts::ConflictDecision;
+    use lorin_explorer::core::contracts::ConflictDecision;
     for decision in [ConflictDecision::Replace, ConflictDecision::KeepBoth] {
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("source");
@@ -1168,7 +1168,7 @@ fn explicit_replace_and_keep_both_are_applied_by_the_adapter() {
             cancellable: gio::Cancellable::new(),
         };
         let mut events = Vec::new();
-        zorin_explorer::infrastructure::gio_operations::execute_with_decision(
+        lorin_explorer::infrastructure::gio_operations::execute_with_decision(
             request,
             decision,
             &mut |e| events.push(e),
@@ -1235,7 +1235,7 @@ fn local_containment_rejects_a_symlink_back_into_the_source_without_creating_a_t
         cancellable: cancel,
     };
     let mut events = Vec::new();
-    zorin_explorer::infrastructure::gio_operations::execute(request, &mut |event| {
+    lorin_explorer::infrastructure::gio_operations::execute(request, &mut |event| {
         // Bound the broken implementation: stop once its first write happens.
         if matches!(event, OperationEvent::Progress { .. }) {
             use gio::prelude::*;
@@ -1253,7 +1253,7 @@ fn local_containment_rejects_a_symlink_back_into_the_source_without_creating_a_t
 #[test]
 fn denied_local_source_and_destination_remain_eligible_for_linked_elevation() {
     use std::os::unix::fs::PermissionsExt;
-    use zorin_explorer::application::operations::{
+    use lorin_explorer::application::operations::{
         elevated_retry_request, ChangeExtent, OperationCoordinator, OperationState,
     };
     for restrict_source in [true, false] {
@@ -1362,7 +1362,7 @@ fn archive_backend_installed() -> bool {
 /// repository without one reports `MountUnavailable` rather than mounting. An
 /// archive needs no credentials, so a plain GIO operation is enough here.
 fn directory_result_mounting(location: Location) -> RequestOutcome<DirectorySnapshot> {
-    use zorin_explorer::{
+    use lorin_explorer::{
         core::ports::DirectoryRepository, infrastructure::gio_directory::GioDirectoryRepository,
     };
     let context = glib::MainContext::new();
@@ -1405,7 +1405,7 @@ fn opening_an_archive_lists_its_contents_in_the_application() {
         eprintln!("skipped: gvfs has no archive backend on this machine");
         return;
     }
-    use zorin_explorer::core::{activation_for, Activation, FileItem};
+    use lorin_explorer::core::{activation_for, Activation, FileItem};
     let fixture = tempfile::tempdir().unwrap();
     let archive = fixture.path().join("Holiday Photos.tar");
     tar_with_one_file(&archive, "packing-list.txt", "one tent\n");

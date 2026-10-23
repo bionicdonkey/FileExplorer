@@ -120,7 +120,7 @@ impl ExplorerWindow {
     fn new_at(app: &Application, initial: Location, restore_session: bool) -> Self {
         let window = ApplicationWindow::builder()
             .application(app)
-            .title("Zorin Explorer")
+            .title("Lorin Explorer")
             .default_width(1280)
             .default_height(800)
             .build();
@@ -1076,8 +1076,8 @@ impl ExplorerWindow {
 fn show_last_tab_dialog(parent: &ApplicationWindow) {
     let dialog = adw::MessageDialog::new(
         Some(parent),
-        Some("Close Zorin Explorer?"),
-        Some("This is the last tab. Closing it will close Zorin Explorer."),
+        Some("Close Lorin Explorer?"),
+        Some("This is the last tab. Closing it will close Lorin Explorer."),
     );
     dialog.add_responses(&[("close", "Close Application"), ("cancel", "Cancel")]);
     dialog.set_default_response(Some("cancel"));

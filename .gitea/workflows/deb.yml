@@ -55,7 +55,7 @@ jobs:
         run: |
           version="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
-          echo "Building zorin-explorer ${version}"
+          echo "Building lorin-explorer ${version}"
 
       - name: Build the package
         run: packaging/deb/build-deb.sh dist
@@ -70,7 +70,7 @@ jobs:
         # upload-artifact@v4 refuses client-side.
         uses: actions/upload-artifact@v3
         with:
-          name: zorin-explorer-${{ steps.crate.outputs.version }}-deb
+          name: lorin-explorer-${{ steps.crate.outputs.version }}-deb
           path: dist/*.deb
           if-no-files-found: error
           retention-days: 30
@@ -86,7 +86,7 @@ jobs:
           COMMIT: ${{ github.sha }}
         run: |
           set -euo pipefail
-          package="$(ls dist/zorin-explorer_*.deb)"
+          package="$(ls dist/lorin-explorer_*.deb)"
           asset="$(basename "$package")"
 
           if [[ "$TAG" != "v${VERSION}" ]]; then
@@ -115,7 +115,7 @@ jobs:
           elif release="$(api POST /releases -H 'Content-Type: application/json' \
               --data "$(jq -n \
                 --arg tag "$TAG" \
-                --arg name "Zorin Explorer ${VERSION}" \
+                --arg name "Lorin Explorer ${VERSION}" \
                 --arg body "Release ${TAG}, built from ${COMMIT}." \
                 '{tag_name: $tag, name: $name, body: $body, draft: false, prerelease: false}')" 2>/dev/null)"; then
             echo "created release ${TAG}"

@@ -1,6 +1,6 @@
 use adw::prelude::*;
 use adw::Application;
-use zorin_explorer::{
+use lorin_explorer::{
     application::lifecycle::install_executor_shutdown, infrastructure::gio_executor::GioExecutor,
 };
 
@@ -9,18 +9,23 @@ fn main() {
     // this same binary with `--elevated-op`, which performs exactly one
     // validated local operation and exits without opening a window.
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if let Some(code) = zorin_explorer::core::elevated_operations::run_from_args(&args) {
+    if let Some(code) = lorin_explorer::core::elevated_operations::run_from_args(&args) {
         std::process::exit(code);
     }
     // A stale binary from an older source tree behaves differently enough to
     // mislead bug reports, so builds identify themselves on request.
     if args.iter().any(|arg| arg == "--version" || arg == "-V") {
-        println!("zorin-explorer {}", env!("CARGO_PKG_VERSION"));
+        println!("lorin-explorer {}", env!("CARGO_PKG_VERSION"));
         return;
     }
 
+    // Settings from before the rename (see the function) move over before anything reads them.
+    if let Err(error) = lorin_explorer::core::application_preferences::migrate_legacy_config_dir() {
+        eprintln!("lorin-explorer: could not move the old settings folder: {error}");
+    }
+
     let app = Application::builder()
-        .application_id("com.zorin.Explorer")
+        .application_id("casa.alera.LorinExplorer")
         .build();
     let executor = GioExecutor::for_application();
     let shutdown = install_executor_shutdown(&app, executor.clone());
@@ -44,7 +49,7 @@ fn main() {
             gtk::IconTheme::for_display(&display)
                 .add_search_path(concat!(env!("CARGO_MANIFEST_DIR"), "/resources/icons"));
         }
-        let window = zorin_explorer::ui::window::ExplorerWindow::new(app);
+        let window = lorin_explorer::ui::window::ExplorerWindow::new(app);
         window.present();
     });
 

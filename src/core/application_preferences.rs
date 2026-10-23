@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::{env, fs, io};
 
 use gio::prelude::*;
@@ -121,7 +121,7 @@ impl Default for ApplicationPreferences {
 
 impl ApplicationPreferences {
     pub fn load_default() -> io::Result<Self> {
-        let path = config_home()?.join("zorin-explorer/preferences.json");
+        let path = config_home()?.join("lorin-explorer/preferences.json");
         if !path.exists() {
             return Ok(Self {
                 path: Some(path),
@@ -312,6 +312,23 @@ pub fn import_legacy_local_paths(paths: &[PathBuf]) -> Vec<Location> {
         .collect()
 }
 
+/// The app was called "Zorin Explorer" before 0.8.0 and kept its settings in `zorin-explorer/`.
+/// The first run under the new name moves that folder to `lorin-explorer/` so nothing is lost.
+/// Returns whether a folder was moved; it never overwrites an existing `lorin-explorer/`.
+pub fn migrate_legacy_config_dir() -> io::Result<bool> {
+    migrate_legacy_config_dir_in(&config_home()?)
+}
+
+fn migrate_legacy_config_dir_in(config_home: &Path) -> io::Result<bool> {
+    let old = config_home.join("zorin-explorer");
+    let new = config_home.join("lorin-explorer");
+    if new.exists() || !old.is_dir() {
+        return Ok(false);
+    }
+    std::fs::rename(&old, &new)?;
+    Ok(true)
+}
+
 fn config_home() -> io::Result<PathBuf> {
     env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -321,6 +338,22 @@ fn config_home() -> io::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_config_folder_is_moved_once_and_never_overwrites() {
+        let home = tempfile::tempdir().unwrap();
+        let old = home.path().join("zorin-explorer");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("preferences.json"), b"{}").unwrap();
+        assert!(migrate_legacy_config_dir_in(home.path()).unwrap());
+        assert!(home.path().join("lorin-explorer/preferences.json").exists());
+        assert!(!old.exists());
+        assert!(!migrate_legacy_config_dir_in(home.path()).unwrap());
+        // A second old folder next to an existing new one is left alone.
+        std::fs::create_dir_all(&old).unwrap();
+        assert!(!migrate_legacy_config_dir_in(home.path()).unwrap());
+        assert!(old.exists());
+    }
 
     #[test]
     fn defaults_to_seven_days() {
