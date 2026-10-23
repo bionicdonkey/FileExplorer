@@ -1,6 +1,7 @@
 # Morin Explorer for macOS
 
-A native macOS file manager, written in Swift against Apple's own frameworks. It is a separate
+A native macOS file manager, written in Swift against Apple's own frameworks. Morin Explorer is the Mac
+sibling of Lorin Explorer for Linux (M for Mac, L for Linux). It is a separate
 codebase from the Linux app in this repository (Rust and GTK 4): the two share no code. They share
 `spec/`, the feature registry, behaviour scenarios and written contracts that both test suites
 execute. See `docs/macos-port-plan.md` and `docs/macos-port-spec.md`.
