@@ -4275,8 +4275,8 @@ fn open_with_submenu(
     let target = target.clone();
     let view = view.clone();
     button.connect_clicked(move |_| {
-        let (content_type, location) = match &target {
-            ContextTarget::File(item) => (item.effective_content_type(), item.location().clone()),
+        let content_type = match &target {
+            ContextTarget::File(item) => item.effective_content_type(),
             _ => return,
         };
         let menu = GtkBox::new(Orientation::Vertical, 2);
