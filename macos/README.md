@@ -90,7 +90,7 @@ Nothing is pending.
 | C scaffold: packages, project, runner parser, CI | done |
 | D domain layer | done |
 | E adapters | done |
-| F UI | done; behaviour tested in process, XCUITests written but not run (see below) |
+| F UI | done; behaviour tested in process, 7 XCUITests pass on the Intel Mac |
 | G release | script run unsigned; signing, notarization and the tag job not run |
 
 ## What cannot be proven on the build machine
@@ -100,8 +100,8 @@ The CI runner is an Intel Mac mini running macOS 15 unofficially. It cannot show
 * that the arm64 half runs (it is compiled, not executed);
 * Developer ID signing and notarization (no identities);
 * `SMAppService` daemon approval (needs a signed build and approval in System Settings);
-* UI behaviour on a real GPU, and the XCUITests in `Tests/UITests` (they compile; they need Developer
-  mode and Automation mode, which the build machine has not had enabled, so they have never run);
+* UI behaviour on a real GPU. The XCUITests in `Tests/UITests` have run (7 passed on the Intel Mac
+  once Developer and Automation mode were on), but only the x86_64 half and not on real hardware;
 * the release job (`.gitea/workflows/macos.yml`, tag `macos-v*`): it needs the signing and notary
   secrets, so it has never run. `scripts/release.sh` has, without them.
 * mounting and ejecting a real volume from the sidebar, and `NSMetadataQuery` content search against

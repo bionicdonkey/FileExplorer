@@ -468,7 +468,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				PRODUCT_BUNDLE_IDENTIFIER = casa.alera.MorinExplorer.ui;
 				PRODUCT_NAME = MorinExplorerUITests;
-				TEST_TARGET_NAME = "Morin Explorer";
+				TEST_TARGET_NAME = MorinExplorer;
 			};
 			name = Debug;
 		};
@@ -557,7 +557,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				PRODUCT_BUNDLE_IDENTIFIER = casa.alera.MorinExplorer.ui;
 				PRODUCT_NAME = MorinExplorerUITests;
-				TEST_TARGET_NAME = "Morin Explorer";
+				TEST_TARGET_NAME = MorinExplorer;
 			};
 			name = Release;
 		};

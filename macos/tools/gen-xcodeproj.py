@@ -98,7 +98,7 @@ SPEC = {
                 "PRODUCT_BUNDLE_IDENTIFIER": "casa.alera.MorinExplorer.ui",
                 "PRODUCT_NAME": "MorinExplorerUITests",
                 "GENERATE_INFOPLIST_FILE": "YES",
-                "TEST_TARGET_NAME": APP,
+                "TEST_TARGET_NAME": "MorinExplorer",
             },
         },
     ],
