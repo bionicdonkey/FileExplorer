@@ -8,11 +8,11 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use serde_json::Value;
-use zorin_explorer::application::search::{DelayFn, SearchCoordinator};
-use zorin_explorer::core::contracts::*;
-use zorin_explorer::core::navigation::{TabContent, TabState};
-use zorin_explorer::core::ports::*;
-use zorin_explorer::core::{Location, SearchHistory};
+use lorin_explorer::application::search::{DelayFn, SearchCoordinator};
+use lorin_explorer::core::contracts::*;
+use lorin_explorer::core::navigation::{TabContent, TabState};
+use lorin_explorer::core::ports::*;
+use lorin_explorer::core::{Location, SearchHistory};
 
 use super::{error_kind, location, World};
 use crate::Check;

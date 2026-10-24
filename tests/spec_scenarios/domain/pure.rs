@@ -5,11 +5,11 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 
 use serde_json::Value;
-use zorin_explorer::application::commands::{named_child, ClipboardAction, ClipboardPayload, ClipboardState};
-use zorin_explorer::core::application_preferences::{
+use lorin_explorer::application::commands::{named_child, ClipboardAction, ClipboardPayload, ClipboardState};
+use lorin_explorer::core::application_preferences::{
     decode_session, decode_session_state, encode_session, import_legacy_local_paths, RecoverableStateNotice,
 };
-use zorin_explorer::core::{Location, SidebarPreferences};
+use lorin_explorer::core::{Location, SidebarPreferences};
 
 use super::World;
 use crate::Check;
@@ -49,7 +49,7 @@ pub fn expect_location(world: &World, step: &Value) -> Check {
     let input = text(world, &step["input"])?;
     // `via: "input"` goes through the location bar's parser, which also takes bare paths.
     let parsed = if step["via"].as_str() == Some("input") {
-        zorin_explorer::core::location::LocationInput::parse(&input)
+        lorin_explorer::core::location::LocationInput::parse(&input)
     } else {
         Location::from_uri(&input)
     };
@@ -256,12 +256,12 @@ pub fn expect_pins(world: &World, step: &Value) -> Check {
 
 // contracts/errors.json against the code.
 
-fn kind_of(name: &str) -> Result<zorin_explorer::core::contracts::OperationErrorKind, String> {
+fn kind_of(name: &str) -> Result<lorin_explorer::core::contracts::OperationErrorKind, String> {
     super::error_kind(name)
 }
 
-fn retry_of(name: &str) -> Result<zorin_explorer::core::contracts::RetryClass, String> {
-    use zorin_explorer::core::contracts::RetryClass::*;
+fn retry_of(name: &str) -> Result<lorin_explorer::core::contracts::RetryClass, String> {
+    use lorin_explorer::core::contracts::RetryClass::*;
     Ok(match name {
         "never" => Never,
         "after_refresh" => AfterRefresh,
@@ -292,7 +292,7 @@ fn gio_failure(name: &str) -> Result<gio::IOErrorEnum, String> {
 
 /// Every kind's message key and retry class, and every failure's kind, as the code has them.
 pub fn expect_error_table(_world: &World, _step: &Value) -> Check {
-    use zorin_explorer::core::contracts::OperationError;
+    use lorin_explorer::core::contracts::OperationError;
     let path = crate::spec_dir().join("contracts/errors.json");
     let table: Value = serde_json::from_str(&std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?)
         .map_err(|e| format!("{}: {e}", path.display()))?;
@@ -319,13 +319,13 @@ pub fn expect_error_table(_world: &World, _step: &Value) -> Check {
     eq("error kinds in the table", listed, known)
 }
 
-const ALL_KINDS: [zorin_explorer::core::contracts::OperationErrorKind; 11] = {
-    use zorin_explorer::core::contracts::OperationErrorKind::*;
+const ALL_KINDS: [lorin_explorer::core::contracts::OperationErrorKind; 11] = {
+    use lorin_explorer::core::contracts::OperationErrorKind::*;
     [PermissionDenied, AuthenticationRequired, MountUnavailable, Conflict, NotFound, ReadOnly, Unsupported, CapabilityChanged, PartialCompletion, InvalidRequest, Unknown]
 };
 
-fn kind_name(kind: zorin_explorer::core::contracts::OperationErrorKind) -> &'static str {
-    use zorin_explorer::core::contracts::OperationErrorKind::*;
+fn kind_name(kind: lorin_explorer::core::contracts::OperationErrorKind) -> &'static str {
+    use lorin_explorer::core::contracts::OperationErrorKind::*;
     match kind {
         PermissionDenied => "permission_denied",
         AuthenticationRequired => "authentication_required",

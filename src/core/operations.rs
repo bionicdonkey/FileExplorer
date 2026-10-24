@@ -205,8 +205,8 @@ mod tests {
 
     #[test]
     fn move_to_places_a_file_in_the_selected_directory() {
-        let source_dir = std::env::temp_dir().join("zorin-explorer-move-source");
-        let destination_dir = std::env::temp_dir().join("zorin-explorer-move-destination");
+        let source_dir = std::env::temp_dir().join("lorin-explorer-move-source");
+        let destination_dir = std::env::temp_dir().join("lorin-explorer-move-destination");
         let source = source_dir.join("report.txt");
         let _ = fs::remove_dir_all(&source_dir);
         let _ = fs::remove_dir_all(&destination_dir);

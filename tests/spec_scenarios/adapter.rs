@@ -17,13 +17,13 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use gio::prelude::CancellableExt;
-use zorin_explorer::core::contracts::*;
-use zorin_explorer::core::ports::{DirectoryRepository, FileOperations, SearchRepository};
-use zorin_explorer::application::compression::{compress_blocking, ArchiveFormat};
-use zorin_explorer::application::extraction::extract;
-use zorin_explorer::core::operation_manager::OperationKind;
-use zorin_explorer::core::{Location, OperationManager, OperationState};
-use zorin_explorer::infrastructure::{
+use lorin_explorer::core::contracts::*;
+use lorin_explorer::core::ports::{DirectoryRepository, FileOperations, SearchRepository};
+use lorin_explorer::application::compression::{compress_blocking, ArchiveFormat};
+use lorin_explorer::application::extraction::extract;
+use lorin_explorer::core::operation_manager::OperationKind;
+use lorin_explorer::core::{Location, OperationManager, OperationState};
+use lorin_explorer::infrastructure::{
     archive_operations::ArchiveOperations, directory_router::DirectoryRouter, gio_executor::GioExecutor,
     gio_operations, gio_operations::GioOperations, tracker_search::TrackerSearchRepository,
 };
@@ -254,7 +254,7 @@ fn operate(context: &glib::MainContext, sandbox: &Sandbox, step: &Value, id: u64
         let adapter = ArchiveOperations::new(Rc::new(GioOperations::new(context.clone())), context.clone(), GioExecutor::shared());
         let received: Rc<RefCell<Vec<OperationEvent>>> = Rc::default();
         let out = received.clone();
-        let sink: zorin_explorer::core::ports::OperationSink = Box::new(move |event| out.borrow_mut().push(event));
+        let sink: lorin_explorer::core::ports::OperationSink = Box::new(move |event| out.borrow_mut().push(event));
         match decision {
             Some(decision) => adapter.submit_with_decision(request, decision, sink),
             None => adapter.submit(request, sink),

@@ -2,9 +2,9 @@
 //! that `contracts/file-types.json` agrees with the code.
 
 use serde_json::Value;
-use zorin_explorer::core::activation::{activation_for, is_extractable, Activation};
-use zorin_explorer::core::contracts::*;
-use zorin_explorer::core::{FileItem, Location};
+use lorin_explorer::core::activation::{activation_for, is_extractable, Activation};
+use lorin_explorer::core::contracts::*;
+use lorin_explorer::core::{FileItem, Location};
 
 use super::World;
 use crate::{spec_dir, Check};

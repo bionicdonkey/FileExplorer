@@ -3,11 +3,11 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gio::prelude::*;
-use zorin_explorer::core::contracts::*;
-use zorin_explorer::core::ports::*;
-use zorin_explorer::core::Location;
-use zorin_explorer::infrastructure::mock_provider::*;
-use zorin_explorer::ui::context_menu::{CommandAvailability, ContextCommand, ContextTarget};
+use lorin_explorer::core::contracts::*;
+use lorin_explorer::core::ports::*;
+use lorin_explorer::core::Location;
+use lorin_explorer::infrastructure::mock_provider::*;
+use lorin_explorer::ui::context_menu::{CommandAvailability, ContextCommand, ContextTarget};
 
 #[test]
 fn uri_items_keep_canonical_identity_and_disable_unsupported_trash() {
@@ -17,7 +17,7 @@ fn uri_items_keep_canonical_identity_and_disable_unsupported_trash() {
     info.set_display_name("report.txt");
     info.set_file_type(gio::FileType::Regular);
 
-    let item = zorin_explorer::core::FileItem::from_gio(&parent, &info);
+    let item = lorin_explorer::core::FileItem::from_gio(&parent, &info);
     let availability = CommandAvailability::for_selection(&[item.clone()], None);
 
     assert_eq!(item.identity_key(), "smb://host/share/report.txt");
@@ -53,7 +53,7 @@ fn uri_items_with_provider_capabilities_enable_uri_execution() {
     }
 
     let availability = CommandAvailability::for_selection(
-        &[zorin_explorer::core::FileItem::from_gio(&parent, &info)],
+        &[lorin_explorer::core::FileItem::from_gio(&parent, &info)],
         None,
     );
 
@@ -67,7 +67,7 @@ fn uri_items_with_provider_capabilities_enable_uri_execution() {
 
 mod operation_contract {
     use super::*;
-    use zorin_explorer::application::operations::{
+    use lorin_explorer::application::operations::{
         CancelResult, ChangeExtent, OperationCoordinator, OperationState,
     };
     fn capabilities(version: u64) -> CapabilitySnapshot {
@@ -98,7 +98,7 @@ mod operation_contract {
     }
     #[test]
     fn linked_elevation_still_requires_successful_copy_and_create_capabilities() {
-        use zorin_explorer::application::operations::elevated_retry_request;
+        use lorin_explorer::application::operations::elevated_retry_request;
         for missing in [Capability::Copy, Capability::Create] {
             let provider = Rc::new(HeldProvider::default());
             let coordinator = OperationCoordinator::new(provider.clone());
@@ -151,7 +151,7 @@ mod operation_contract {
     }
     #[test]
     fn linked_elevation_keeps_only_the_explicit_permission_denied_exception() {
-        use zorin_explorer::application::operations::elevated_retry_request;
+        use lorin_explorer::application::operations::elevated_retry_request;
         let provider = Rc::new(HeldProvider::default());
         let coordinator = OperationCoordinator::new(provider.clone());
         coordinator
@@ -400,7 +400,7 @@ mod operation_contract {
 
     #[test]
     fn elevated_retry_requires_unchanged_local_permission_failure_and_a_new_id() {
-        use zorin_explorer::application::operations::elevated_retry_request;
+        use lorin_explorer::application::operations::elevated_retry_request;
         let context = glib::MainContext::new();
         let _guard = context.acquire().unwrap();
         let mock = provider(&context);
@@ -474,7 +474,7 @@ mod operation_contract {
 
     #[test]
     fn opaque_request_conflicts_with_a_trusted_request_and_local_keys_are_sorted() {
-        use zorin_explorer::application::operations::lock_keys;
+        use lorin_explorer::application::operations::lock_keys;
         let context = glib::MainContext::new();
         let _guard = context.acquire().unwrap();
         let mock = provider(&context);

@@ -1,5 +1,5 @@
 [package]
-name = "zorin-explorer"
+name = "lorin-explorer"
 version = "0.7.0"
 edition = "2021"
 description = "A native Explorer-style file manager for Linux"
@@ -31,7 +31,7 @@ indexmap = "=2.7.1"
 tempfile = "=3.10.1"
 
 [[bin]]
-name = "zorin-explorer"
+name = "lorin-explorer"
 path = "src/main.rs"
 
 # One binary reports one line per scenario of the shared specification in spec/.

@@ -10,11 +10,11 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use serde_json::Value;
-use zorin_explorer::application::navigation::NavigationCoordinator;
-use zorin_explorer::core::contracts::*;
-use zorin_explorer::core::navigation::{NavigationStatus, TabState};
-use zorin_explorer::core::ports::*;
-use zorin_explorer::core::{Location, ResolvedLocation};
+use lorin_explorer::application::navigation::NavigationCoordinator;
+use lorin_explorer::core::contracts::*;
+use lorin_explorer::core::navigation::{NavigationStatus, TabState};
+use lorin_explorer::core::ports::*;
+use lorin_explorer::core::{Location, ResolvedLocation};
 
 use std::collections::HashMap;
 
@@ -84,7 +84,7 @@ fn status_name(status: &NavigationStatus) -> &'static str {
 pub enum Bound {
     Op(OperationId),
     Submit(Result<OperationId, OperationErrorKind>),
-    Cancel(zorin_explorer::application::operations::CancelResult),
+    Cancel(lorin_explorer::application::operations::CancelResult),
 }
 
 pub struct World {
@@ -197,7 +197,7 @@ fn navigation_action(world: &World, action: &str, step: &Value) -> Check {
             true
         }
         "show_section" => {
-            world.tab.borrow_mut().show_section(zorin_explorer::core::sidebar_model::SidebarSection {
+            world.tab.borrow_mut().show_section(lorin_explorer::core::sidebar_model::SidebarSection {
                 title: step["title"].as_str().unwrap_or("Section").into(),
                 nodes: vec![],
                 mountables: vec![],
@@ -354,10 +354,10 @@ fn expect_view(world: &World, step: &Value) -> Check {
     }
     if let Some(want) = step.get("content") {
         let got = match &tab.content {
-            zorin_explorer::core::navigation::TabContent::Directory(l) => format!("directory:{}", l.uri()),
-            zorin_explorer::core::navigation::TabContent::SectionOverview { .. } => "section".to_string(),
-            zorin_explorer::core::navigation::TabContent::Search { .. } => "search".to_string(),
-            zorin_explorer::core::navigation::TabContent::Unavailable(l) => format!("unavailable:{}", l.uri()),
+            lorin_explorer::core::navigation::TabContent::Directory(l) => format!("directory:{}", l.uri()),
+            lorin_explorer::core::navigation::TabContent::SectionOverview { .. } => "section".to_string(),
+            lorin_explorer::core::navigation::TabContent::Search { .. } => "search".to_string(),
+            lorin_explorer::core::navigation::TabContent::Unavailable(l) => format!("unavailable:{}", l.uri()),
         };
         if want.as_str() != Some(got.as_str()) {
             return Err(mismatch("content", got, want));
