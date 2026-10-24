@@ -11,6 +11,13 @@
   <!-- Keep in step with `version` in Cargo.toml: the About page reads the crate
        version, and the CI release job refuses a tag that disagrees with it. -->
   <releases>
+    <release version="0.8.0" date="2026-10-25">
+      <description>
+        <p>Zorin Explorer is now Lorin Explorer. The application id is casa.alera.LorinExplorer and the package and binary are lorin-explorer. The first run moves the settings folder from ~/.config/zorin-explorer to ~/.config/lorin-explorer, and the new package replaces the old one.</p>
+        <p>Searching inside files is not available yet. With content search switched on, a search used to end in an unhelpful "provider does not support this search mode" message; it now falls back to file names and says so above the results. File name searches also accept * and ? wildcards, so *.deb finds every .deb.</p>
+        <p>The application icon fills its square instead of sitting small in the taskbar, and the icon on the About page lines up with its text. Open With always uses the standard application chooser; the code that handled running inside a Flatpak sandbox is gone.</p>
+      </description>
+    </release>
     <release version="0.7.0" date="2026-10-20">
       <description>
         <p>The location bar now suggests folders as you type, for local paths and remote URIs alike. Suggestions appear in a popover below the entry, with Up and Down to choose, Enter to open, Tab to insert the name and Escape to close the list without leaving the entry.</p>

@@ -11,7 +11,7 @@ replaces the old `zorin-explorer` one.
 
 *Lorin Explorer in the detailed list view. The folder and files are made up for this image.*
 
-The project is a pre-release (`0.7.0`). Core browsing, file operations, search and preferences are
+The project is a pre-release (`0.8.0`). Core browsing, file operations, search and preferences are
 implemented and covered by tests. Tagged versions are published as a Debian package.
 
 ## Two apps, one specification
