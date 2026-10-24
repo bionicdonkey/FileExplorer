@@ -10,6 +10,26 @@ replaces the old `zorin-explorer` one.
 The project is a pre-release (`0.7.0`). Core browsing, file operations, search and preferences are
 implemented and covered by tests. Tagged versions are published as a Debian package.
 
+## Two apps, one specification
+
+This repository holds two native file managers that share behaviour, not code:
+
+| | Lorin Explorer | Morin Explorer |
+| --- | --- | --- |
+| Platform | Linux (GNOME) | macOS 14 or newer, Intel and Apple silicon |
+| Written in | Rust, GTK 4, libadwaita, GIO | Swift, AppKit, SwiftUI |
+| Lives in | the repository root (`src/`, `tests/`) | [`macos/`](macos/README.md) |
+
+Both run the behaviour scenarios in [`spec/`](spec/): a feature registry, JSON scenarios and written
+contracts that each app's test suite executes, so a feature means the same thing on both. Nothing
+outside `spec/` is shared, and `scripts/check-separation.sh` keeps the two from reaching into each
+other. The registry records, per feature, whether the Mac app matches the Linux one or approximates
+it (`cargo run --manifest-path spec/tools/Cargo.toml -- status`).
+
+Morin Explorer is pre-release. It builds universal, and its tests pass on an Intel Mac. The Apple
+silicon half has been compiled but not yet executed, and release signing and notarization have not
+been run; [`macos/README.md`](macos/README.md) lists exactly what is and is not verified.
+
 ## Features
 
 **Browsing**
@@ -222,6 +242,10 @@ native faults.
   archive the first time; a `.zip` or `.7z` reads only its index.
 - `resources/casa.alera.LorinExplorer.gschema.xml` is present but unused — preferences persist as JSON
   under `$XDG_CONFIG_HOME`, not GSettings.
+
+## Security
+
+Please report vulnerabilities privately; see [SECURITY.md](SECURITY.md).
 
 ## License
 
