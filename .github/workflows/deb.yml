@@ -43,7 +43,7 @@ jobs:
       contents: write   # attaching the package to a release on a tag
     steps:
       - name: Check out the commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Check the app and the Mac app stay separate
         run: sh scripts/check-separation.sh
