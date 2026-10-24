@@ -87,7 +87,7 @@ jobs:
 
       - name: Keep the test logs
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: xcode-logs-${{ matrix.arch }}
           path: macos/.dd/logs
