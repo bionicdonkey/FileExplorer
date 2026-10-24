@@ -8,3 +8,6 @@
 .env
 .aider*
 /spec/tools/target/
+
+# Documentation images (the *.png rule above is for stray build output).
+!/docs/images/*.png

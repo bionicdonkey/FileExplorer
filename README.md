@@ -7,6 +7,10 @@ Lorin Explorer was called Zorin Explorer up to 0.7.0. The first run under the ne
 settings folder (`~/.config/zorin-explorer`) to `~/.config/lorin-explorer`, and the new Debian package
 replaces the old `zorin-explorer` one.
 
+![Lorin Explorer showing a Documents folder in the detailed list view](docs/images/lorin-explorer.png)
+
+*Lorin Explorer in the detailed list view. The folder and files are made up for this image.*
+
 The project is a pre-release (`0.7.0`). Core browsing, file operations, search and preferences are
 implemented and covered by tests. Tagged versions are published as a Debian package.
 
