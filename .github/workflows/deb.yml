@@ -16,11 +16,9 @@ on:
       - '.github/workflows/macos.yml'
     tags:
       - 'linux-v*'
+  # Pull requests always run, whatever they touch: the ruleset on main requires this check, and a
+  # required check that never starts would leave the pull request waiting forever.
   pull_request:
-    paths-ignore:
-      - 'macos/**'
-      - 'docs/**'
-      - '.github/workflows/macos.yml'
   workflow_dispatch:
 
 permissions:

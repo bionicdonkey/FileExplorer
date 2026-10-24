@@ -18,12 +18,9 @@ on:
       - '.github/workflows/macos.yml'
     tags:
       - 'macos-v*'
+  # Pull requests always run, whatever they touch: the ruleset on main requires these checks, and a
+  # required check that never starts would leave the pull request waiting forever.
   pull_request:
-    paths:
-      - 'macos/**'
-      - 'spec/**'
-      - 'scripts/check-separation.sh'
-      - '.github/workflows/macos.yml'
   workflow_dispatch:
 
 permissions:
