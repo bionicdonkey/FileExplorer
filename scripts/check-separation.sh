@@ -45,11 +45,13 @@ for f in $(printf '%s\n' "$macos_files" | grep -E '\.(pbxproj|xcscheme|xcconfig|
 done
 
 # Nothing outside macos/ may refer to macos/. The exceptions are the files that
-# have to name it: package exclusion, the Linux workflow's path filters, this
-# script, the docs, the Mac workflow, and the spec tooling and its README.
+# have to name it: package exclusion, the Linux workflow's path filters, this script, the docs, the
+# Mac workflow, the spec tooling and its README, and the front-page README and SECURITY.md, which
+# describe both apps.
 others="$(printf '%s\n' "$files" | grep -v -e '^macos/' -e '^docs/' -e '^\.github/workflows/macos\.yml$' \
     -e '^scripts/check-separation\.sh$' -e '^Cargo\.toml$' -e '^\.github/workflows/deb\.yml$' \
-    -e '^\.gitignore$' -e '^spec/README\.md$' -e '^spec/tools/' || true)"
+    -e '^\.gitignore$' -e '^spec/README\.md$' -e '^spec/tools/' \
+    -e '^README\.md$' -e '^SECURITY\.md$' || true)"
 for f in $others; do
     [ -f "$f" ] || continue
     if grep -Iq 'macos/' "$f" 2> /dev/null; then
