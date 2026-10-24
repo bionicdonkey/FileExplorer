@@ -1,0 +1,33 @@
+# Weekly update pull requests. Minor and patch updates are grouped so a week's worth arrives as one
+# PR per ecosystem rather than dozens; majors come on their own so they get looked at.
+version: 2
+updates:
+  # Lorin Explorer's dependencies
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      cargo-minor-and-patch:
+        update-types: [minor, patch]
+
+  # The spec tooling (`cargo run --manifest-path spec/tools/Cargo.toml`) has its own lockfile
+  - package-ecosystem: cargo
+    directory: /spec/tools
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    groups:
+      spec-tools-minor-and-patch:
+        update-types: [minor, patch]
+
+  # The actions the workflows use (checkout, upload-artifact)
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    groups:
+      actions:
+        update-types: [minor, patch]
