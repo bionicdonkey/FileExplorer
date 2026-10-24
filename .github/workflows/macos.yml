@@ -47,7 +47,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: Check out the commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Host
         run: |
@@ -115,7 +115,7 @@ jobs:
       contents: write
     steps:
       - name: Check out the commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Sign, notarize and package
         env:
