@@ -96,17 +96,19 @@ Nothing is pending.
 
 ## What cannot be proven on the build machine
 
-CI (`.github/workflows/macos.yml`) is set up to build and test on GitHub's hosted Apple silicon and
-Intel runners, which would execute both halves of the universal binary. Until it has run there, the
-machine all of the above was verified on is an Intel Mac mini running macOS 15 unofficially, which
-cannot show:
+CI (`.github/workflows/macos.yml`) builds and tests on GitHub's hosted runners, on Apple silicon
+(`macos-15`, arm64) and on Intel (`macos-15-intel`, x86_64), both with Xcode 16.4 on macOS 15.7. The
+first run passed on both: the universal build (the app and the helper both contain arm64 and x86_64),
+the package tests, every scenario, and the 45 unit and window-behaviour tests, **executed natively
+on arm64 as well as on Intel**. CI does not run the XCUITests or the release job.
 
-* that the arm64 half runs (it is compiled and `lipo`-checked here, not executed; the arm64 CI job
-  is what will execute it);
+Everything else was verified on an Intel Mac mini running macOS 15 unofficially. What neither CI nor
+that machine can show:
+
+* the XCUITests on arm64 (they passed on the Intel Mac only; hosted runners do not run them here);
 * Developer ID signing and notarization (no identities);
 * `SMAppService` daemon approval (needs a signed build and approval in System Settings);
-* UI behaviour on a real GPU. The XCUITests in `Tests/UITests` have run (7 passed on the Intel Mac
-  once Developer and Automation mode were on), but only the x86_64 half and not on real hardware;
+* UI behaviour on a real GPU and real hardware (hosted runners are virtual machines);
 * the release job (`.github/workflows/macos.yml`, tag `macos-v*`): it needs the signing and notary
   secrets, so it has never run. `scripts/release.sh` has, without them.
 * mounting and ejecting a real volume from the sidebar, and `NSMetadataQuery` content search against
