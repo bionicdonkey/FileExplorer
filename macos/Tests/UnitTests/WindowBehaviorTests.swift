@@ -174,6 +174,9 @@ final class WindowBehaviorTests: XCTestCase {
         controller.commands.paste(into: Location(localPath: folder.appendingPathComponent("target").path))
         wait { self.exists("cut.txt", in: self.folder.appendingPathComponent("target")) }
         XCTAssertFalse(exists("cut.txt"))
+        // The file lands before the finished operation is reported, and the clipboard empties when
+        // it is, so wait for that rather than asserting at the instant the file appears.
+        wait { self.services.clipboard.payload == nil }
         XCTAssertNil(services.clipboard.payload, "a finished cut empties the clipboard")
     }
 
