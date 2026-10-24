@@ -7,13 +7,13 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use serde_json::Value;
-use zorin_explorer::application::operations::{
+use lorin_explorer::application::operations::{
     elevated_retry_request, lock_keys, CancelResult, ChangeExtent, OperationCoordinator, OperationProjection,
     OperationState,
 };
-use zorin_explorer::core::contracts::*;
-use zorin_explorer::core::ports::*;
-use zorin_explorer::core::Location;
+use lorin_explorer::core::contracts::*;
+use lorin_explorer::core::ports::*;
+use lorin_explorer::core::Location;
 
 use super::{error_kind, location, Bound, World};
 use crate::Check;
