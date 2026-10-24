@@ -1,5 +1,5 @@
 <schemalist>
-  <schema id="com.zorin.Explorer" path="/com/zorin/Explorer/">
+  <schema id="casa.alera.LorinExplorer" path="/casa/alera/LorinExplorer/">
     <key name="startup-location" type="s">
       <default>"home"</default>
       <summary>Location opened at startup</summary>

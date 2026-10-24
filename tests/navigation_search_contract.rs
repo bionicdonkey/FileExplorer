@@ -2,7 +2,7 @@ use gio::prelude::*;
 
 #[test]
 fn daily_named_children_reject_path_traversal_for_remote_create_and_rename() {
-    use zorin_explorer::application::commands::named_child;
+    use lorin_explorer::application::commands::named_child;
     let root = location("smb://host/share");
     assert_eq!(
         named_child(&root, "new folder").unwrap().uri(),
@@ -15,7 +15,7 @@ fn daily_named_children_reject_path_traversal_for_remote_create_and_rename() {
 
 #[test]
 fn daily_pins_and_sessions_keep_unmounted_uri_identities() {
-    use zorin_explorer::core::{
+    use lorin_explorer::core::{
         application_preferences::{decode_session, encode_session},
         SidebarPreferences,
     };
@@ -43,7 +43,7 @@ fn daily_pins_and_sessions_keep_unmounted_uri_identities() {
 
 #[test]
 fn daily_multi_item_conflicts_keep_both_replace_and_skip_report_effects() {
-    use zorin_explorer::core::{OperationManager, OperationState};
+    use lorin_explorer::core::{OperationManager, OperationState};
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("source");
     let destination = directory.path().join("destination");
@@ -100,7 +100,7 @@ fn daily_multi_item_conflicts_keep_both_replace_and_skip_report_effects() {
 
 #[test]
 fn daily_uri_payload_rejects_unsafe_input_and_deduplicates() {
-    use zorin_explorer::application::commands::*;
+    use lorin_explorer::application::commands::*;
     let payload = ClipboardPayload::parse(
         ClipboardAction::Cut,
         "# Files\r\nsmb://host/share/a\r\nfile:///tmp/b\r\nsmb://host/share/a\r\n",
@@ -124,7 +124,7 @@ fn daily_uri_payload_rejects_unsafe_input_and_deduplicates() {
 
 #[test]
 fn daily_external_clipboard_preserves_cut_action_and_rejects_unknown_actions() {
-    use zorin_explorer::application::commands::*;
+    use lorin_explorer::application::commands::*;
     assert_eq!(
         ClipboardPayload::parse_gnome("cut\nfile:///tmp/a\n")
             .unwrap()
@@ -142,7 +142,7 @@ fn daily_external_clipboard_preserves_cut_action_and_rejects_unknown_actions() {
 
 #[test]
 fn daily_keyboard_toolbar_and_menu_route_identical_commands() {
-    use zorin_explorer::application::commands::*;
+    use lorin_explorer::application::commands::*;
     assert_eq!(route(Shortcut::Paste), route(ContextCommand::Paste));
     assert_eq!(route(Shortcut::Cut), route(ContextCommand::Cut));
     assert_eq!(route(Shortcut::Copy), route(ContextCommand::Copy));
@@ -155,7 +155,7 @@ fn daily_keyboard_toolbar_and_menu_route_identical_commands() {
 
 #[test]
 fn daily_selection_capabilities_and_drag_action_are_uri_based() {
-    use zorin_explorer::{
+    use lorin_explorer::{
         application::commands::*, core::FileItem, ui::context_menu::CommandAvailability,
     };
     let entry = |uri: &str, supported: Vec<Capability>| {
@@ -204,7 +204,7 @@ fn daily_selection_capabilities_and_drag_action_are_uri_based() {
 
 #[test]
 fn daily_write_permission_does_not_imply_rename_capability() {
-    use zorin_explorer::{core::FileItem, ui::context_menu::CommandAvailability};
+    use lorin_explorer::{core::FileItem, ui::context_menu::CommandAvailability};
     let info = gio::FileInfo::new();
     info.set_name("file");
     info.set_file_type(gio::FileType::Regular);
@@ -217,7 +217,7 @@ fn daily_write_permission_does_not_imply_rename_capability() {
 
 #[test]
 fn daily_cut_is_cleared_only_for_its_terminal_operation() {
-    use zorin_explorer::application::commands::*;
+    use lorin_explorer::application::commands::*;
     let payload = ClipboardPayload::parse(ClipboardAction::Cut, "file:///tmp/a").unwrap();
     let mut clipboard = ClipboardState::default();
     clipboard.replace(payload.clone());
@@ -235,7 +235,7 @@ fn daily_cut_is_cleared_only_for_its_terminal_operation() {
     assert_eq!(clipboard.payload().unwrap().action, ClipboardAction::Copy);
 }
 use std::{cell::RefCell, rc::Rc};
-use zorin_explorer::{
+use lorin_explorer::{
     application::navigation::NavigationCoordinator,
     core::{
         contracts::*,
@@ -255,7 +255,7 @@ impl SearchRepository for ControlledSearch {
 
 #[test]
 fn slice2_search_debounce_sends_only_latest_and_close_cancels_pending() {
-    use zorin_explorer::application::search::SearchCoordinator;
+    use lorin_explorer::application::search::SearchCoordinator;
     let context = glib::MainContext::new();
     context
         .with_thread_default(|| {
@@ -299,7 +299,7 @@ fn slice2_search_debounce_sends_only_latest_and_close_cancels_pending() {
 
 #[test]
 fn slice2_search_while_directory_is_loading_does_not_cancel_navigation_or_use_old_root() {
-    use zorin_explorer::application::search::SearchCoordinator;
+    use lorin_explorer::application::search::SearchCoordinator;
     let repo = Rc::new(ControlledSearch::default());
     let state = Rc::new(RefCell::new(TabState::new(location("file:///home"))));
     let search = SearchCoordinator::new(state.clone(), repo.clone());
@@ -334,7 +334,7 @@ fn slice2_search_while_directory_is_loading_does_not_cancel_navigation_or_use_ol
 
 #[test]
 fn slice2_search_privacy_disabling_removes_saved_terms_and_submit_honors_policy() {
-    use zorin_explorer::core::SearchHistory;
+    use lorin_explorer::core::SearchHistory;
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("searches.json");
     let mut history = SearchHistory::load_from(path.clone()).unwrap();
@@ -354,7 +354,7 @@ fn slice2_search_privacy_disabling_removes_saved_terms_and_submit_honors_policy(
 #[test]
 fn slice2_search_provider_ordering_partial_failure_and_time_boundary_reach_real_coordinator() {
     use std::time::Duration;
-    use zorin_explorer::{
+    use lorin_explorer::{
         application::search::SearchCoordinator,
         infrastructure::mock_provider::{MockConfig, MockProvider, MockSearchBehavior},
     };
@@ -425,7 +425,7 @@ fn slice2_search_provider_ordering_partial_failure_and_time_boundary_reach_real_
 
 #[test]
 fn slice2_search_latest_query_cancels_and_clear_restores_saved_selection() {
-    use zorin_explorer::application::search::SearchCoordinator;
+    use lorin_explorer::application::search::SearchCoordinator;
     let repo = Rc::new(ControlledSearch::default());
     let state = Rc::new(RefCell::new(TabState::new(location("file:///home"))));
     success(&mut state.borrow_mut(), "file:///home");
@@ -471,7 +471,7 @@ fn slice2_search_latest_query_cancels_and_clear_restores_saved_selection() {
 
 #[test]
 fn slice2_search_incomplete_retains_uri_results_retry_scope_and_rejects_navigation_races() {
-    use zorin_explorer::application::search::SearchCoordinator;
+    use lorin_explorer::application::search::SearchCoordinator;
     let repo = Rc::new(ControlledSearch::default());
     let state = Rc::new(RefCell::new(TabState::new(location("smb://host/share"))));
     success(&mut state.borrow_mut(), "smb://host/share");
@@ -531,7 +531,7 @@ fn location(uri: &str) -> Location {
 
 #[test]
 fn slice2_location_input_and_session_keep_nonlocal_identity() {
-    use zorin_explorer::core::{
+    use lorin_explorer::core::{
         application_preferences::{decode_session, encode_session},
         location::LocationInput,
     };
@@ -641,7 +641,7 @@ fn slice2_unmount_cancels_pending_and_preserves_history_for_reconnect() {
 
 #[test]
 fn slice2_picker_requests_remote_locations_and_cancels_on_replacement() {
-    use zorin_explorer::ui::folder_picker::FolderPicker;
+    use lorin_explorer::ui::folder_picker::FolderPicker;
     let repo = Rc::new(ControlledRepository::default());
     let picker = FolderPicker::new(location("trash:///"), repo.clone());
     picker.select_location(location("smb://host/one"));
@@ -730,7 +730,7 @@ fn slice2_section_overlay_does_not_restore_directory_availability() {
     success(&mut tab, root.uri());
     assert!(tab.has_available_directory());
     tab.mark_unavailable(&root);
-    tab.show_section(zorin_explorer::core::sidebar_model::SidebarSection {
+    tab.show_section(lorin_explorer::core::sidebar_model::SidebarSection {
         title: "This PC".into(),
         nodes: vec![],
         mountables: vec![],
@@ -740,7 +740,7 @@ fn slice2_section_overlay_does_not_restore_directory_availability() {
 
 #[test]
 fn slice2_picker_includes_and_activates_network_shortcuts() {
-    use zorin_explorer::ui::folder_picker::FolderPicker;
+    use lorin_explorer::ui::folder_picker::FolderPicker;
     let repo = Rc::new(ControlledRepository::default());
     let picker = FolderPicker::new(location("network:///"), repo.clone());
     picker.select_location(location("network:///"));
@@ -802,7 +802,7 @@ fn success(tab: &mut TabState, uri: &str) {
 
 #[test]
 fn navigation_refresh_from_section_replaces_pending_directory_request() {
-    use zorin_explorer::core::sidebar_model::SidebarSection;
+    use lorin_explorer::core::sidebar_model::SidebarSection;
     let mut tab = TabState::new(location("file:///home"));
     success(&mut tab, "file:///home");
     tab.show_section(SidebarSection {

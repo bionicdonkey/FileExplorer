@@ -485,7 +485,7 @@ fn fallback(request: &SearchRequest) -> SearchOutcome {
             {
                 queue.push_back((item.location().clone(), depth + 1));
             }
-            if item.name().to_lowercase().contains(&needle)
+            if name_matches(&item.name().to_lowercase(), &needle)
                 && accepted.insert(item.identity_key().to_owned())
             {
                 let Ok(location) = Location::try_from_file(child) else {
@@ -525,6 +525,51 @@ fn fallback(request: &SearchRequest) -> SearchOutcome {
         incomplete(request, matches, SearchIncompleteReason::Cancelled, None)
     } else {
         completed(request, matches)
+    }
+}
+
+/// A plain query matches anywhere in the name; one containing `*` or `?` is a whole-name pattern
+/// (`*.deb`), as in a shell. Both arguments are already lower case.
+fn name_matches(name: &str, needle: &str) -> bool {
+    if !needle.contains(['*', '?']) {
+        return name.contains(needle);
+    }
+    let name: Vec<char> = name.chars().collect();
+    let pattern: Vec<char> = needle.chars().collect();
+    let (mut n, mut p) = (0, 0);
+    let (mut star, mut mark) = (None, 0);
+    while n < name.len() {
+        if p < pattern.len() && (pattern[p] == '?' || pattern[p] == name[n]) {
+            n += 1;
+            p += 1;
+        } else if p < pattern.len() && pattern[p] == '*' {
+            star = Some(p);
+            mark = n;
+            p += 1;
+        } else if let Some(s) = star {
+            p = s + 1;
+            mark += 1;
+            n = mark;
+        } else {
+            return false;
+        }
+    }
+    pattern[p..].iter().all(|c| *c == '*')
+}
+
+#[cfg(test)]
+mod name_match_tests {
+    use super::name_matches;
+
+    #[test]
+    fn plain_queries_match_anywhere_and_patterns_match_the_whole_name() {
+        assert!(name_matches("holiday photos.tar", "photos"));
+        assert!(name_matches("tool_1.0_amd64.deb", "*.deb"));
+        assert!(!name_matches("tool.deb.txt", "*.deb"));
+        assert!(name_matches("a1.txt", "a?.txt"));
+        assert!(!name_matches("a12.txt", "a?.txt"));
+        assert!(name_matches("report-final.pdf", "report*final*"));
+        assert!(name_matches("anything", "*"));
     }
 }
 

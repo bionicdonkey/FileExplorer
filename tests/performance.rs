@@ -1,5 +1,5 @@
 use std::sync::{Mutex, MutexGuard};
-use zorin_explorer::core::{
+use lorin_explorer::core::{
     application_preferences::{decode_session, encode_session},
     navigation::NavigationHistory,
     Location,
@@ -23,7 +23,7 @@ fn performance_test_guard() -> MutexGuard<'static, ()> {
 #[test]
 fn streaming_commits_first_page_and_rejects_old_generation() {
     let _guard = performance_test_guard();
-    use zorin_explorer::core::{contracts::*, navigation::TabState, ResolvedLocation};
+    use lorin_explorer::core::{contracts::*, navigation::TabState, ResolvedLocation};
     let root = Location::from_uri("smb://fixture/share").unwrap();
     let mut state = TabState::new(root.clone());
     let request = state.begin_navigation(root.clone()).unwrap();
@@ -72,7 +72,7 @@ fn streaming_commits_first_page_and_rejects_old_generation() {
 #[test]
 fn streaming_merges_unique_uris_and_rejects_invalid_continuations_without_losing_rows() {
     let _guard = performance_test_guard();
-    use zorin_explorer::core::{
+    use lorin_explorer::core::{
         contracts::*,
         navigation::{NavigationStatus, TabState},
         ResolvedLocation,
@@ -148,7 +148,7 @@ fn local_ten_thousand_items_first_page_meets_budget() {
         rc::Rc,
         time::{Duration, Instant},
     };
-    use zorin_explorer::{
+    use lorin_explorer::{
         application::{navigation::NavigationCoordinator, performance::assert_p95},
         core::navigation::TabState,
         infrastructure::gio_directory::GioDirectoryRepository,
@@ -207,7 +207,7 @@ fn local_ten_thousand_items_first_page_meets_budget() {
 #[test]
 fn page_filter_and_visible_cache_bound_work_and_invalidation() {
     let _guard = performance_test_guard();
-    use zorin_explorer::application::performance::{CachePolicy, VisibleCache, VisibleRange};
+    use lorin_explorer::application::performance::{CachePolicy, VisibleCache, VisibleRange};
     let a = Location::from_uri("smb://fixture/a").unwrap();
     let b = Location::from_uri("smb://fixture/b").unwrap();
     let c = Location::from_uri("smb://fixture/c").unwrap();
@@ -257,7 +257,7 @@ fn session_and_navigation_history_are_bounded() {
 #[test]
 fn oversized_state_is_rejected_before_persistence_or_decode() {
     let _guard = performance_test_guard();
-    use zorin_explorer::core::{
+    use lorin_explorer::core::{
         application_preferences::MAX_STATE_BYTES, operation_manager::OperationManager,
     };
     let oversized = Location::from_uri(&format!("smb://fixture/{}", "a".repeat(100_000))).unwrap();
@@ -277,7 +277,7 @@ fn oversized_state_is_rejected_before_persistence_or_decode() {
 #[test]
 fn search_history_bounds_entries_and_recovers_corruption() {
     let _guard = performance_test_guard();
-    use zorin_explorer::core::search::SearchHistory;
+    use lorin_explorer::core::search::SearchHistory;
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("search.json");
     std::fs::write(&path, b"{torn").unwrap();
@@ -295,7 +295,7 @@ fn search_history_bounds_entries_and_recovers_corruption() {
 #[test]
 fn finished_operation_records_are_bounded_and_corruption_recovers() {
     let _guard = performance_test_guard();
-    use zorin_explorer::core::operation_manager::OperationManager;
+    use lorin_explorer::core::operation_manager::OperationManager;
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("history.json");
     let records: Vec<_> = (1..=200).map(|id| serde_json::json!({"id":id,"kind":"Copy","sources":["smb://fixture/share/a"],"destination":null,"completed":1,"total":1,"state":"Completed","finished_at":2000000000})).collect();
@@ -318,7 +318,7 @@ fn finished_operation_records_are_bounded_and_corruption_recovers() {
 fn one_hundred_history_records_meet_cold_and_warm_budgets() {
     let _guard = performance_test_guard();
     use std::time::{Duration, Instant};
-    use zorin_explorer::{
+    use lorin_explorer::{
         application::performance::assert_p95, core::operation_manager::OperationManager,
     };
     let directory = tempfile::tempdir().unwrap();
@@ -361,7 +361,7 @@ fn one_hundred_history_records_meet_cold_and_warm_budgets() {
 fn long_lived_worker_evicts_terminal_projections_with_history() {
     let _guard = performance_test_guard();
     use std::time::{Duration, Instant};
-    use zorin_explorer::core::operation_manager::{OperationKind, OperationManager};
+    use lorin_explorer::core::operation_manager::{OperationKind, OperationManager};
     let temporary = tempfile::tempdir().unwrap();
     let source = temporary.path().join("source.txt");
     let destination = temporary.path().join("destination");

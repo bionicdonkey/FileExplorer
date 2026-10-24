@@ -1,6 +1,6 @@
 use gtk::prelude::*;
 use std::{cell::RefCell, rc::Rc};
-use zorin_explorer::{
+use lorin_explorer::{
     core::Location,
     ui::{header::HeaderControls, tabs::TabStrip},
 };
@@ -32,7 +32,7 @@ fn sidebar_section_rows(sidebar: &gtk::ScrolledWindow, title: &str) -> gtk::Widg
 
 #[gtk::test]
 fn slice4_sidebar_duplicate_home_restores_the_user_section_occurrence() {
-    use zorin_explorer::{
+    use lorin_explorer::{
         core::sidebar_model::{SidebarModel, SidebarPreferences},
         ui::sidebar::Sidebar,
     };
@@ -77,7 +77,7 @@ fn slice4_sidebar_duplicate_home_restores_the_user_section_occurrence() {
 
 #[gtk::test]
 fn slice4_sidebar_duplicate_tree_expander_restores_its_ancestor_occurrence() {
-    use zorin_explorer::{
+    use lorin_explorer::{
         core::{
             contracts::{Capability, CapabilitySnapshot, EntryKind, EntrySnapshot},
             sidebar_model::{SidebarModel, SidebarPreferences},
@@ -229,7 +229,7 @@ fn slice4_sidebar_duplicate_tree_expander_restores_its_ancestor_occurrence() {
 #[gtk::test]
 fn slice4_list_cut_description_is_cleared_on_replacement_and_unbind() {
     use glib::translate::ToGlibPtr;
-    use zorin_explorer::{
+    use lorin_explorer::{
         core::{GroupField, ViewMode, ViewOptions},
         ui::file_view::FileView,
     };
@@ -387,7 +387,7 @@ fn slice4_icon_controls_have_explicit_accessible_names() {
 
 #[gtk::test]
 fn slice4_location_escape_restores_breadcrumbs_without_navigation() {
-    use zorin_explorer::ui::header::LocationBar;
+    use lorin_explorer::ui::header::LocationBar;
     let bar = LocationBar::new(&Location::home());
     let window = gtk::Window::new();
     window.set_child(Some(&bar.widget));
@@ -426,7 +426,7 @@ fn slice4_location_escape_restores_breadcrumbs_without_navigation() {
 
 #[gtk::test]
 fn slice4_committed_navigation_clears_a_stale_location_validation_error() {
-    use zorin_explorer::ui::header::LocationBar;
+    use lorin_explorer::ui::header::LocationBar;
     let bar = LocationBar::new(&Location::home());
     bar.connect_location_changed(|_| {});
     let entry = descendants(bar.widget.upcast_ref())
@@ -450,7 +450,7 @@ fn slice4_committed_navigation_clears_a_stale_location_validation_error() {
 
 #[gtk::test]
 fn slice4_status_priorities_coalesce_repeated_updates() {
-    use zorin_explorer::ui::accessibility::{AccessibleStatus, StatusPriority};
+    use lorin_explorer::ui::accessibility::{AccessibleStatus, StatusPriority};
     let status = AccessibleStatus::new();
     let labels: Vec<_> = descendants(status.widget.upcast_ref())
         .into_iter()
@@ -480,7 +480,7 @@ fn slice4_status_priorities_coalesce_repeated_updates() {
 
 #[gtk::test]
 fn slice4_keyboard_context_menu_keeps_selection_and_returns_focus() {
-    use zorin_explorer::{
+    use lorin_explorer::{
         core::{GroupField, ViewOptions},
         ui::file_view::FileView,
     };
@@ -488,7 +488,7 @@ fn slice4_keyboard_context_menu_keeps_selection_and_returns_focus() {
     std::fs::write(directory.path().join("keyboard.txt"), "fixture").unwrap();
     let view = FileView::new(Location::from_local_path(directory.path()));
     view.set_options(ViewOptions {
-        view_mode: zorin_explorer::core::ViewMode::DetailedList,
+        view_mode: lorin_explorer::core::ViewMode::DetailedList,
         group_field: GroupField::None,
         ..Default::default()
     });
@@ -540,7 +540,7 @@ fn slice4_keyboard_context_menu_keeps_selection_and_returns_focus() {
 
 #[gtk::test]
 fn slice4_sidebar_expanders_expose_state_and_refresh_keeps_keyboard_focus() {
-    use zorin_explorer::{
+    use lorin_explorer::{
         core::sidebar_model::{SidebarModel, SidebarPreferences},
         ui::sidebar::Sidebar,
     };
@@ -576,7 +576,7 @@ fn slice4_sidebar_expanders_expose_state_and_refresh_keeps_keyboard_focus() {
 
 #[gtk::test]
 fn slice4_operation_terminal_status_announces_once_and_cancel_is_named() {
-    use zorin_explorer::{
+    use lorin_explorer::{
         core::{contracts::MutationKind, OperationManager},
         ui::{accessibility::AccessibleStatus, operations_page},
     };
@@ -641,7 +641,7 @@ fn slice4_operation_terminal_status_announces_once_and_cancel_is_named() {
 
 #[gtk::test]
 fn slice4_opening_a_folder_keeps_keyboard_focus_in_the_new_listing() {
-    use zorin_explorer::{
+    use lorin_explorer::{
         core::{GroupField, ViewMode, ViewOptions},
         ui::file_view::FileView,
     };

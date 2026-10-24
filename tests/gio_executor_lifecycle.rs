@@ -10,7 +10,7 @@ use std::{
 
 use gio::prelude::{ActionGroupExt, ApplicationExt, ApplicationExtManual, CancellableExt};
 use gtk::prelude::GtkWindowExt;
-use zorin_explorer::{
+use lorin_explorer::{
     application::lifecycle::install_executor_shutdown,
     core::{
         contracts::{DirectoryRequest, PageRequest, RequestId},

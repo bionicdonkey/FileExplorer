@@ -16,7 +16,7 @@ fn scale_pump_until(mut ready: impl FnMut() -> bool) {
 }
 
 #[track_caller]
-fn scale_first_frame(view: &zorin_explorer::ui::file_view::FileView) {
+fn scale_first_frame(view: &lorin_explorer::ui::file_view::FileView) {
     scale_pump_until(|| {
         view.column_view().is_some_and(|list| {
             list.height() > 0 && list.model().is_some_and(|model| model.n_items() > 0)
@@ -37,7 +37,7 @@ fn scale_first_frame(view: &zorin_explorer::ui::file_view::FileView) {
 #[gtk::test]
 fn slice5_cold_warm_local_remote_frames_and_fifty_tabs_meet_p95_budgets() {
     use std::time::{Duration, Instant};
-    use zorin_explorer::{application::performance::assert_p95, ui::file_view::FileView};
+    use lorin_explorer::{application::performance::assert_p95, ui::file_view::FileView};
     println!("Benchmark environment: {:#?}", scale_fixture::environment());
     let directory = tempfile::tempdir().unwrap();
     for n in 0..10_000 {
@@ -230,7 +230,7 @@ fn slice5_cold_warm_local_remote_frames_and_fifty_tabs_meet_p95_budgets() {
 
 #[gtk::test]
 fn slice5_page_sized_grid_recycles_rows() {
-    use zorin_explorer::{
+    use lorin_explorer::{
         core::{FileItem, ViewMode, ViewOptions},
         ui::file_view::FileView,
     };
@@ -258,7 +258,7 @@ fn slice5_page_sized_grid_recycles_rows() {
 
 #[gtk::test]
 fn slice5_hidden_filter_keeps_the_complete_incremental_source_model() {
-    use zorin_explorer::{
+    use lorin_explorer::{
         core::{ViewMode, ViewOptions},
         ui::file_view::FileView,
     };
@@ -326,7 +326,7 @@ fn slice5_hidden_filter_keeps_the_complete_incremental_source_model() {
 
 #[gtk::test]
 fn slice5_viewport_range_requests_metadata_for_newly_visible_rows() {
-    use zorin_explorer::{
+    use lorin_explorer::{
         core::{ViewMode, ViewOptions},
         ui::file_view::FileView,
     };
@@ -385,7 +385,7 @@ fn slice5_viewport_range_requests_metadata_for_newly_visible_rows() {
 
 #[gtk::test]
 fn slice5_large_grid_recycles_visible_rows() {
-    use zorin_explorer::{
+    use lorin_explorer::{
         core::{FileItem, ViewMode, ViewOptions},
         ui::file_view::FileView,
     };
@@ -476,7 +476,7 @@ fn slice5_large_grid_recycles_visible_rows() {
 
 #[gtk::test]
 fn slice5_visible_thumbnail_is_scaled_and_invalidated_by_directory_monitor() {
-    use zorin_explorer::{
+    use lorin_explorer::{
         core::{ViewMode, ViewOptions},
         ui::file_view::FileView,
     };
@@ -534,7 +534,7 @@ fn slice5_visible_thumbnail_is_scaled_and_invalidated_by_directory_monitor() {
 
 #[gtk::test]
 fn slice5_incremental_grouping_and_hidden_filter_preserve_all_visible_rows() {
-    use zorin_explorer::{
+    use lorin_explorer::{
         core::{FileItem, GroupField, ViewMode, ViewOptions},
         ui::file_view::FileView,
     };
@@ -591,7 +591,7 @@ fn slice5_incremental_grouping_and_hidden_filter_preserve_all_visible_rows() {
 
 #[gtk::test]
 fn slice5_streamed_refresh_restores_selection_from_a_later_page() {
-    use zorin_explorer::{
+    use lorin_explorer::{
         core::{ViewMode, ViewOptions},
         ui::file_view::FileView,
     };
@@ -641,7 +641,7 @@ fn slice5_streamed_refresh_restores_selection_from_a_later_page() {
 
 #[gtk::test]
 fn slice5_stream_pages_yield_to_incremental_sort_until_complete() {
-    use zorin_explorer::{
+    use lorin_explorer::{
         core::{ViewMode, ViewOptions},
         ui::file_view::FileView,
     };
@@ -689,7 +689,7 @@ fn slice5_stream_pages_yield_to_incremental_sort_until_complete() {
 fn slice4_platform_layout_renders_large_text_narrow_rtl_and_high_contrast() {
     use adw::prelude::AdwApplicationWindowExt;
     use std::cell::RefCell;
-    use zorin_explorer::ui::header::HeaderControls;
+    use lorin_explorer::ui::header::HeaderControls;
     adw::init().unwrap();
     let provider = gtk::CssProvider::new();
     let errors = Rc::new(RefCell::new(Vec::new()));
@@ -833,7 +833,7 @@ fn slice4_platform_layout_renders_large_text_narrow_rtl_and_high_contrast() {
 #[gtk::test]
 fn slice3_multiple_selection_routes_one_uri_command_and_drag_payload() {
     use std::cell::RefCell;
-    use zorin_explorer::{
+    use lorin_explorer::{
         application::commands::ClipboardAction,
         core::{GroupField, ViewMode, ViewOptions},
         ui::file_view::FileView,
@@ -910,7 +910,7 @@ fn slice3_multiple_selection_routes_one_uri_command_and_drag_payload() {
     assert_eq!(commands.borrow()[1].selection.len(), 2);
     assert_eq!(commands.borrow()[1].destination, root);
     assert!(!view.dispatch_drop("smb://user:password@host/share/a", ClipboardAction::Copy));
-    let folder = zorin_explorer::core::FileItem::from_snapshot(&EntrySnapshot {
+    let folder = lorin_explorer::core::FileItem::from_snapshot(&EntrySnapshot {
         location: Location::from_uri("smb://host/share/folder").unwrap(),
         display_name: "folder".into(),
         kind: EntryKind::Directory,
@@ -989,7 +989,7 @@ fn slice3_multiple_selection_routes_one_uri_command_and_drag_payload() {
 
 #[gtk::test]
 fn slice3_properties_reports_async_errors_and_unavailable_fields() {
-    use zorin_explorer::ui::properties_dialog::PropertiesDialog;
+    use lorin_explorer::ui::properties_dialog::PropertiesDialog;
     let directory = tempfile::tempdir().unwrap();
     let dialog = PropertiesDialog::present(
         None,
@@ -1026,7 +1026,7 @@ fn slice3_properties_reports_async_errors_and_unavailable_fields() {
 #[gtk::test]
 #[allow(deprecated)]
 fn slice3_properties_close_restores_focus_and_operation_center_reports_completion() {
-    use zorin_explorer::{
+    use lorin_explorer::{
         core::{OperationManager, OperationState},
         ui::{operations_page, properties_dialog::PropertiesDialog},
     };
@@ -1096,7 +1096,7 @@ use gtk::prelude::*;
 #[allow(deprecated)]
 fn slice3_permanent_delete_confirmation_cancels_or_deletes_all_uri_items() {
     use adw::prelude::*;
-    use zorin_explorer::{
+    use lorin_explorer::{
         core::OperationManager,
         ui::{file_view::FileView, window::confirm_permanent_delete},
     };
@@ -1138,11 +1138,11 @@ fn slice3_permanent_delete_confirmation_cancels_or_deletes_all_uri_items() {
     parent.close();
     view.close();
 }
-use zorin_explorer::application::operations::{CancelResult, OperationCoordinator, OperationState};
-use zorin_explorer::core::contracts::*;
-use zorin_explorer::core::Location;
-use zorin_explorer::infrastructure::mock_provider::{MockConfig, MockProvider};
-use zorin_explorer::ui::context_menu::{
+use lorin_explorer::application::operations::{CancelResult, OperationCoordinator, OperationState};
+use lorin_explorer::core::contracts::*;
+use lorin_explorer::core::Location;
+use lorin_explorer::infrastructure::mock_provider::{MockConfig, MockProvider};
+use lorin_explorer::ui::context_menu::{
     configure_command_button, CommandAvailability, ContextCommand,
 };
 
@@ -1151,7 +1151,7 @@ use zorin_explorer::ui::context_menu::{
 #[gtk::test]
 fn slice2_search_scope_incomplete_retry_clear_and_remote_activation() {
     use std::cell::RefCell;
-    use zorin_explorer::{core::ports::*, ui::file_view::FileView};
+    use lorin_explorer::{core::ports::*, ui::file_view::FileView};
     #[derive(Default)]
     struct SearchDouble(RefCell<Vec<(SearchRequest, SearchCallback)>>);
     impl SearchRepository for SearchDouble {
@@ -1226,9 +1226,9 @@ fn slice2_search_scope_incomplete_retry_clear_and_remote_activation() {
     );
     let search = Rc::new(SearchDouble::default());
     let view = FileView::new_with_repositories(root.clone(), provider.clone(), search.clone());
-    view.set_options(zorin_explorer::core::ViewOptions {
-        view_mode: zorin_explorer::core::ViewMode::DetailedList,
-        group_field: zorin_explorer::core::GroupField::None,
+    view.set_options(lorin_explorer::core::ViewOptions {
+        view_mode: lorin_explorer::core::ViewMode::DetailedList,
+        group_field: lorin_explorer::core::GroupField::None,
         ..Default::default()
     });
     provider.advance(1);
@@ -1343,7 +1343,7 @@ fn slice2_search_scope_incomplete_retry_clear_and_remote_activation() {
     while context.pending() {
         context.iteration(false);
     }
-    let Some(zorin_explorer::ui::context_menu::ContextTarget::File(selected)) =
+    let Some(lorin_explorer::ui::context_menu::ContextTarget::File(selected)) =
         view.selected_target()
     else {
         panic!("saved file must remain selected")
@@ -1354,7 +1354,7 @@ fn slice2_search_scope_incomplete_retry_clear_and_remote_activation() {
 #[gtk::test]
 fn slice2_navigation_commits_after_success_and_refresh_restores_selection() {
     use std::cell::RefCell;
-    use zorin_explorer::{core::navigation::NavigationStatus, ui::file_view::FileView};
+    use lorin_explorer::{core::navigation::NavigationStatus, ui::file_view::FileView};
     gtk::init().expect("headless GTK must initialize");
     let context = glib::MainContext::default();
     let _guard = context.acquire().unwrap();
@@ -1379,9 +1379,9 @@ fn slice2_navigation_commits_after_success_and_refresh_restores_selection() {
         },
     );
     let view = FileView::new_with_repository(root.clone(), provider.clone());
-    view.set_options(zorin_explorer::core::ViewOptions {
-        view_mode: zorin_explorer::core::ViewMode::DetailedList,
-        group_field: zorin_explorer::core::GroupField::None,
+    view.set_options(lorin_explorer::core::ViewOptions {
+        view_mode: lorin_explorer::core::ViewMode::DetailedList,
+        group_field: lorin_explorer::core::GroupField::None,
         ..Default::default()
     });
     assert!(view.tab_state().borrow().history.current().is_none());
@@ -1430,7 +1430,7 @@ fn slice2_navigation_commits_after_success_and_refresh_restores_selection() {
     assert_eq!(view.current_location(), root);
     assert_eq!(view.tab_state().borrow().history.current(), Some(&root));
 
-    view.show_section_overview(zorin_explorer::core::sidebar_model::SidebarSection {
+    view.show_section_overview(lorin_explorer::core::sidebar_model::SidebarSection {
         title: "Network & online".into(),
         nodes: vec![],
         mountables: vec![],
@@ -1487,7 +1487,7 @@ fn slice2_navigation_commits_after_success_and_refresh_restores_selection() {
     assert_eq!(view.current_location().uri(), "smb://host/missing");
 
     // The same address component is used by the window and folder picker.
-    let bar = zorin_explorer::ui::header::LocationBar::new(&root);
+    let bar = lorin_explorer::ui::header::LocationBar::new(&root);
     let entered = Rc::new(RefCell::new(Vec::new()));
     bar.connect_location_changed({
         let entered = entered.clone();
@@ -1518,13 +1518,13 @@ fn slice2_navigation_commits_after_success_and_refresh_restores_selection() {
 
     // Tab selection must replace the editable URI even when an overview is visible.
     let header =
-        zorin_explorer::ui::header::HeaderControls::new(Rc::new(RefCell::new(root.clone())));
+        lorin_explorer::ui::header::HeaderControls::new(Rc::new(RefCell::new(root.clone())));
     let tabs = adw::TabView::new();
     let directory_page = tabs.append(&gtk::Label::new(Some("Directory")));
     let overview_page = tabs.append(&gtk::Label::new(Some("Overview")));
     tabs.set_selected_page(&directory_page);
-    let overview_content = zorin_explorer::core::navigation::TabContent::SectionOverview {
-        section: zorin_explorer::core::sidebar_model::SidebarSection {
+    let overview_content = lorin_explorer::core::navigation::TabContent::SectionOverview {
+        section: lorin_explorer::core::sidebar_model::SidebarSection {
             title: "Network & online".into(),
             nodes: vec![],
             mountables: vec![],
@@ -1539,7 +1539,7 @@ fn slice2_navigation_commits_after_success_and_refresh_restores_selection() {
             let content = if tabs.selected_page().as_ref() == Some(&overview_page) {
                 overview_content.clone()
             } else {
-                zorin_explorer::core::navigation::TabContent::Directory(root.clone())
+                lorin_explorer::core::navigation::TabContent::Directory(root.clone())
             };
             header.set_tab_content(&content);
         }
@@ -1587,7 +1587,7 @@ fn slice2_navigation_commits_after_success_and_refresh_restores_selection() {
     assert!(view.tab_state().borrow().has_pending_navigation());
     view.mark_unavailable(&removed_root);
     assert!(
-        matches!(&view.tab_state().borrow().content, zorin_explorer::core::navigation::TabContent::Unavailable(location) if location.uri() == "smb://host/missing")
+        matches!(&view.tab_state().borrow().content, lorin_explorer::core::navigation::TabContent::Unavailable(location) if location.uri() == "smb://host/missing")
     );
     assert!(!view.tab_state().borrow().has_pending_navigation());
     // A late completion from the refresh must not resurrect the removed mount.
@@ -1596,7 +1596,7 @@ fn slice2_navigation_commits_after_success_and_refresh_restores_selection() {
         context.iteration(false);
     }
     assert!(
-        matches!(&view.tab_state().borrow().content, zorin_explorer::core::navigation::TabContent::Unavailable(location) if location.uri() == "smb://host/missing")
+        matches!(&view.tab_state().borrow().content, lorin_explorer::core::navigation::TabContent::Unavailable(location) if location.uri() == "smb://host/missing")
     );
     assert_eq!(view.current_location().uri(), "smb://host/missing");
     assert_eq!(
@@ -1632,7 +1632,7 @@ fn slice2_navigation_commits_after_success_and_refresh_restores_selection() {
         content_type: None,
         capabilities: CapabilitySnapshot::default(),
     };
-    view.show_search_results(vec![zorin_explorer::core::FileItem::from_snapshot(&result)]);
+    view.show_search_results(vec![lorin_explorer::core::FileItem::from_snapshot(&result)]);
     view.column_view()
         .unwrap()
         .emit_by_name::<()>("activate", &[&0u32]);
@@ -1658,7 +1658,7 @@ fn slice2_navigation_commits_after_success_and_refresh_restores_selection() {
     unavailable_local.mark_unavailable(&root);
     assert!(!unavailable_local.command_availability().can_paste);
     assert_eq!(unavailable_local.current_location(), root);
-    unavailable_local.show_section_overview(zorin_explorer::core::sidebar_model::SidebarSection {
+    unavailable_local.show_section_overview(lorin_explorer::core::sidebar_model::SidebarSection {
         title: "This PC".into(),
         nodes: vec![],
         mountables: vec![],
@@ -1670,7 +1670,7 @@ fn slice2_navigation_commits_after_success_and_refresh_restores_selection() {
         move |_, _| dispatched.set(true)
     });
     unavailable_local.dispatch_context_command(
-        zorin_explorer::ui::context_menu::ContextTarget::Background(root.clone()),
+        lorin_explorer::ui::context_menu::ContextTarget::Background(root.clone()),
         ContextCommand::Paste,
     );
     assert!(
@@ -1680,13 +1680,13 @@ fn slice2_navigation_commits_after_success_and_refresh_restores_selection() {
     unavailable_local.close();
 }
 
-fn remote_item() -> zorin_explorer::core::FileItem {
+fn remote_item() -> lorin_explorer::core::FileItem {
     let parent = gio::File::for_uri("smb://host/share");
     let info = gio::FileInfo::new();
     info.set_name("report.txt");
     info.set_display_name("report.txt");
     info.set_file_type(gio::FileType::Regular);
-    zorin_explorer::core::FileItem::from_gio(&parent, &info)
+    lorin_explorer::core::FileItem::from_gio(&parent, &info)
 }
 
 #[gtk::test]
@@ -1717,7 +1717,7 @@ fn slice1_reenabled_action_clears_the_stale_disabled_explanation() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("local.txt");
     std::fs::write(&path, "contents").unwrap();
-    let local = zorin_explorer::core::FileItem::from_path(&path).unwrap();
+    let local = lorin_explorer::core::FileItem::from_path(&path).unwrap();
 
     configure_command_button(
         &button,
@@ -1771,7 +1771,7 @@ fn slice1_cancel_state_and_error_text_remain_explicit_and_redacted() {
 }
 #[gtk::test]
 fn slice5_local_ten_thousand_file_navigation_completes_through_incremental_sort_backpressure() {
-    use zorin_explorer::{
+    use lorin_explorer::{
         core::{ViewMode, ViewOptions},
         ui::file_view::FileView,
     };
@@ -1877,7 +1877,7 @@ fn slice5_local_ten_thousand_file_navigation_completes_through_incremental_sort_
 
 #[gtk::test]
 fn slice5_file_view_rejects_late_directory_dto_after_navigation() {
-    use zorin_explorer::{
+    use lorin_explorer::{
         core::contracts::{Capability, CapabilitySnapshot},
         ui::file_view::FileView,
     };

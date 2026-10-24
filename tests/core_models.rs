@@ -2,7 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use tempfile::tempdir;
-use zorin_explorer::core::{DirectoryModel, Location, NavigationHistory};
+use lorin_explorer::core::{DirectoryModel, Location, NavigationHistory};
 
 #[test]
 fn home_location_uses_home_directory_and_has_display_name() {

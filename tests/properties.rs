@@ -1,4 +1,4 @@
-use zorin_explorer::core::{PermissionBits, PropertyDetails};
+use lorin_explorer::core::{PermissionBits, PropertyDetails};
 
 #[test]
 fn permission_bits_round_trip_unix_mode() {

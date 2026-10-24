@@ -418,7 +418,7 @@ impl ViewPreferencesStore {
             .ok_or_else(|| {
                 io::Error::new(io::ErrorKind::NotFound, "home directory is unavailable")
             })?;
-        Self::load_from(config_home.join("zorin-explorer/view-options.json"))
+        Self::load_from(config_home.join("lorin-explorer/view-options.json"))
     }
 
     pub fn load_from(path: PathBuf) -> io::Result<Self> {

@@ -351,7 +351,7 @@ impl DirectoryRepository for ArchiveDirectoryRepository {
                         });
                     }
                     Listing::Failed(message) => {
-                        eprintln!("zorin-explorer: {message}");
+                        eprintln!("lorin-explorer: {message}");
                         done(RequestCompletion {
                             id,
                             outcome: RequestOutcome::Failed(OperationError::new(

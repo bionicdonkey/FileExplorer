@@ -728,6 +728,8 @@ pub struct FileView {
     on_options_changed: Rc<RefCell<Option<Box<dyn Fn(ViewOptions)>>>>,
     options: Rc<RefCell<ViewOptions>>,
     selected_target: Rc<RefCell<Option<ContextTarget>>>,
+    /// Said above the results when the search had to be run differently from how it was asked for.
+    search_notice: Rc<RefCell<Option<String>>>,
     on_command_availability_changed: Rc<RefCell<Option<Box<dyn Fn(CommandAvailability)>>>>,
     on_status: Rc<RefCell<Option<Box<dyn Fn(ViewStatus)>>>>,
     rendered_view: Rc<RefCell<Option<RenderedView>>>,
@@ -877,6 +879,7 @@ impl FileView {
             on_options_changed: Rc::new(RefCell::new(None)),
             options: Rc::new(RefCell::new(ViewOptions::default())),
             selected_target: Rc::new(RefCell::new(None)),
+            search_notice: Rc::new(RefCell::new(None)),
             on_command_availability_changed: Rc::new(RefCell::new(None)),
             pending_cut: Rc::new(RefCell::new(Vec::new())),
             is_quick_access_location: Rc::new(RefCell::new(None)),
@@ -2146,8 +2149,31 @@ impl FileView {
             return true;
         }
         let scope = crate::core::contracts::SearchScope::local_fallback(self.current_location());
+        *self.search_notice.borrow_mut() = None;
         let view = self.clone();
-        let done = move |_| view.search_finished();
+        let again = (term.to_owned(), scope.clone());
+        let done = move |outcome: crate::core::contracts::SearchOutcome| {
+            // No provider here searches inside files. Rather than an empty page that says
+            // "unavailable", run the search on names and say so above the results.
+            if mode == crate::core::contracts::SearchMode::Content
+                && matches!(outcome, crate::core::contracts::SearchOutcome::Unsupported { .. })
+            {
+                *view.search_notice.borrow_mut() = Some(
+                    "Searching inside files isn't available here, so these are file name matches."
+                        .to_owned(),
+                );
+                let finished = view.clone();
+                if view.search.submit(
+                    &again.0,
+                    crate::core::contracts::SearchMode::Filename,
+                    again.1.clone(),
+                    move |_| finished.search_finished(),
+                ) {
+                    return;
+                }
+            }
+            view.search_finished()
+        };
         if debounce {
             self.search.submit_debounced(term, mode, scope, done)
         } else {
@@ -2182,6 +2208,13 @@ impl FileView {
         );
         status.set_wrap(true);
         status.set_xalign(0.0);
+        if let Some(notice) = self.search_notice.borrow().as_deref() {
+            let notice = Label::new(Some(notice));
+            notice.set_wrap(true);
+            notice.set_xalign(0.0);
+            notice.add_css_class("dim-label");
+            layout.append(&notice);
+        }
         layout.append(&status);
         if matches!(outcome, SearchOutcome::Incomplete { .. }) {
             let retry = Button::with_label("Retry search");
@@ -4275,8 +4308,8 @@ fn open_with_submenu(
     let target = target.clone();
     let view = view.clone();
     button.connect_clicked(move |_| {
-        let (content_type, location) = match &target {
-            ContextTarget::File(item) => (item.effective_content_type(), item.location().clone()),
+        let content_type = match &target {
+            ContextTarget::File(item) => item.effective_content_type(),
             _ => return,
         };
         let menu = GtkBox::new(Orientation::Vertical, 2);
@@ -4295,7 +4328,7 @@ fn open_with_submenu(
         let parent = submenu_parent.clone();
         let view = view.clone();
         other.connect_clicked(move |_| {
-            show_application_chooser(&parent, content_type.clone(), &location, view.clone())
+            show_application_chooser(&parent, content_type.clone(), view.clone())
         });
         menu.append(&other);
         show_submenu(&submenu_parent, &menu);
@@ -4312,33 +4345,13 @@ fn show_submenu(parent: &Button, menu: &GtkBox) {
     submenu.popup();
 }
 
-/// Inside a Flatpak sandbox GIO sees only the sandbox's own applications, so a
-/// chooser built from it lists almost nothing. The desktop portal shows the
-/// host's chooser instead.
-fn running_in_flatpak() -> bool {
-    std::path::Path::new("/.flatpak-info").exists()
-}
-
 #[allow(deprecated)]
 fn show_application_chooser(
     parent: &Button,
     content_type: String,
-    location: &Location,
     view: FileView,
 ) {
     let window = parent.root().and_downcast::<gtk::Window>();
-    if running_in_flatpak() {
-        let launcher = gtk::FileLauncher::new(Some(&gio::File::for_uri(location.uri())));
-        launcher.set_always_ask(true);
-        launcher.launch(window.as_ref(), gio::Cancellable::NONE, |result| {
-            if let Err(error) = result {
-                if !error.matches(gtk::DialogError::Dismissed) {
-                    eprintln!("Open With failed: {error}");
-                }
-            }
-        });
-        return;
-    }
     let dialog = gtk::AppChooserDialog::for_content_type(
         window.as_ref(),
         gtk::DialogFlags::MODAL,
@@ -5430,6 +5443,78 @@ mod tests {
     }
 
     #[gtk::test]
+    fn content_search_that_no_provider_supports_falls_back_to_names_with_a_notice() {
+        use crate::core::contracts::{SearchCompletion, SearchMode, SearchOutcome, SearchRequest};
+        use crate::core::ports::{SearchCallback, SearchRepository};
+        use crate::infrastructure::mock_provider::{MockConfig, MockProvider};
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        #[derive(Default)]
+        struct SearchDouble(RefCell<Vec<(SearchRequest, SearchCallback)>>);
+
+        impl SearchRepository for SearchDouble {
+            fn search(&self, request: SearchRequest, done: SearchCallback) {
+                self.0.borrow_mut().push((request, done));
+            }
+        }
+
+        let context = glib::MainContext::default();
+        let root = Location::from_uri("smb://fixture/content-fallback").unwrap();
+        let provider = Rc::new(MockProvider::new(context.clone(), MockConfig::default()));
+        let search = Rc::new(SearchDouble::default());
+        let view = FileView::new_with_repositories(root, provider.clone(), search.clone());
+        provider.advance(1);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while view.has_pending_navigation() {
+            assert!(std::time::Instant::now() < deadline);
+            context.iteration(false);
+        }
+
+        {
+            // The folder counts as loaded; searching needs an available directory.
+            use crate::core::contracts::{CapabilitySnapshot, DirectorySnapshot};
+            use crate::core::navigation::{NavigationStatus, TabContent};
+            let mut state = view.navigation.state.borrow_mut();
+            let location = state.location.clone();
+            state.content = TabContent::Directory(location.clone());
+            state.status = NavigationStatus::Ready;
+            state.directory = Some(DirectorySnapshot {
+                location: crate::core::ResolvedLocation {
+                    requested: location.clone(),
+                    resolved: location,
+                },
+                entries: vec![],
+                capabilities: CapabilitySnapshot::default(),
+                next_page: None,
+            });
+        }
+        assert!(view.search("*.deb", SearchMode::Content, false));
+        let (request, done) = search.0.borrow_mut().remove(0);
+        assert_eq!(request.mode, SearchMode::Content);
+        done(SearchCompletion {
+            id: request.id,
+            outcome: SearchOutcome::Unsupported {
+                declared_scope: request.scope.clone(),
+                error: crate::core::contracts::OperationError::new(
+                    crate::core::contracts::OperationErrorKind::Unsupported,
+                    None,
+                    None,
+                ),
+            },
+        });
+        let (second, _) = search.0.borrow_mut().remove(0);
+        assert_eq!(second.mode, SearchMode::Filename, "the search is retried on names");
+        assert_eq!(second.query, "*.deb");
+        assert!(view.search_notice.borrow().is_some());
+
+        // A new search starts without the old notice.
+        assert!(view.search("report", SearchMode::Filename, false));
+        assert!(view.search_notice.borrow().is_none());
+        view.close();
+    }
+
+    #[gtk::test]
     fn slice5_resolved_visible_metadata_is_bounded_and_evicted_rows_retry() {
         use crate::application::performance::CachePolicy;
         use crate::core::contracts::{EntryKind, EntrySnapshot, VisibleMetadata};
@@ -6208,13 +6293,13 @@ mod tests {
     }
 
     #[test]
-    fn thumbnail_lookup_checks_the_shared_home_cache_before_the_sandbox_cache() {
+    fn thumbnail_lookup_checks_the_home_cache_before_xdg_cache_home() {
         let home = PathBuf::from("/home/tester");
-        let sandbox_cache = PathBuf::from("/home/tester/.var/app/com.zorin.Explorer/cache");
+        let xdg_cache = PathBuf::from("/var/cache/tester");
 
         assert_eq!(
-            thumbnail_cache_homes_from(Some(&home), Some(&sandbox_cache)),
-            vec![home.join(".cache"), sandbox_cache]
+            thumbnail_cache_homes_from(Some(&home), Some(&xdg_cache)),
+            vec![home.join(".cache"), xdg_cache]
         );
     }
 

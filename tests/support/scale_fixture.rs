@@ -4,7 +4,7 @@ use std::{
     rc::Rc,
     time::{Duration, Instant},
 };
-use zorin_explorer::core::{contracts::*, ports::*, Location, ResolvedLocation};
+use lorin_explorer::core::{contracts::*, ports::*, Location, ResolvedLocation};
 
 pub fn entries(root: &Location, count: usize) -> Vec<EntrySnapshot> {
     (0..count)
@@ -98,7 +98,7 @@ impl DirectoryRepository for StreamingRepository {
     }
 }
 
-pub fn environment() -> zorin_explorer::application::performance::BenchmarkEnvironment {
+pub fn environment() -> lorin_explorer::application::performance::BenchmarkEnvironment {
     let cpu = std::fs::read_to_string("/proc/cpuinfo")
         .unwrap_or_default()
         .lines()
@@ -117,5 +117,5 @@ pub fn environment() -> zorin_explorer::application::performance::BenchmarkEnvir
         .find(|line| line.starts_with("PRETTY_NAME="))
         .unwrap_or("OS unknown")
         .to_owned();
-    zorin_explorer::application::performance::BenchmarkEnvironment { cpu, cores: std::thread::available_parallelism().map_or(1, usize::from), ram, os, gtk: format!("{}.{}.{}", gtk::major_version(), gtk::minor_version(), gtk::micro_version()), renderer: std::env::var("GSK_RENDERER").unwrap_or_else(|_| "GTK default".into()), fixture: "10,000 entries; 128 per page; 50 tabs; 100 records".into(), cache_state: "cold: new app model and empty thumbnail cache; warm: same view after one completed listing; kernel filesystem cache retained".into() }
+    lorin_explorer::application::performance::BenchmarkEnvironment { cpu, cores: std::thread::available_parallelism().map_or(1, usize::from), ram, os, gtk: format!("{}.{}.{}", gtk::major_version(), gtk::minor_version(), gtk::micro_version()), renderer: std::env::var("GSK_RENDERER").unwrap_or_else(|_| "GTK default".into()), fixture: "10,000 entries; 128 per page; 50 tabs; 100 records".into(), cache_state: "cold: new app model and empty thumbnail cache; warm: same view after one completed listing; kernel filesystem cache retained".into() }
 }
