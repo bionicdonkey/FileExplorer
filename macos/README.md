@@ -55,7 +55,7 @@ both, enabled once per machine:
 ## Releasing
 
 Tag `macos-vX.Y.Z` (the number must equal `MARKETING_VERSION` in `tools/gen-xcodeproj.py`). The
-`release` job in `.gitea/workflows/macos.yml` then runs `scripts/release.sh`: a universal archive,
+`release` job in `.github/workflows/macos.yml` then runs `scripts/release.sh`: a universal archive,
 the helper and the app signed with the Developer ID (`--options runtime`, same team), notarized,
 stapled, packed into a `.dmg` and attached to a draft release. The secrets it reads are listed in the
 workflow. Without them `release.sh` still builds the universal archive and `.dmg`, ad-hoc signed and
@@ -96,14 +96,18 @@ Nothing is pending.
 
 ## What cannot be proven on the build machine
 
-The CI runner is an Intel Mac mini running macOS 15 unofficially. It cannot show:
+CI (`.github/workflows/macos.yml`) is set up to build and test on GitHub's hosted Apple silicon and
+Intel runners, which would execute both halves of the universal binary. Until it has run there, the
+machine all of the above was verified on is an Intel Mac mini running macOS 15 unofficially, which
+cannot show:
 
-* that the arm64 half runs (it is compiled, not executed);
+* that the arm64 half runs (it is compiled and `lipo`-checked here, not executed; the arm64 CI job
+  is what will execute it);
 * Developer ID signing and notarization (no identities);
 * `SMAppService` daemon approval (needs a signed build and approval in System Settings);
 * UI behaviour on a real GPU. The XCUITests in `Tests/UITests` have run (7 passed on the Intel Mac
   once Developer and Automation mode were on), but only the x86_64 half and not on real hardware;
-* the release job (`.gitea/workflows/macos.yml`, tag `macos-v*`): it needs the signing and notary
+* the release job (`.github/workflows/macos.yml`, tag `macos-v*`): it needs the signing and notary
   secrets, so it has never run. `scripts/release.sh` has, without them.
 * mounting and ejecting a real volume from the sidebar, and `NSMetadataQuery` content search against
   a populated Spotlight index.

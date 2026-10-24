@@ -140,15 +140,16 @@ sudo apt install ./dist/lorin-explorer_*.deb
 ```
 
 The `Depends` line is computed from the libraries the binary links, so the package is built on the
-oldest release it should install on. `.gitea/workflows/deb.yml` builds it in an Ubuntu 24.04
-container for every push to `main`, and attaches it to the release for every `v*` tag.
+oldest release it should install on. `.github/workflows/deb.yml` builds it on an Ubuntu 24.04
+runner for every push to `main` and every pull request, and attaches it to the release for every
+`linux-v*` tag.
 
 A release is cut by tagging. The tag must match the crate version, or the job fails before creating
 anything:
 
 ```bash
-# with Cargo.toml at version = "0.7.0"
-git tag v0.7.0 && git push origin v0.7.0
+# with Cargo.toml at version = "0.8.0"
+git tag linux-v0.8.0 && git push origin linux-v0.8.0
 ```
 
 Re-running a tag attaches to the existing release and replaces the asset rather than duplicating it.

@@ -1,0 +1,127 @@
+name: Debian package
+
+# A .deb for every push to main and every pull request, and for every `linux-v*` tag, which also
+# attaches it to a GitHub release. (`v*` tags before 0.8.0 are historical; the macOS app releases
+# from `macos-v*` tags.) This is the shipping package: the app needs the host's applications, GVfs,
+# terminal and polkit, none of which a sandboxed package format provides.
+on:
+  push:
+    branches:
+      - main
+    # The Mac app has its own workflow. spec/** stays included on purpose: a spec change can break
+    # the Linux runner.
+    paths-ignore:
+      - 'macos/**'
+      - 'docs/**'
+      - '.github/workflows/macos.yml'
+    tags:
+      - 'linux-v*'
+  pull_request:
+    paths-ignore:
+      - 'macos/**'
+      - 'docs/**'
+      - '.github/workflows/macos.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A release commit arrives twice: once as a push to main and once as a tag. Both would build the
+# same commit, so a tag run cancels the branch run in its group. Branch runs never cancel, so a tag
+# that happens to start first still publishes instead of being cancelled by the branch event.
+concurrency:
+  group: deb-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/tags/linux-v') || github.event_name == 'pull_request' }}
+
+jobs:
+  deb:
+    # Ubuntu 24.04 is the baseline (Zorin OS 18). The Depends line is computed from the libraries
+    # the binary links, so building on the oldest supported release gives a package that installs
+    # on it and on anything newer.
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write   # attaching the package to a release on a tag
+    steps:
+      - name: Check out the commit
+        uses: actions/checkout@v4
+
+      - name: Check the app and the Mac app stay separate
+        run: sh scripts/check-separation.sh
+
+      - name: Install the build dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config dpkg-dev binutils jq \
+            libgtk-4-dev libadwaita-1-dev libarchive-dev
+
+      - name: Rust
+        # Cargo.lock is format 4, which needs cargo 1.78 or newer; the runner image ships a current
+        # stable toolchain.
+        run: |
+          rustup show
+          cargo --version
+
+      - name: Check the shared specification
+        run: |
+          cargo run --manifest-path spec/tools/Cargo.toml --locked -- check
+          cargo run --manifest-path spec/tools/Cargo.toml --locked -- status
+
+      - name: Run the behaviour scenarios
+        # The shared specification's scenarios against the real adapters. Slow to link, so it runs
+        # once per push rather than per scenario; it needs no display.
+        run: cargo test --locked --test spec_scenarios
+
+      - name: Read the crate version
+        id: crate
+        run: |
+          version="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "Building lorin-explorer ${version}"
+
+      - name: Build the package
+        run: packaging/deb/build-deb.sh dist
+
+      - name: Describe the package
+        run: |
+          dpkg-deb --info dist/*.deb
+          dpkg-deb --contents dist/*.deb
+
+      - name: Upload the package
+        uses: actions/upload-artifact@v4
+        with:
+          name: lorin-explorer-${{ steps.crate.outputs.version }}-deb
+          path: dist/*.deb
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/linux-v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ steps.crate.outputs.version }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          package="$(ls dist/lorin-explorer_*.deb)"
+
+          if [[ "$TAG" != "linux-v${VERSION}" ]]; then
+            echo "tag ${TAG} does not match version ${VERSION} in Cargo.toml" >&2
+            exit 1
+          fi
+
+          # Re-running a tag attaches to the release that already exists rather than failing on the
+          # duplicate; --clobber replaces an asset of the same name.
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            echo "release ${TAG} exists; attaching to it"
+            gh release upload "$TAG" "$package" --clobber
+          else
+            gh release create "$TAG" "$package" \
+              --title "Lorin Explorer ${VERSION}" \
+              --notes "Release ${TAG}, built from ${COMMIT}."
+          fi
+          echo "attached $(basename "$package") ($(stat -c%s "$package") bytes) to release ${TAG}"

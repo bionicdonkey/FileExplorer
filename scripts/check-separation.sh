@@ -47,8 +47,8 @@ done
 # Nothing outside macos/ may refer to macos/. The exceptions are the files that
 # have to name it: package exclusion, the Linux workflow's path filters, this
 # script, the docs, the Mac workflow, and the spec tooling and its README.
-others="$(printf '%s\n' "$files" | grep -v -e '^macos/' -e '^docs/' -e '^\.gitea/workflows/macos\.yml$' \
-    -e '^scripts/check-separation\.sh$' -e '^Cargo\.toml$' -e '^\.gitea/workflows/deb\.yml$' \
+others="$(printf '%s\n' "$files" | grep -v -e '^macos/' -e '^docs/' -e '^\.github/workflows/macos\.yml$' \
+    -e '^scripts/check-separation\.sh$' -e '^Cargo\.toml$' -e '^\.github/workflows/deb\.yml$' \
     -e '^\.gitignore$' -e '^spec/README\.md$' -e '^spec/tools/' || true)"
 for f in $others; do
     [ -f "$f" ] || continue

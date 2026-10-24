@@ -9,3 +9,5 @@ DerivedData/
 
 # The app icon images are source files, not build output (the root .gitignore ignores *.png).
 !/App/Assets.xcassets/**/*.png
+__pycache__/
+*.pyc
