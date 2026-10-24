@@ -8,6 +8,9 @@ name: macOS
 # Xcode on them is 16 or newer, and that the window-driving tests work on a hosted runner.
 on:
   push:
+    # `tags` alone would stop branch pushes from triggering the workflow, so branches are listed too.
+    branches:
+      - '**'
     paths:
       - 'macos/**'
       - 'spec/**'
