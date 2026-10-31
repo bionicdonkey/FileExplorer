@@ -9,5 +9,5 @@ description = "Registry checks and status report for the shared behaviour specif
 [workspace]
 
 [dependencies]
-jsonschema = { version = "0.59", default-features = false }
+jsonschema = { version = "0.60", default-features = false }
 serde_json = "1"
