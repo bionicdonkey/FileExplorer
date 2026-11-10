@@ -36,7 +36,8 @@ public final class LocalDirectoryRepository: DirectoryRepository {
             if info == .symlink { var s = stat(); isDirectory = stat(path, &s) == 0 && s.st_mode & S_IFMT == S_IFDIR }
             if info == .missing { return post(.failed(OperationError(.notFound, source: request.location))) }
             if !isDirectory { return post(.failed(OperationError(.unknown, source: request.location))) }
-            if access(path, R_OK) != 0 { return post(.failed(OperationError(.permissionDenied, source: request.location))) }
+            // No access() pre-check: it fails silently for folders macOS protects, while reading the
+            // folder is what makes the system ask the user for permission.
             let names: [String]
             do { names = try FileManager.default.contentsOfDirectory(atPath: path) }
             catch { return post(.failed(OperationError(failure: backendFailure(error), source: request.location))) }

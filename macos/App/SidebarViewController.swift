@@ -36,7 +36,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
     init(services: AppServices) {
         self.services = services
-        model = SidebarModel(preferences: services.sidebarPreferences, volumes: services.volumes)
+        model = SidebarModel(preferences: services.sidebarPreferences, volumes: services.volumes, cloudFolders: { CloudFolder.discover() })
         super.init(nibName: nil, bundle: nil)
     }
 

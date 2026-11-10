@@ -63,6 +63,44 @@ public struct MountedVolume: Equatable {
     }
 }
 
+/// A cloud storage folder the system syncs, such as iCloud Drive, OneDrive or Dropbox.
+public struct CloudFolder: Equatable {
+    public var path: String
+    public var label: String
+    public var iconName: String
+
+    public init(path: String, label: String, iconName: String = "cloud") {
+        self.path = path
+        self.label = label
+        self.iconName = iconName
+    }
+
+    /// Reads the folders macOS exposes for sync providers: iCloud Drive and `~/Library/CloudStorage/*`.
+    public static func discover(home: String = NSHomeDirectory(), fileManager: FileManager = .default) -> [CloudFolder] {
+        var found: [CloudFolder] = []
+        let iCloud = home + "/Library/Mobile Documents/com~apple~CloudDocs"
+        if fileManager.fileExists(atPath: iCloud) { found.append(CloudFolder(path: iCloud, label: "iCloud Drive", iconName: "icloud")) }
+        let root = home + "/Library/CloudStorage"
+        for name in ((try? fileManager.contentsOfDirectory(atPath: root)) ?? []).sorted() where !name.hasPrefix(".") {
+            found.append(CloudFolder(path: root + "/" + name, label: label(forProviderFolder: name)))
+        }
+        return found
+    }
+
+    /// `OneDrive-Personal` becomes "OneDrive – Personal"; `GoogleDrive-ada@example.com` becomes "Google Drive – ada@example.com".
+    static func label(forProviderFolder name: String) -> String {
+        let parts = name.split(separator: "-", maxSplits: 1).map(String.init)
+        let provider: String
+        switch parts[0] {
+        case "GoogleDrive": provider = "Google Drive"
+        case "OneDrive": provider = "OneDrive"
+        default: provider = parts[0]
+        }
+        guard parts.count == 2, !parts[1].isEmpty, parts[1] != parts[0] else { return provider }
+        return provider + " – " + parts[1]
+    }
+}
+
 /// Where the sidebar learns about volumes. The macOS app supplies DiskArbitration and NSWorkspace.
 public protocol VolumeProvider: AnyObject {
     func mountedVolumes() -> [MountedVolume]
@@ -92,6 +130,7 @@ public struct SidebarSection {
 public final class SidebarPreferences {
     public static let quickAccess = "Quick access"
     public static let devices = "Devices"
+    public static let locations = "Locations"
 
     private let file: URL?
     public private(set) var pins: [Location] = []
@@ -163,9 +202,12 @@ public final class SidebarModel {
     private let userName: String
     private let volumes: VolumeProvider
     private let exists: (String) -> Bool
+    private let cloudFolders: () -> [CloudFolder]
 
     public init(preferences: SidebarPreferences, home: String = NSHomeDirectory(), userName: String = NSFullUserName(),
-                volumes: VolumeProvider = NoVolumes(), exists: @escaping (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }) {
+                volumes: VolumeProvider = NoVolumes(), cloudFolders: @escaping () -> [CloudFolder] = { [] },
+                exists: @escaping (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }) {
+        self.cloudFolders = cloudFolders
         self.preferences = preferences
         self.home = home
         self.userName = userName
@@ -174,7 +216,14 @@ public final class SidebarModel {
         preferences.installDefaultPins(home: home, exists: exists)
     }
 
-    public func sections() -> [SidebarSection] { [quickAccess(), userFolders(), thisMac()] }
+    public func sections() -> [SidebarSection] {
+        var result = [quickAccess(), userFolders(), thisMac()]
+        let cloud = cloudFolders()
+        if !cloud.isEmpty {
+            result.append(SidebarSection(title: SidebarPreferences.locations, nodes: cloud.map { SidebarNode(path: $0.path, label: $0.label, icon: $0.iconName) }))
+        }
+        return result
+    }
 
     static func standardFolderIcon(_ path: String) -> String {
         switch (path as NSString).lastPathComponent {

@@ -13,6 +13,20 @@ final class SidebarTests: XCTestCase {
         SidebarModel(preferences: preferences, home: "/Users/ada", userName: name, volumes: volumes, exists: { _ in true })
     }
 
+    func testCloudFoldersGetALocationsSection() {
+        let cloud = [CloudFolder(path: "/Users/ada/Library/CloudStorage/OneDrive-Personal", label: "OneDrive – Personal")]
+        let sections = SidebarModel(preferences: .inMemory(), home: "/Users/ada", userName: "Ada", cloudFolders: { cloud }, exists: { _ in true }).sections()
+        XCTAssertEqual(sections.last?.title, "Locations")
+        XCTAssertEqual(sections.last?.nodes.map(\.location.label), ["OneDrive – Personal"])
+        XCTAssertEqual(model().sections().map(\.title), ["Quick access", "Ada Lovelace", "This Mac"])
+    }
+
+    func testProviderFolderLabels() {
+        XCTAssertEqual(CloudFolder.label(forProviderFolder: "OneDrive-Personal"), "OneDrive – Personal")
+        XCTAssertEqual(CloudFolder.label(forProviderFolder: "GoogleDrive-ada@example.com"), "Google Drive – ada@example.com")
+        XCTAssertEqual(CloudFolder.label(forProviderFolder: "Dropbox"), "Dropbox")
+    }
+
     func testSidebarSeparatesPersonalFoldersFromDevices() {
         let sections = model().sections()
         XCTAssertEqual(sections.map(\.title), ["Quick access", "Ada Lovelace", "This Mac"])

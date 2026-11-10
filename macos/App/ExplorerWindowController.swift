@@ -43,12 +43,21 @@ final class WindowManager {
             window.tabbingMode = .preferred
         }
         controller.start()
+        showTabBar(on: window)
         return controller
+    }
+
+    /// macOS hides the tab bar, and with it the + button, while a window has no siblings. Keep it up.
+    private func showTabBar(on window: NSWindow) {
+        DispatchQueue.main.async {
+            if window.tabGroup?.isTabBarVisible == false { window.toggleTabBar(nil) }
+        }
     }
 
     func closed(_ controller: ExplorerWindowController) {
         controllers.removeAll { $0 === controller }
         controller.tab.close()
+        for remaining in controllers.compactMap(\.window) { showTabBar(on: remaining) }
     }
 
     var hasWindows: Bool { !controllers.isEmpty }
