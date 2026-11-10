@@ -449,6 +449,6 @@ pub fn pick_folder<F: Fn(Location) + 'static>(
         move |_| picker.navigation.close_tab()
     });
     picker.select_location(initial);
-    dialog.present(parent);
+    dialog.present(Some(parent));
     picker
 }

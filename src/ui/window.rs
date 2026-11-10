@@ -931,7 +931,7 @@ impl ExplorerWindow {
             let closing_file_tab = close_data.borrow().iter().any(|tab| tab.page == *page);
             if !closing_file_tab {
                 view.close_page_finish(page, true);
-                return true;
+                return glib::Propagation::Stop;
             }
             if should_protect_last_file_tab(true, close_data.borrow().len()) {
                 if close_preferences.borrow().close_on_last_tab {
@@ -939,14 +939,14 @@ impl ExplorerWindow {
                 } else {
                     show_last_tab_dialog(&close_window);
                 }
-                return true;
+                return glib::Propagation::Stop;
             }
             if let Some(tab) = close_data.borrow().iter().find(|tab| tab.page == *page) {
                 tab.view.close();
             }
             remove_matching(&close_data, |tab| tab.page == *page);
             view.close_page_finish(page, true);
-            true
+            glib::Propagation::Stop
         });
 
         let tab_context_data = tabs_data.clone();
