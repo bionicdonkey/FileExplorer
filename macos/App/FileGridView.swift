@@ -5,6 +5,12 @@ import ExplorerDomain
 private final class FileCollectionView: NSCollectionView {
     var menuProvider: ((IndexPath?) -> NSMenu?)?
     var onReturn: (() -> Void)?
+    var onDoubleClick: ((IndexPath) -> Void)?
+
+    override func mouseDown(with event: NSEvent) {
+        super.mouseDown(with: event)
+        if event.clickCount == 2, let path = indexPathForItem(at: convert(event.locationInWindow, from: nil)) { onDoubleClick?(path) }
+    }
 
     override func menu(for event: NSEvent) -> NSMenu? {
         menuProvider?(indexPathForItem(at: convert(event.locationInWindow, from: nil)))
@@ -150,6 +156,7 @@ final class FileGridView: NSObject, FileView, NSCollectionViewDataSource, NSColl
         collection.setAccessibilityLabel("Files")
         collection.menuProvider = { [weak self] path in self?.menu(for: path) }
         collection.onReturn = { [weak self] in self?.selectedItems.first.map { self?.host?.fileViewActivate($0) } }
+        collection.onDoubleClick = { [weak self] path in self?.item(at: path).map { self?.host?.fileViewActivate($0) } }
         scroll.documentView = collection
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true

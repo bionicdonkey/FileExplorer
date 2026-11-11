@@ -13,7 +13,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if index == 0 { windows.open(location) } else { windows.open(location, asTabIn: windows.controllers.first?.window, activate: false) }
         }
         NSApp.activate(ignoringOtherApps: true)
+        requestFolderAccess()
         if let path = services.snapshotPath { scheduleSnapshot(to: path) }
+    }
+
+    /// macOS asks for permission the first time an app reads Desktop, Documents, Downloads and the like.
+    /// Ask for all of them once at first launch, so browsing later never stalls on a prompt.
+    private func requestFolderAccess() {
+        let key = "folderAccessRequested"
+        guard services.snapshotPath == nil, !UserDefaults.standard.bool(forKey: key) else { return }
+        UserDefaults.standard.set(true, forKey: key)
+        let home = NSHomeDirectory()
+        DispatchQueue.global(qos: .utility).async {
+            for name in ["Desktop", "Documents", "Downloads"] { _ = try? FileManager.default.contentsOfDirectory(atPath: home + "/" + name) }
+        }
     }
 
     /// `-MorinSnapshot <path>`: renders each window to `<path>-<n>.png` once it has loaded, then quits.
