@@ -7205,7 +7205,7 @@ fn apply_thumbnail(image: &Image, item: &FileItem, thumbnails: bool) {
     }
     if let Some(cached) = THUMBNAILS.with(|state| state.borrow_mut().cache.get(item.location())) {
         if let Some(texture) = cached {
-            image.set_from_paintable(Some(&texture));
+            image.set_paintable(Some(&texture));
         }
         return;
     }
@@ -7281,7 +7281,7 @@ fn apply_thumbnail(image: &Image, item: &FileItem, thumbnails: bool) {
                     });
                 THUMBNAILS.with(|state| state.borrow_mut().cache.insert(location, texture.clone()));
                 if let (Some(image), Some(texture)) = (image.upgrade(), texture) {
-                    image.set_from_paintable(Some(&texture));
+                    image.set_paintable(Some(&texture));
                 }
             }
         });
@@ -7517,7 +7517,9 @@ fn attach_async_drop(
         // GTK lights the target while a drag is over it and darkens it again
         // when the drag leaves, but a drop is not followed by a leave. The
         // highlight would stay on, as a blue border round the whole view.
-        target.widget().unset_state_flags(gtk::StateFlags::DROP_ACTIVE);
+        if let Some(widget) = target.widget() {
+            widget.unset_state_flags(gtk::StateFlags::DROP_ACTIVE);
+        }
         // Escape ended the source side of the drag, but GTK's X11 backend still
         // delivers the drop to the target afterwards, so decline it here. It
         // may deliver it to several targets; all stay declined until the next

@@ -39,7 +39,7 @@ fn daily_registered_gio_uri_backend_executes_transfers_and_preserves_uri_history
     assert!(vfs.register_uri_scheme(
         "dailyfixture",
         Some(Box::new(move |_, uri| {
-            gio::File::for_path(fixture_root.join(uri.strip_prefix("dailyfixture:///").unwrap()))
+            Some(gio::File::for_path(fixture_root.join(uri.strip_prefix("dailyfixture:///").unwrap())))
         })),
         None
     ));
