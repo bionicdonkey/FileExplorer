@@ -273,16 +273,3 @@ columnview row:focus-visible, tab:focus-visible {
   background-color: alpha(@accent_bg_color, 0.1);
   font-size: 0.95em;
 }
-
-/* The draggable divider between hybrid view's folders and files: a visible
- * bar, not GTK's one-pixel line, that lights up under the pointer. */
-paned.hybrid-split > separator {
-  min-height: 10px;
-  margin: 2px 0;
-  border-radius: 5px;
-  background-color: alpha(@window_fg_color, 0.1);
-}
-
-paned.hybrid-split > separator:hover {
-  background-color: alpha(@accent_bg_color, 0.5);
-}

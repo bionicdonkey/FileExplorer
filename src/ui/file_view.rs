@@ -3922,6 +3922,7 @@ impl FileView {
                 .child(&folders_view)
                 .build();
             let folders_box = GtkBox::new(Orientation::Vertical, 6);
+            folders_box.set_margin_bottom(8);
             folders_box.append(&heading("Folders"));
             folders_box.append(&folders_scroll);
             let files_view = self.large_column_view(&files, options, true, true);
@@ -3944,9 +3945,8 @@ impl FileView {
             split.set_shrink_start_child(false);
             split.set_shrink_end_child(false);
             split.set_vexpand(true);
-            // The default handle is a one-pixel line that is hard to find.
+            // A wider grab area than GTK's one-pixel line, with room above it.
             split.set_wide_handle(true);
-            split.add_css_class("hybrid-split");
             split.set_position(self.hybrid_split.get().unwrap_or(260));
             let remembered = self.hybrid_split.clone();
             split.connect_position_notify(move |split| remembered.set(Some(split.position())));
