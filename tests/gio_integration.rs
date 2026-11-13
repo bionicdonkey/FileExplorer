@@ -1355,6 +1355,36 @@ fn archive_backend_installed() -> bool {
         .any(|path| std::path::Path::new(path).exists())
 }
 
+/// Unmounts the `archive://` mount a test caused when the test ends, whether it
+/// passed or panicked. GVfs keeps such mounts in the user's login session, so a
+/// leaked one shows up in their file manager's sidebar long after the run.
+struct UnmountOnDrop(Location);
+
+impl Drop for UnmountOnDrop {
+    fn drop(&mut self) {
+        let context = glib::MainContext::new();
+        let _ = context.with_thread_default(|| {
+            let file = gio::File::for_uri(self.0.uri());
+            let Ok(mount) = file.find_enclosing_mount(gio::Cancellable::NONE) else {
+                return;
+            };
+            let done = Rc::new(std::cell::Cell::new(false));
+            let finished = done.clone();
+            mount.unmount_with_operation(
+                gio::MountUnmountFlags::NONE,
+                gio::MountOperation::NONE,
+                gio::Cancellable::NONE,
+                move |_| finished.set(true),
+            );
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !done.get() && std::time::Instant::now() < deadline {
+                context.iteration(false);
+                std::thread::yield_now();
+            }
+        });
+    }
+}
+
 /// Lists a location that has to be mounted first.
 ///
 /// Mount-on-demand is enabled by the presence of a mount-operation factory --
@@ -1416,6 +1446,7 @@ fn opening_an_archive_lists_its_contents_in_the_application() {
     };
     assert_eq!(inside.display_name(), "Holiday Photos.tar");
 
+    let _unmount = UnmountOnDrop(inside.clone());
     let outcome = directory_result_mounting(inside);
     let RequestOutcome::Succeeded(snapshot) = outcome else {
         panic!("listing an archive must succeed, got {outcome:?}");
