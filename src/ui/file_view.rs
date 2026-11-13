@@ -3944,6 +3944,9 @@ impl FileView {
             split.set_shrink_start_child(false);
             split.set_shrink_end_child(false);
             split.set_vexpand(true);
+            // The default handle is a one-pixel line that is hard to find.
+            split.set_wide_handle(true);
+            split.add_css_class("hybrid-split");
             split.set_position(self.hybrid_split.get().unwrap_or(260));
             let remembered = self.hybrid_split.clone();
             split.connect_position_notify(move |split| remembered.set(Some(split.position())));
