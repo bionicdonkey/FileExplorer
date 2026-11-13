@@ -744,6 +744,8 @@ pub struct FileView {
     model_row_index: Rc<RefCell<std::collections::HashMap<Location, u32>>>,
     folder_row_index: Rc<RefCell<std::collections::HashMap<Location, u32>>>,
     rendered_generation: Rc<std::cell::Cell<Option<u64>>>,
+    /// Where the user dragged the divider between hybrid view's folders and files, kept across re-renders.
+    hybrid_split: Rc<std::cell::Cell<Option<i32>>>,
     /// The list on screen is a plain store built in one go, not a paged
     /// stream: its rows take metadata, but the stream machinery must not
     /// treat it as a partially appended model.
@@ -887,6 +889,7 @@ impl FileView {
             folder_store,
             model_row_index,
             folder_row_index,
+            hybrid_split: Rc::new(std::cell::Cell::new(None)),
             rendered_generation: Default::default(),
             plain_list: Default::default(),
             rendered_count: Default::default(),
@@ -2778,7 +2781,12 @@ impl FileView {
                     }
                     (Some(Pane::List(pane)), false) => {
                         pane.recycled == recycled
-                            && self.diff_list(pane, &folder_items, options, true)
+                            && self.diff_list(
+                                pane,
+                                &folder_items,
+                                &folder_pane_options(options),
+                                true,
+                            )
                     }
                     _ => false,
                 };
@@ -3556,7 +3564,7 @@ impl FileView {
             self.folder_row_index.borrow_mut().extend(append_model_page(
                 &folders,
                 folders_to_add,
-                options.group_field,
+                GroupField::None,
                 options.show_hidden,
             ));
         }
@@ -3883,36 +3891,63 @@ impl FileView {
     }
 
     fn hybrid_view(&self, items: &[FileItem], options: &ViewOptions) -> (GtkBox, RenderedPanes) {
-        let root = GtkBox::new(Orientation::Vertical, 8);
+        let root = GtkBox::new(Orientation::Vertical, 6);
         root.set_margin_start(12);
+        root.set_margin_end(12);
         root.set_margin_top(12);
+        root.set_margin_bottom(12);
         let folders: Vec<_> = items.iter().filter(|item| item.is_dir()).cloned().collect();
         let files: Vec<_> = items
             .iter()
             .filter(|item| !item.is_dir())
             .cloned()
             .collect();
+        let heading = |text: &str| {
+            let label = Label::new(Some(text));
+            label.add_css_class("heading");
+            label.set_xalign(0.0);
+            label
+        };
         if self.use_recycled_model(items.len()) {
-            let folders_view = self.recycled_grid(&folders, options, false, false);
+            // Group rows are cells in a grid and would break its alignment; the
+            // folders are always shown ungrouped, and only the files are grouped.
+            let folders_view =
+                self.recycled_grid(&folders, &folder_pane_options(options), false, false);
             *self.folder_store.borrow_mut() = self.model_store.borrow_mut().take();
             *self.folder_row_index.borrow_mut() =
                 std::mem::take(&mut *self.model_row_index.borrow_mut());
             let folders_scroll = ScrolledWindow::builder()
-                .min_content_height(120)
-                .max_content_height(240)
-                .propagate_natural_height(true)
+                .vexpand(true)
+                .min_content_height(80)
                 .child(&folders_view)
                 .build();
-            root.append(&Label::new(Some("Folders")));
-            root.append(&folders_scroll);
+            let folders_box = GtkBox::new(Orientation::Vertical, 6);
+            folders_box.append(&heading("Folders"));
+            folders_box.append(&folders_scroll);
             let files_view = self.large_column_view(&files, options, true, true);
             let files_scroll = ScrolledWindow::builder()
                 .vexpand(true)
-                .min_content_height(200)
+                .min_content_height(120)
                 .child(&files_view)
                 .build();
-            root.append(&Label::new(Some("Files")));
-            root.append(&files_scroll);
+            let files_box = GtkBox::new(Orientation::Vertical, 6);
+            files_box.set_margin_top(6);
+            files_box.append(&heading("Files"));
+            files_box.append(&files_scroll);
+            // A divider the user can drag: the folder grid can be given more room
+            // or less, and the choice survives the view re-rendering.
+            let split = gtk::Paned::new(Orientation::Vertical);
+            split.set_start_child(Some(&folders_box));
+            split.set_end_child(Some(&files_box));
+            split.set_resize_start_child(true);
+            split.set_resize_end_child(true);
+            split.set_shrink_start_child(false);
+            split.set_shrink_end_child(false);
+            split.set_vexpand(true);
+            split.set_position(self.hybrid_split.get().unwrap_or(260));
+            let remembered = self.hybrid_split.clone();
+            split.connect_position_notify(move |split| remembered.set(Some(split.position())));
+            root.append(&split);
             self.link_hybrid_panes(
                 folders_view.upcast_ref::<gtk::Widget>(),
                 files_view.upcast_ref::<gtk::Widget>(),
@@ -3929,8 +3964,8 @@ impl FileView {
                     recycled: true,
                 })
             });
-            // The outer viewport must allocate these two bounded scrollers,
-            // rather than measuring an unbounded list's natural height.
+            // The outer viewport must allocate the divided panes, rather than
+            // measuring an unbounded list's natural height.
             root.set_vexpand(true);
             return (root, RenderedPanes::Hybrid(folders_pane, files_pane));
         }
@@ -3939,21 +3974,16 @@ impl FileView {
         let mut folder_widget = None;
         let mut file_widget = None;
         if !folders.is_empty() {
-            let heading = Label::new(Some("Folders"));
-            heading.add_css_class("heading");
-            heading.set_xalign(0.0);
-            root.append(&heading);
+            root.append(&heading("Folders"));
             let (grid, pane) = self.grid_view(&folders, options);
             folder_pane = Some(Pane::Flow(pane));
             folder_widget = Some(grid.clone().upcast::<gtk::Widget>());
             root.append(&grid);
         }
         if !files.is_empty() {
-            let heading = Label::new(Some("Files"));
-            heading.add_css_class("heading");
-            heading.set_xalign(0.0);
-            heading.set_margin_top(12);
-            root.append(&heading);
+            let files_heading = heading("Files");
+            files_heading.set_margin_top(6);
+            root.append(&files_heading);
             let file_options = ViewOptions {
                 view_mode: ViewMode::DetailedList,
                 folders_first: false,
@@ -3968,6 +3998,14 @@ impl FileView {
             self.link_hybrid_panes(&folders, &files);
         }
         (root, RenderedPanes::Hybrid(folder_pane, file_pane))
+    }
+}
+
+/// The folder grid in hybrid view is never grouped: group rows are grid cells.
+fn folder_pane_options(options: &ViewOptions) -> ViewOptions {
+    ViewOptions {
+        group_field: GroupField::None,
+        ..options.clone()
     }
 }
 
