@@ -24,11 +24,11 @@ sevenz-rust2 = { version = "0.24", default-features = false, features = ["compre
 tar = { version = "0.4", default-features = false }
 zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 # Keep the proc-macro dependency compatible with the Rust 1.75 toolchain.
-proc-macro-crate = "=3.1.0"
-indexmap = "=2.7.1"
+proc-macro-crate = "=3.4.0"
+indexmap = "=2.14.2"
 
 [dev-dependencies]
-tempfile = "=3.10.1"
+tempfile = "=3.27.0"
 
 [[bin]]
 name = "lorin-explorer"
