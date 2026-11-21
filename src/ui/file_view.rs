@@ -31,6 +31,35 @@ use crate::ui::context_menu::{
     ContextCommand, ContextTarget,
 };
 
+/// How long after the click that selected an item a second click on its name
+/// still means "rename" rather than an unrelated click.
+const INLINE_RENAME_WINDOW: std::time::Duration = std::time::Duration::from_millis(2000);
+
+/// Where the selection in a name being renamed ends: before the extension for
+/// a file, so typing replaces the name and keeps the extension, and at the end
+/// for a folder or a name with nothing to keep. Counted in characters.
+fn rename_selection_end(name: &str, is_dir: bool) -> i32 {
+    let end = match name.rfind('.') {
+        Some(dot) if dot > 0 && !is_dir => dot,
+        _ => name.len(),
+    };
+    name[..end].chars().count() as i32
+}
+
+/// Puts a cell's name back after an in-line rename field was left in it, as
+/// happens when the list recycles the cell or redraws under the field.
+fn discard_inline_rename_field(line: &GtkBox) {
+    let mut child = line.first_child();
+    while let Some(widget) = child {
+        child = widget.next_sibling();
+        if widget.has_css_class("inline-rename") {
+            line.remove(&widget);
+        } else if widget.downcast_ref::<Label>().is_some() {
+            widget.set_visible(true);
+        }
+    }
+}
+
 #[derive(Clone)]
 enum ListRow {
     Group(String),
@@ -779,6 +808,14 @@ pub struct FileView {
     /// the release can tell "clicked what was already selected" apart from
     /// "clicked something new".
     selection_click_keys: Rc<RefCell<Option<Vec<String>>>>,
+    /// Asked to rename `item` to the typed name; wired by the window.
+    on_inline_rename: Rc<RefCell<Option<Rc<dyn Fn(FileItem, String)>>>>,
+    /// The item whose name was last clicked, and when, so that a second,
+    /// slow click can start renaming it.
+    last_name_click: Rc<RefCell<Option<(String, std::time::Instant)>>>,
+    /// An in-line rename field is open; a click that opened it must not also
+    /// count as the click that deselects the item.
+    inline_rename_active: Rc<std::cell::Cell<bool>>,
     /// Set while a selection change is programmatic rather than a click, so the
     /// pane it came from does not write an emptied selection back.
     syncing_selection: Rc<std::cell::Cell<bool>>,
@@ -906,6 +943,9 @@ impl FileView {
             controllers: Default::default(),
             stream_selection: Default::default(),
             selection_click_keys: Default::default(),
+            on_inline_rename: Default::default(),
+            last_name_click: Default::default(),
+            inline_rename_active: Default::default(),
             syncing_selection: Default::default(),
             active_drag_source: Default::default(),
             on_status: Default::default(),
@@ -965,7 +1005,9 @@ impl FileView {
             // propagating, so the verdict waits for the main loop.
             glib::idle_add_local_once(move || {
                 let released = selection_keys_of(&view.selected_items());
-                if click_leaves_selection_unchanged(&pressed, &released) {
+                if click_leaves_selection_unchanged(&pressed, &released)
+                    && !view.inline_rename_active.get()
+                {
                     view.clear_selection();
                 }
             });
@@ -1266,6 +1308,7 @@ impl FileView {
         self.on_location_committed.borrow_mut().take();
         self.on_close.borrow_mut().take();
         self.on_context_command.borrow_mut().take();
+        self.on_inline_rename.borrow_mut().take();
         self.on_application_command.borrow_mut().take();
         self.on_options_changed.borrow_mut().take();
         self.on_command_availability_changed.borrow_mut().take();
@@ -1700,6 +1743,170 @@ impl FileView {
 
     pub fn set_context_handler<F: Fn(ContextTarget, ContextCommand) + 'static>(&self, callback: F) {
         *self.on_context_command.borrow_mut() = Some(Box::new(callback));
+    }
+
+    /// Called with an item and the name typed into its in-line rename field.
+    pub fn set_inline_rename_handler(&self, callback: impl Fn(FileItem, String) + 'static) {
+        *self.on_inline_rename.borrow_mut() = Some(Rc::new(callback));
+    }
+
+    /// Lets a click on an item's name start renaming it in place: pressing the
+    /// name of the only selected item, a little after the click that selected
+    /// it, as opposed to double-clicking it (which opens it).
+    fn attach_inline_rename(&self, label: &Label, item: impl Fn() -> Option<FileItem> + 'static) {
+        let item = Rc::new(item);
+        let was_only_selection = Rc::new(std::cell::Cell::new(false));
+        let gesture = GestureClick::new();
+        gesture.set_button(1);
+        let press_view = self.clone();
+        let press_item = item.clone();
+        let press_flag = was_only_selection.clone();
+        gesture.connect_pressed(move |_, _, _, _| {
+            // The row or tile applies its own selection later in this same
+            // event, so what is selected now is what the click found.
+            let only = press_item().is_some_and(|item| {
+                let selection = press_view.selected_items();
+                selection.len() == 1 && selection[0].identity_key() == item.identity_key()
+            });
+            press_flag.set(only);
+        });
+        let release_view = self.clone();
+        let release_label = label.downgrade();
+        gesture.connect_released(move |gesture, n_press, _, _| {
+            let Some(item) = item() else {
+                return;
+            };
+            let key = item.identity_key().to_owned();
+            let now = std::time::Instant::now();
+            let previous = release_view
+                .last_name_click
+                .borrow_mut()
+                .replace((key.clone(), now));
+            let modifiers = gesture.current_event_state();
+            if n_press != 1
+                || !was_only_selection.get()
+                || modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK)
+                || modifiers.contains(gtk::gdk::ModifierType::SHIFT_MASK)
+            {
+                return;
+            }
+            let double_click = std::time::Duration::from_millis(
+                gtk::Settings::default().map_or(400, |settings| {
+                    settings.gtk_double_click_time().max(0) as u64
+                }),
+            );
+            let slow = previous.is_some_and(|(previous_key, at)| {
+                let since = now.duration_since(at);
+                previous_key == key && since > double_click && since < INLINE_RENAME_WINDOW
+            });
+            if slow && !release_view.inline_rename_active.get() {
+                // The row takes keyboard focus as this same release finishes
+                // propagating, which would pull focus straight back out of a
+                // field opened now. So the field opens afterwards; until then
+                // the flag already stops the click from deselecting the item.
+                release_view.inline_rename_active.set(true);
+                let view = release_view.clone();
+                let label = release_label.clone();
+                glib::idle_add_local_once(move || match label.upgrade() {
+                    Some(label) => view.begin_inline_rename(&label, &item),
+                    None => view.inline_rename_active.set(false),
+                });
+            }
+        });
+        label.add_controller(gesture);
+    }
+
+    /// Swaps an item's name for a text field holding it. Enter or leaving the
+    /// field renames; Escape leaves the name alone. The caller has set
+    /// `inline_rename_active`; this clears it again if no field opens.
+    fn begin_inline_rename(&self, label: &Label, item: &FileItem) {
+        let handler = self.on_inline_rename.borrow().clone();
+        let line = label.parent().and_downcast::<GtkBox>();
+        let (Some(handler), Some(line), true) = (
+            handler,
+            line,
+            // The selection may have moved on in the meantime.
+            self.command_availability().can_rename
+                && self.selected_items().first().map(|i| i.identity_key())
+                    == Some(item.identity_key()),
+        ) else {
+            self.inline_rename_active.set(false);
+            return;
+        };
+        let grid_tile = line.has_css_class("icon-grid-tile");
+        let entry = gtk::Entry::new();
+        entry.add_css_class("inline-rename");
+        entry.set_text(item.name());
+        entry.update_property(&[gtk::accessible::Property::Label("New name")]);
+        if grid_tile {
+            gtk::prelude::EditableExt::set_alignment(&entry, 0.5);
+            entry.set_width_chars(label.max_width_chars().max(8));
+        } else {
+            entry.set_hexpand(true);
+        }
+        line.insert_child_after(&entry, Some(label));
+        label.set_visible(false);
+        // A tile's name tooltip would sit on top of the field.
+        let had_tooltip = line.has_tooltip();
+        line.set_has_tooltip(false);
+        self.inline_rename_active.set(true);
+
+        let finished = Rc::new(std::cell::Cell::new(false));
+        let finish = {
+            let view = self.clone();
+            let entry = entry.downgrade();
+            let label = label.downgrade();
+            let item = item.clone();
+            Rc::new(move |commit: bool| {
+                if finished.replace(true) {
+                    return;
+                }
+                let Some(entry) = entry.upgrade() else {
+                    return;
+                };
+                let name = entry.text().trim().to_owned();
+                if let Some(label) = label.upgrade() {
+                    label.set_visible(true);
+                }
+                if let Some(line) = entry.parent().and_downcast::<GtkBox>() {
+                    line.set_has_tooltip(had_tooltip);
+                    line.remove(&entry);
+                }
+                view.inline_rename_active.set(false);
+                view.widget.grab_focus();
+                if commit && !name.is_empty() && name != item.name() {
+                    handler(item.clone(), name);
+                }
+            })
+        };
+        let activate = finish.clone();
+        entry.connect_activate(move |_| activate(true));
+        let leave = finish.clone();
+        let focus = gtk::EventControllerFocus::new();
+        focus.connect_leave(move |_| leave(true));
+        entry.add_controller(focus);
+        let keys = gtk::EventControllerKey::new();
+        let cancel = finish;
+        keys.connect_key_pressed(move |_, key, _, _| match key {
+            gtk::gdk::Key::Escape => {
+                cancel(false);
+                glib::Propagation::Stop
+            }
+            // The field owns the keyboard: arrows would otherwise move the
+            // selection away, and F2 would open the rename dialog on top.
+            gtk::gdk::Key::Up | gtk::gdk::Key::Down | gtk::gdk::Key::F2 => glib::Propagation::Stop,
+            _ => glib::Propagation::Proceed,
+        });
+        entry.add_controller(keys);
+        let destroyed = Rc::downgrade(&self.inline_rename_active);
+        entry.connect_destroy(move |_| {
+            if let Some(active) = destroyed.upgrade() {
+                active.set(false);
+            }
+        });
+        entry.grab_focus();
+        // Select the name without its extension, so typing replaces just that.
+        entry.select_region(0, rename_selection_end(item.name(), item.is_dir()));
     }
 
     pub fn set_quick_access_predicate<F: Fn(&Location) -> bool + 'static>(&self, predicate: F) {
@@ -3754,7 +3961,10 @@ impl FileView {
         icon.set_pixel_size(options.grid_size.icon_size());
         self.request_flowbox_thumbnail_metadata(&icon, item, options.thumbnails);
         tile.append(&icon);
-        tile.append(&grid_tile_label(item.name(), layout.label_width_chars));
+        let name_label = grid_tile_label(item.name(), layout.label_width_chars);
+        tile.append(&name_label);
+        let renamed = item.clone();
+        self.attach_inline_rename(&name_label, move || Some(renamed.clone()));
         attach_drag_source(&tile, item.clone(), self.clone());
         let target = file_target(item);
         let view = self.clone();
@@ -4621,6 +4831,18 @@ fn column_factory_layout(
             label.set_xalign(0.0);
             line.append(&icon);
             line.append(&label);
+            let rename_item = list_item.downgrade();
+            view.attach_inline_rename(&label, move || {
+                let object = rename_item
+                    .upgrade()?
+                    .item()
+                    .and_downcast::<glib::BoxedAnyObject>()?;
+                let row = object.borrow::<ListRow>();
+                match &*row {
+                    ListRow::File(item) => Some(item.clone()),
+                    _ => None,
+                }
+            });
             let context_item = list_item.downgrade();
             let context_view = view.clone();
             let gesture = GestureClick::new();
@@ -4737,6 +4959,7 @@ fn column_factory_layout(
         match (&*row, column) {
             (ListRow::Group(group), ListColumn::Name) => {
                 let line = child.downcast::<GtkBox>().expect("name cells use a box");
+                discard_inline_rename_field(&line);
                 let icon = line
                     .first_child()
                     .and_downcast::<Image>()
@@ -4755,6 +4978,7 @@ fn column_factory_layout(
                 .set_label(""),
             (ListRow::File(item), ListColumn::Name) => {
                 let line = child.downcast::<GtkBox>().expect("name cells use a box");
+                discard_inline_rename_field(&line);
                 let icon = line
                     .first_child()
                     .and_downcast::<Image>()
@@ -6419,6 +6643,17 @@ mod tests {
         });
 
         assert_eq!(view.options().view_mode, ViewMode::IconGrid);
+    }
+
+    #[test]
+    fn renaming_selects_the_name_but_not_the_extension() {
+        use crate::ui::file_view::rename_selection_end;
+        assert_eq!(rename_selection_end("report.final.pdf", false), 12);
+        assert_eq!(rename_selection_end("notes.txt", false), 5);
+        assert_eq!(rename_selection_end("Makefile", false), 8);
+        assert_eq!(rename_selection_end(".bashrc", false), 7);
+        assert_eq!(rename_selection_end("photos.2024", true), 11);
+        assert_eq!(rename_selection_end("café.txt", false), 4);
     }
 
     #[test]

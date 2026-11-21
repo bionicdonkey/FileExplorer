@@ -208,6 +208,10 @@ button.sidebar-subsection-toggle:checked:hover {
 .cut-pending { border: 1px dashed @window_fg_color; }
 .cut-pending label { font-style: italic; }
 
+/* The in-line rename field takes the place of a name without making its row
+ * or tile taller. */
+entry.inline-rename { min-height: 0; padding: 1px 6px; margin: 0; }
+
 /* Preserve theme text contrast. Focus remains visible without relying on a
  * faint background tint or motion. Native GTK widgets
  * follow gtk-enable-animations; the location stack has no custom transitions. */
