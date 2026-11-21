@@ -6,10 +6,20 @@ private final class FileCollectionView: NSCollectionView {
     var menuProvider: ((IndexPath?) -> NSMenu?)?
     var onReturn: (() -> Void)?
     var onDoubleClick: ((IndexPath) -> Void)?
+    /// A plain click on a tile's name finished: the tile, and whether it was already the only selected one.
+    var onNameClick: ((IndexPath, Bool, NSEvent) -> Void)?
+    var nameRect: ((IndexPath) -> NSRect?)?
 
     override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        let path = indexPathForItem(at: point)
+        let wasOnly = path.map { selectionIndexPaths == [$0] } ?? false
+        let onName = path.flatMap { nameRect?($0) }?.contains(point) ?? false
         super.mouseDown(with: event)
-        if event.clickCount == 2, let path = indexPathForItem(at: convert(event.locationInWindow, from: nil)) { onDoubleClick?(path) }
+        if event.clickCount == 2, let path { onDoubleClick?(path) }
+        // A drag moves the pointer away from where the click began; that is not a click on the name.
+        guard onName, let path, NSEvent.pressedMouseButtons & 1 == 0, InlineRename.pointerStayed(since: event) else { return }
+        onNameClick?(path, wasOnly, event)
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {
@@ -135,6 +145,8 @@ final class FileGridView: NSObject, FileView, NSCollectionViewDataSource, NSColl
     private var sections: [(title: String?, items: [FileItem])] = []
     private var applying = false
     private let services: AppServices
+    private var renameTrigger = InlineRenameTrigger()
+    private var inlineRename: InlineRename?
 
     var view: NSView { scroll }
     var focusView: NSView { collection }
@@ -157,6 +169,8 @@ final class FileGridView: NSObject, FileView, NSCollectionViewDataSource, NSColl
         collection.menuProvider = { [weak self] path in self?.menu(for: path) }
         collection.onReturn = { [weak self] in self?.selectedItems.first.map { self?.host?.fileViewActivate($0) } }
         collection.onDoubleClick = { [weak self] path in self?.item(at: path).map { self?.host?.fileViewActivate($0) } }
+        collection.nameRect = { [weak self] path in self?.nameRect(at: path) }
+        collection.onNameClick = { [weak self] path, wasOnly, event in self?.nameClicked(at: path, wasOnly: wasOnly, event: event) }
         scroll.documentView = collection
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
@@ -170,6 +184,7 @@ final class FileGridView: NSObject, FileView, NSCollectionViewDataSource, NSColl
 
     func reload() {
         guard let tab = host?.tab else { return }
+        inlineRename?.cancel()
         applying = true
         defer { applying = false }
         sections = tab.groups
@@ -267,6 +282,31 @@ final class FileGridView: NSObject, FileView, NSCollectionViewDataSource, NSColl
 
     func beginRename(_ item: FileItem) {
         RenamePrompt.ask(for: item, in: collection.window) { [weak self] name in self?.host?.fileViewRename(item, to: name) }
+    }
+
+    private func nameField(at path: IndexPath) -> NSTextField? { (collection.item(at: path) as? FileTile)?.name }
+
+    private func nameRect(at path: IndexPath) -> NSRect? {
+        guard item(at: path) != nil, let field = nameField(at: path) else { return nil }
+        return InlineRename.nameRect(of: field, in: collection)
+    }
+
+    /// A slow second click on the name of the only selected tile turns the name into a text field.
+    private func nameClicked(at path: IndexPath, wasOnly: Bool, event: NSEvent) {
+        guard let item = item(at: path) else { return }
+        let plain = event.modifierFlags.intersection([.command, .shift, .control, .option]).isEmpty
+        let slow = renameTrigger.clicked(item.identityKey, onlySelection: wasOnly, clickCount: event.clickCount, at: event.timestamp,
+                                         doubleClickInterval: NSEvent.doubleClickInterval)
+        guard slow, plain, inlineRename == nil, CommandAvailability(selection: [item], destinationCapabilities: nil).canRename,
+              let field = nameField(at: path) else { return }
+        let rename = InlineRename(field: field, item: item, restoredName: host?.tab.displayName(for: item) ?? item.name,
+                                  commit: { [weak self] name in self?.host?.fileViewRename(item, to: name) },
+                                  finished: { [weak self] in
+                                      self?.inlineRename = nil
+                                      self.map { $0.collection.window?.makeFirstResponder($0.collection) }
+                                  })
+        inlineRename = rename
+        rename.begin()
     }
 
     // MARK: drag and drop

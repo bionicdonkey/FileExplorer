@@ -87,3 +87,98 @@ enum RenamePrompt {
         }
     }
 }
+
+/// Turns an item's name label into a text field in place. Return or clicking away renames;
+/// Escape leaves the name alone. The view that owns the label hears about the end through
+/// `finished`, so it can take the keyboard back.
+final class InlineRename: NSObject, NSTextFieldDelegate {
+    private let field: NSTextField
+    private let item: FileItem
+    private let restoredName: String
+    private let commit: (String) -> Void
+    private let finished: () -> Void
+    private var isFinished = false
+    private var cancelled = false
+    private let wasSelectable: Bool
+    private let wasBezeled: Bool
+    private let drewBackground: Bool
+
+    init(field: NSTextField, item: FileItem, restoredName: String, commit: @escaping (String) -> Void, finished: @escaping () -> Void) {
+        self.field = field
+        self.item = item
+        self.restoredName = restoredName
+        self.commit = commit
+        self.finished = finished
+        wasSelectable = field.isSelectable
+        wasBezeled = field.isBezeled
+        drewBackground = field.drawsBackground
+    }
+
+    /// The part of a name label that holds text, in `view`'s coordinates: the label can be much wider
+    /// than its text, and only a click on the text should rename.
+    static func nameRect(of field: NSTextField, in view: NSView) -> NSRect {
+        let size = field.cell?.cellSize(forBounds: field.bounds) ?? field.bounds.size
+        let width = min(field.bounds.width, size.width + 4)
+        let x: CGFloat
+        switch field.alignment {
+        case .center: x = (field.bounds.width - width) / 2
+        case .right: x = field.bounds.width - width
+        default: x = 0
+        }
+        return view.convert(NSRect(x: x, y: 0, width: width, height: field.bounds.height), from: field)
+    }
+
+    /// Whether the pointer is still where `event` pressed it, so a click is told apart from a drag.
+    /// Call it once the superclass has finished tracking the mouse.
+    static func pointerStayed(since event: NSEvent) -> Bool {
+        guard let window = event.window else { return false }
+        let start = window.convertPoint(toScreen: event.locationInWindow)
+        let now = NSEvent.mouseLocation
+        return hypot(now.x - start.x, now.y - start.y) < 4
+    }
+
+    func begin() {
+        guard let window = field.window else { return end(commit: false) }
+        field.isEditable = true
+        field.isSelectable = true
+        field.isBezeled = true
+        field.bezelStyle = .squareBezel
+        field.drawsBackground = true
+        field.backgroundColor = .textBackgroundColor
+        field.stringValue = item.name
+        field.delegate = self
+        window.makeFirstResponder(field)
+        field.currentEditor()?.selectedRange = NSRange(location: 0, length: renameSelectionLength(for: item.name, isDirectory: item.isDirectory))
+    }
+
+    /// Drops the edit without renaming, for when the list under the field is about to change.
+    func cancel() {
+        guard !isFinished else { return }
+        cancelled = true
+        _ = field.abortEditing()
+        end(commit: false)
+    }
+
+    func controlTextDidEndEditing(_ notification: Notification) { end(commit: !cancelled) }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        guard commandSelector == #selector(NSResponder.cancelOperation(_:)) else { return false }
+        cancelled = true
+        field.window?.makeFirstResponder(nil)
+        return true
+    }
+
+    private func end(commit shouldCommit: Bool) {
+        guard !isFinished else { return }
+        isFinished = true
+        let name = field.stringValue.trimmingCharacters(in: .whitespaces)
+        field.delegate = nil
+        field.isEditable = false
+        field.isSelectable = wasSelectable
+        field.isBezeled = wasBezeled
+        field.drawsBackground = drewBackground
+        field.stringValue = restoredName
+        finished()
+        if shouldCommit, !name.isEmpty, name != item.name { commit(name) }
+    }
+}

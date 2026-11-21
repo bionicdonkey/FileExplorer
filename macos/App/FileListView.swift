@@ -4,6 +4,20 @@ import ExplorerDomain
 private final class FileTableView: NSTableView {
     var menuProvider: ((Int) -> NSMenu?)?
     var onReturn: (() -> Void)?
+    /// A plain click on an item's name finished: the row, and whether it was already the only selected row.
+    var onNameClick: ((Int, Bool, NSEvent) -> Void)?
+    var nameRect: ((Int) -> NSRect?)?
+
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        let row = self.row(at: point)
+        let wasOnly = row >= 0 && selectedRowIndexes == IndexSet(integer: row)
+        let onName = row >= 0 && (nameRect?(row)?.contains(point) ?? false)
+        super.mouseDown(with: event)
+        // The superclass tracks the mouse until it is released; a drag moves it away from where it began.
+        guard onName, NSEvent.pressedMouseButtons & 1 == 0, InlineRename.pointerStayed(since: event) else { return }
+        onNameClick?(row, wasOnly, event)
+    }
 
     override func menu(for event: NSEvent) -> NSMenu? {
         let row = self.row(at: convert(event.locationInWindow, from: nil))
@@ -25,6 +39,8 @@ final class FileListView: NSObject, FileView, NSTableViewDataSource, NSTableView
     private var rows: [Row] = []
     private var applying = false
     private var layoutSaveWork: DispatchWorkItem?
+    private var renameTrigger = InlineRenameTrigger()
+    private var inlineRename: InlineRename?
 
     var view: NSView { scroll }
     var focusView: NSView { table }
@@ -52,6 +68,8 @@ final class FileListView: NSObject, FileView, NSTableViewDataSource, NSTableView
         table.setAccessibilityLabel("Files")
         table.menuProvider = { [weak self] row in self?.menu(forRow: row) }
         table.onReturn = { [weak self] in self?.activateSelection() }
+        table.nameRect = { [weak self] row in self?.nameRect(row: row) }
+        table.onNameClick = { [weak self] row, wasOnly, event in self?.nameClicked(row: row, wasOnly: wasOnly, event: event) }
         scroll.contentView.postsBoundsChangedNotifications = true
         NotificationCenter.default.addObserver(self, selector: #selector(boundsChanged), name: NSView.boundsDidChangeNotification, object: scroll.contentView)
         NotificationCenter.default.addObserver(self, selector: #selector(columnsChanged), name: NSTableView.columnDidResizeNotification, object: table)
@@ -66,6 +84,7 @@ final class FileListView: NSObject, FileView, NSTableViewDataSource, NSTableView
 
     func reload() {
         guard let tab else { return }
+        inlineRename?.cancel()
         applying = true
         defer { applying = false }
         rows = tab.groups.flatMap { group -> [Row] in
@@ -268,6 +287,36 @@ final class FileListView: NSObject, FileView, NSTableViewDataSource, NSTableView
 
     func beginRename(_ item: FileItem) {
         RenamePrompt.ask(for: item, in: table.window) { [weak self] name in self?.host?.fileViewRename(item, to: name) }
+    }
+
+    private var nameColumn: Int? { table.tableColumns.firstIndex { $0.identifier.rawValue == ListColumn.name.rawValue } }
+
+    private func nameField(row: Int) -> NSTextField? {
+        guard let column = nameColumn else { return nil }
+        return (table.view(atColumn: column, row: row, makeIfNecessary: false) as? NSTableCellView)?.textField
+    }
+
+    private func nameRect(row: Int) -> NSRect? {
+        guard item(at: row) != nil, let field = nameField(row: row) else { return nil }
+        return InlineRename.nameRect(of: field, in: table)
+    }
+
+    /// A slow second click on the name of the only selected row turns the name into a text field.
+    private func nameClicked(row: Int, wasOnly: Bool, event: NSEvent) {
+        guard let item = item(at: row) else { return }
+        let plain = event.modifierFlags.intersection([.command, .shift, .control, .option]).isEmpty
+        let slow = renameTrigger.clicked(item.identityKey, onlySelection: wasOnly, clickCount: event.clickCount, at: event.timestamp,
+                                         doubleClickInterval: NSEvent.doubleClickInterval)
+        guard slow, plain, inlineRename == nil, CommandAvailability(selection: [item], destinationCapabilities: nil).canRename,
+              let field = nameField(row: row) else { return }
+        let rename = InlineRename(field: field, item: item, restoredName: host?.tab.displayName(for: item) ?? item.name,
+                                  commit: { [weak self] name in self?.host?.fileViewRename(item, to: name) },
+                                  finished: { [weak self] in
+                                      self?.inlineRename = nil
+                                      self.map { $0.table.window?.makeFirstResponder($0.table) }
+                                  })
+        inlineRename = rename
+        rename.begin()
     }
 
     // MARK: drag and drop
