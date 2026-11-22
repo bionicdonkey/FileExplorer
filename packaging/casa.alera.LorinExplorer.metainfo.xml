@@ -11,6 +11,11 @@
   <!-- Keep in step with `version` in Cargo.toml: the About page reads the crate
        version, and the CI release job refuses a tag that disagrees with it. -->
   <releases>
+    <release version="0.8.2" date="2026-11-22">
+      <description>
+        <p>Rename a file or folder in place. Click the name of the selected item and wait a moment, and the name becomes a text field; Enter or clicking away renames, Escape cancels, and the extension is left out of the selection. This works in the list, the grids and the hybrid view. Double-clicking still opens the item.</p>
+      </description>
+    </release>
     <release version="0.8.1" date="2026-11-15">
       <description>
         <p>Hybrid view is tidier. Folders and files each scroll in their own pane, with a divider between them that you can drag to give the folder grid more or less room; the position is kept while the window is open. Date and size group headings no longer appear as stray tiles inside the folder grid, and the headings and margins are even on every side.</p>
