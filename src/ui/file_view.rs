@@ -1865,7 +1865,7 @@ impl FileView {
             let entry = entry.downgrade();
             let label = label.downgrade();
             let item = item.clone();
-            Rc::new(move |commit: bool| {
+            Rc::new(move |commit: bool, regain_focus: bool| {
                 if finished.replace(true) {
                     return;
                 }
@@ -1881,23 +1881,32 @@ impl FileView {
                     line.remove(&entry);
                 }
                 view.inline_rename_active.set(false);
-                view.widget.grab_focus();
+                if regain_focus {
+                    view.widget.grab_focus();
+                }
                 if commit && !name.is_empty() && name != item.name() {
                     handler(item.clone(), name);
                 }
             })
         };
         let activate = finish.clone();
-        entry.connect_activate(move |_| activate(true));
+        entry.connect_activate(move |_| activate(true, true));
         let leave = finish.clone();
         let focus = gtk::EventControllerFocus::new();
-        focus.connect_leave(move |_| leave(true));
+        focus.connect_leave(move |_| {
+            // Focus is mid-move, onto whatever was clicked. Taking the field
+            // out of the tree right now pulls the widget GTK is moving focus
+            // from, so wait until the move is done, and leave focus where it
+            // went.
+            let leave = leave.clone();
+            glib::idle_add_local_once(move || leave(true, false));
+        });
         entry.add_controller(focus);
         let keys = gtk::EventControllerKey::new();
         let cancel = finish;
         keys.connect_key_pressed(move |_, key, _, _| match key {
             gtk::gdk::Key::Escape => {
-                cancel(false);
+                cancel(false, true);
                 glib::Propagation::Stop
             }
             // The field owns the keyboard: arrows would otherwise move the
