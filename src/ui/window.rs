@@ -1309,6 +1309,34 @@ fn wire_tab(
         status_busy.set(status.loading);
         status_counts.set_text(&counts_text(&status));
     });
+    let rename_view = view.clone();
+    let rename_operations = command_operations.clone();
+    view.set_inline_rename_handler(move |item, name| {
+        let source = item.location().clone();
+        let submitted = source
+            .parent()
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "This location has no parent",
+                )
+            })
+            .and_then(|parent| {
+                let target = crate::application::commands::named_child(&parent, &name)?;
+                Ok(rename_operations.submit_locations(
+                    MutationKind::Rename,
+                    vec![source.clone()],
+                    Some(parent),
+                    Some(target),
+                    None,
+                    false,
+                ))
+            });
+        match submitted {
+            Ok(id) => schedule_refresh(rename_view.clone(), rename_operations.clone(), id),
+            Err(error) => show_operation_error(&rename_view, &error.to_string()),
+        }
+    });
     view.set_application_handler(move |intent| {
         let command = intent.kind;
         let target = command_view
