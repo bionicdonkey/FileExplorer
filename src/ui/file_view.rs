@@ -31,10 +31,6 @@ use crate::ui::context_menu::{
     ContextCommand, ContextTarget,
 };
 
-/// How long after the click that selected an item a second click on its name
-/// still means "rename" rather than an unrelated click.
-const INLINE_RENAME_WINDOW: std::time::Duration = std::time::Duration::from_millis(2000);
-
 /// Where the selection in a name being renamed ends: before the extension for
 /// a file, so typing replaces the name and keeps the extension, and at the end
 /// for a folder or a name with nothing to keep. Counted in characters.
@@ -810,9 +806,12 @@ pub struct FileView {
     selection_click_keys: Rc<RefCell<Option<Vec<String>>>>,
     /// Asked to rename `item` to the typed name; wired by the window.
     on_inline_rename: Rc<RefCell<Option<Rc<dyn Fn(FileItem, String)>>>>,
-    /// The item whose name was last clicked, and when, so that a second,
-    /// slow click can start renaming it.
-    last_name_click: Rc<RefCell<Option<(String, std::time::Instant)>>>,
+    /// Counts presses on item names, so that a rename waiting out the
+    /// double-click time can tell a later press has overtaken it.
+    name_press_generation: Rc<std::cell::Cell<u32>>,
+    /// A click on a name is waiting out the double-click time before it opens a
+    /// rename field.
+    inline_rename_pending: Rc<std::cell::Cell<bool>>,
     /// An in-line rename field is open; a click that opened it must not also
     /// count as the click that deselects the item.
     inline_rename_active: Rc<std::cell::Cell<bool>>,
@@ -944,7 +943,8 @@ impl FileView {
             stream_selection: Default::default(),
             selection_click_keys: Default::default(),
             on_inline_rename: Default::default(),
-            last_name_click: Default::default(),
+            name_press_generation: Default::default(),
+            inline_rename_pending: Default::default(),
             inline_rename_active: Default::default(),
             syncing_selection: Default::default(),
             active_drag_source: Default::default(),
@@ -1750,9 +1750,10 @@ impl FileView {
         *self.on_inline_rename.borrow_mut() = Some(Rc::new(callback));
     }
 
-    /// Lets a click on an item's name start renaming it in place: pressing the
-    /// name of the only selected item, a little after the click that selected
-    /// it, as opposed to double-clicking it (which opens it).
+    /// Lets a click on an item's name start renaming it in place: clicking the
+    /// name of the only selected item, then waiting out the double-click time
+    /// without a second click. A second click is a double click, which opens
+    /// the item instead.
     fn attach_inline_rename(&self, label: &Label, item: impl Fn() -> Option<FileItem> + 'static) {
         let item = Rc::new(item);
         let was_only_selection = Rc::new(std::cell::Cell::new(false));
@@ -1762,6 +1763,13 @@ impl FileView {
         let press_item = item.clone();
         let press_flag = was_only_selection.clone();
         gesture.connect_pressed(move |_, _, _, _| {
+            // Any new press overtakes a rename that is still waiting; if it
+            // was one, the item is no longer held back from being deselected.
+            let generation = press_view.name_press_generation.get().wrapping_add(1);
+            press_view.name_press_generation.set(generation);
+            if press_view.inline_rename_pending.replace(false) {
+                press_view.inline_rename_active.set(false);
+            }
             // The row or tile applies its own selection later in this same
             // event, so what is selected now is what the click found.
             let only = press_item().is_some_and(|item| {
@@ -1776,42 +1784,42 @@ impl FileView {
             let Some(item) = item() else {
                 return;
             };
-            let key = item.identity_key().to_owned();
-            let now = std::time::Instant::now();
-            let previous = release_view
-                .last_name_click
-                .borrow_mut()
-                .replace((key.clone(), now));
             let modifiers = gesture.current_event_state();
             if n_press != 1
                 || !was_only_selection.get()
+                || release_view.inline_rename_active.get()
                 || modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK)
                 || modifiers.contains(gtk::gdk::ModifierType::SHIFT_MASK)
             {
                 return;
             }
+            // Until the field opens (or a second click arrives) the flag stops
+            // this click from deselecting the item. The row also takes keyboard
+            // focus as this release finishes, which waiting for the double-click
+            // time keeps from pulling focus out of a field opened right away.
+            release_view.inline_rename_active.set(true);
+            release_view.inline_rename_pending.set(true);
+            let generation = release_view.name_press_generation.get();
             let double_click = std::time::Duration::from_millis(
                 gtk::Settings::default().map_or(400, |settings| {
                     settings.gtk_double_click_time().max(0) as u64
                 }),
-            );
-            let slow = previous.is_some_and(|(previous_key, at)| {
-                let since = now.duration_since(at);
-                previous_key == key && since > double_click && since < INLINE_RENAME_WINDOW
-            });
-            if slow && !release_view.inline_rename_active.get() {
-                // The row takes keyboard focus as this same release finishes
-                // propagating, which would pull focus straight back out of a
-                // field opened now. So the field opens afterwards; until then
-                // the flag already stops the click from deselecting the item.
-                release_view.inline_rename_active.set(true);
-                let view = release_view.clone();
-                let label = release_label.clone();
-                glib::idle_add_local_once(move || match label.upgrade() {
+            ) + std::time::Duration::from_millis(60);
+            let view = release_view.clone();
+            let label = release_label.clone();
+            glib::timeout_add_local_once(double_click, move || {
+                if view.name_press_generation.get() != generation
+                    || !view.inline_rename_pending.get()
+                {
+                    // Overtaken by a later press, which cleared the flags.
+                    return;
+                }
+                view.inline_rename_pending.set(false);
+                match label.upgrade() {
                     Some(label) => view.begin_inline_rename(&label, &item),
                     None => view.inline_rename_active.set(false),
-                });
-            }
+                }
+            });
         });
         label.add_controller(gesture);
     }
