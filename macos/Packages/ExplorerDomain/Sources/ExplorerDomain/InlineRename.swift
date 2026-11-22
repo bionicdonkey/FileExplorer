@@ -2,11 +2,9 @@ import Foundation
 
 /// Decides when a click on an item's name should start renaming it in place: the click that
 /// selects the item, then a second, slow one. Two quick clicks are a double click, which opens
-/// the item, so they never rename.
+/// the item, so they never rename. However long the pause, a click on the name of an item you just
+/// clicked is a rename.
 public struct InlineRenameTrigger {
-    /// How long after the first click a second one still counts as a rename rather than a stray click.
-    public static let window: TimeInterval = 2
-
     private var last: (key: String, time: TimeInterval)?
 
     public init() {}
@@ -19,8 +17,7 @@ public struct InlineRenameTrigger {
         let previous = last
         last = (key, time)
         guard clickCount == 1, onlySelection, let previous, previous.key == key else { return false }
-        let elapsed = time - previous.time
-        return elapsed > doubleClickInterval && elapsed < Self.window
+        return time - previous.time > doubleClickInterval
     }
 
     public mutating func reset() { last = nil }

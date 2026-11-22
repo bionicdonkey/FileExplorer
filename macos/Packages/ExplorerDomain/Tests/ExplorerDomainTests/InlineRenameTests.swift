@@ -26,10 +26,10 @@ final class InlineRenameTests: XCTestCase {
         XCTAssertFalse(click(&trigger, count: 1, at: 10.3))
     }
 
-    func testAClickLongAfterTheFirstIsNotARename() {
+    func testHoweverLongTheGapTheSecondClickRenames() {
         var trigger = InlineRenameTrigger()
         _ = click(&trigger, only: false, at: 10)
-        XCTAssertFalse(click(&trigger, at: 13))
+        XCTAssertTrue(click(&trigger, at: 40))
     }
 
     func testAClickOnAnotherItemOrAMultiSelectionDoesNotRename() {
