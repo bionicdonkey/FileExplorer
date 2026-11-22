@@ -10,16 +10,29 @@ private final class FileCollectionView: NSCollectionView {
     var onNameClick: ((IndexPath, Bool, NSEvent) -> Void)?
     var nameRect: ((IndexPath) -> NSRect?)?
 
+    /// The press on a tile's name that is waiting for its mouse-up to prove it was a click and not a drag.
+    private var pendingNameClick: (path: IndexPath, wasOnly: Bool, event: NSEvent)?
+
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
         let path = indexPathForItem(at: point)
         let wasOnly = path.map { selectionIndexPaths == [$0] } ?? false
         let onName = path.flatMap { nameRect?($0) }?.contains(point) ?? false
+        pendingNameClick = nil
         super.mouseDown(with: event)
         if event.clickCount == 2, let path { onDoubleClick?(path) }
+        // Unlike a table, a collection view does not wait inside `mouseDown` for the button to come up,
+        // so the click is finished in `mouseUp`.
+        if onName, let path { pendingNameClick = (path, wasOnly, event) }
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        super.mouseUp(with: event)
+        guard let pending = pendingNameClick else { return }
+        pendingNameClick = nil
         // A drag moves the pointer away from where the click began; that is not a click on the name.
-        guard onName, let path, NSEvent.pressedMouseButtons & 1 == 0, InlineRename.pointerStayed(since: event) else { return }
-        onNameClick?(path, wasOnly, event)
+        guard InlineRename.pointerStayed(since: pending.event) else { return }
+        onNameClick?(pending.path, pending.wasOnly, pending.event)
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {
