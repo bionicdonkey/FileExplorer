@@ -85,8 +85,70 @@ pub fn group_label(item: &FileItem, field: GroupField, now: SystemTime) -> Optio
     }
 }
 
+/// Position of a group heading among its siblings, lowest first when sorting
+/// ascending. Date groups run oldest to newest and size groups smallest to
+/// largest, so reversing them gives the descending order users expect.
+fn group_rank(label: &str, field: GroupField) -> usize {
+    let ranked: &[&str] = match field {
+        GroupField::DateModified => &[
+            "Older",
+            "Earlier this year",
+            "Earlier this month",
+            "Last week",
+            "This week",
+            "Yesterday",
+            "Today",
+        ],
+        GroupField::Size => &["Empty", "Small", "Medium", "Large", "Very large"],
+        GroupField::Type | GroupField::None => &[],
+    };
+    ranked.iter().position(|name| *name == label).unwrap_or(0)
+}
+
+/// Orders two group headings for the active grouping and sort direction.
+/// Folders stay ahead of every other type group.
+pub fn compare_groups(
+    left: &str,
+    right: &str,
+    field: GroupField,
+    direction: SortDirection,
+) -> Ordering {
+    let order = match field {
+        GroupField::None => Ordering::Equal,
+        GroupField::Type => {
+            let not_folders = |label: &str| label != "Folders";
+            return not_folders(left)
+                .cmp(&not_folders(right))
+                .then_with(|| {
+                    let order = left.to_lowercase().cmp(&right.to_lowercase());
+                    match direction {
+                        SortDirection::Ascending => order,
+                        SortDirection::Descending => order.reverse(),
+                    }
+                });
+        }
+        _ => group_rank(left, field).cmp(&group_rank(right, field)),
+    };
+    match direction {
+        SortDirection::Ascending => order,
+        SortDirection::Descending => order.reverse(),
+    }
+}
+
 pub fn sort_items(items: &mut [FileItem], options: &ViewOptions) {
+    let now = SystemTime::now();
     items.sort_by(|left, right| {
+        if options.group_field != GroupField::None {
+            let group = compare_groups(
+                &group_label(left, options.group_field, now).unwrap_or_default(),
+                &group_label(right, options.group_field, now).unwrap_or_default(),
+                options.group_field,
+                options.sort_direction,
+            );
+            if group != Ordering::Equal {
+                return group;
+            }
+        }
         let folders = if options.folders_first {
             right.is_dir().cmp(&left.is_dir())
         } else {
@@ -139,6 +201,7 @@ fn date_group(modified: SystemTime, now: SystemTime) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::cmp::Ordering;
     use std::fs;
     use std::time::SystemTime;
 
@@ -177,6 +240,31 @@ mod tests {
             group_label(&item, GroupField::DateModified, SystemTime::now()),
             Some("Today".into())
         );
+    }
+
+    #[test]
+    fn date_groups_follow_the_sort_direction() {
+        use super::compare_groups;
+        use crate::core::SortDirection::{Ascending, Descending};
+        let field = GroupField::DateModified;
+
+        assert_eq!(compare_groups("Older", "Today", field, Ascending), Ordering::Less);
+        assert_eq!(compare_groups("Older", "Today", field, Descending), Ordering::Greater);
+        assert_eq!(
+            compare_groups("Yesterday", "This week", field, Descending),
+            Ordering::Less
+        );
+    }
+
+    #[test]
+    fn type_groups_keep_folders_first_in_either_direction() {
+        use super::compare_groups;
+        use crate::core::SortDirection::{Ascending, Descending};
+        let field = GroupField::Type;
+
+        assert_eq!(compare_groups("Folders", "Archive", field, Ascending), Ordering::Less);
+        assert_eq!(compare_groups("Folders", "Archive", field, Descending), Ordering::Less);
+        assert_eq!(compare_groups("Archive", "Text", field, Descending), Ordering::Greater);
     }
 
     #[test]

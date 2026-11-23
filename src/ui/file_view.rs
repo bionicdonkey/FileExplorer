@@ -16,7 +16,7 @@ use crate::application::commands::{
 };
 use crate::application::navigation::NavigationCoordinator;
 use crate::core::contracts::EntryKind;
-use crate::core::directory_model::sort_items;
+use crate::core::directory_model::{compare_groups, sort_items};
 use crate::core::file_item::FileItem;
 use crate::core::navigation::{NavigationStatus, TabContent, TabState};
 use crate::core::sidebar_model::SidebarSection;
@@ -3478,7 +3478,12 @@ impl FileView {
                         crate::core::directory_model::group_label(item, options.group_field, now)
                     }
                 };
-                label(&a).cmp(&label(&b))
+                compare_groups(
+                    &label(&a).unwrap_or_default(),
+                    &label(&b).unwrap_or_default(),
+                    options.group_field,
+                    options.sort_direction,
+                )
             };
             if group != std::cmp::Ordering::Equal {
                 return group.into();
