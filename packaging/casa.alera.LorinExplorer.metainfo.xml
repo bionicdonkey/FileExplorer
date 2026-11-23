@@ -11,6 +11,11 @@
   <!-- Keep in step with `version` in Cargo.toml: the About page reads the crate
        version, and the CI release job refuses a tag that disagrees with it. -->
   <releases>
+    <release version="0.8.3" date="2026-11-23">
+      <description>
+        <p>Group headings now follow the sort direction. In grouped views, such as Date modified in the hybrid view, reversing the sort also reverses the headings, so the newest group can sit at the top. Headings no longer appear out of order in large folders or repeat when the group and sort fields differ.</p>
+      </description>
+    </release>
     <release version="0.8.2" date="2026-11-22">
       <description>
         <p>Rename a file or folder in place. Click the name of the selected item and wait a moment, and the name becomes a text field; Enter or clicking away renames, Escape cancels, and the extension is left out of the selection. This works in the list, the grids and the hybrid view. Double-clicking still opens the item.</p>
