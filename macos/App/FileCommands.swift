@@ -55,8 +55,35 @@ final class FileCommands {
         let target = destination ?? tab.location
         let sources = transferSources(locations, destination: target, action: action)
         guard !sources.isEmpty else { return NSSound.beep() }
-        let id = operations.submit(action == .cut ? MutationKind.move : MutationKind.copy, sources: sources, destination: target)
-        if action == .cut { services.clipboard.beginPaste(id) }
+        if action == .cut {
+            let id = operations.submit(MutationKind.move, sources: sources, destination: target)
+            services.clipboard.beginPaste(id)
+        } else {
+            submitCopies(sources, to: target)
+        }
+    }
+
+    /// Copies `sources` into `destination`. An item copied into the folder it came from becomes a
+    /// duplicate beside the original (`report (copy).txt`) instead of colliding with itself; the
+    /// rest go in one operation.
+    private func submitCopies(_ sources: [Location], to destination: Location) {
+        var others: [Location] = []
+        for source in sources {
+            guard source.parent == destination, source.localPath != nil else { others.append(source); continue }
+            var isDirectory: ObjCBool = false
+            let path = source.localPath ?? ""
+            _ = FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory)
+            let exists: (Location) -> Bool = { location in
+                // `attributesOfItem` also sees a dangling symlink, which `fileExists` does not.
+                location.localPath.map { (try? FileManager.default.attributesOfItem(atPath: $0)) != nil } ?? false
+            }
+            if let duplicate = try? copySibling(of: source, isDirectory: isDirectory.boolValue, exists: exists) {
+                operations.submit(MutationKind.copy, sources: [source], destination: destination, explicitTarget: duplicate)
+            } else {
+                others.append(source)
+            }
+        }
+        if !others.isEmpty { operations.submit(MutationKind.copy, sources: others, destination: destination) }
     }
 
     // MARK: transfer (drag and drop, copy to / move to)
@@ -64,7 +91,7 @@ final class FileCommands {
     func transfer(_ sources: [Location], to destination: Location, copy: Bool) -> Bool {
         let accepted = transferSources(sources, destination: destination, action: copy ? ClipboardAction.copy : ClipboardAction.cut)
         guard !accepted.isEmpty else { return false }
-        operations.submit(copy ? MutationKind.copy : MutationKind.move, sources: accepted, destination: destination)
+        if copy { submitCopies(accepted, to: destination) } else { operations.submit(MutationKind.move, sources: accepted, destination: destination) }
         return true
     }
 

@@ -385,6 +385,10 @@ final class ExplorerWindowController: NSWindowController, NSWindowDelegate, NSTo
     @objc func renameItem(_ sender: Any?) { commands.perform(.rename, items: selection) }
     @objc func moveToTrash(_ sender: Any?) { commands.perform(.moveToTrash, items: selection) }
     @objc override func deleteBackward(_ sender: Any?) { moveToTrash(sender) }
+    /// The Delete key on a PC keyboard sends forward delete: it trashes, and with Shift deletes for good.
+    @objc override func deleteForward(_ sender: Any?) {
+        if NSApp.currentEvent?.modifierFlags.contains(.shift) == true { deletePermanently(sender) } else { moveToTrash(sender) }
+    }
     @objc func deletePermanently(_ sender: Any?) { commands.perform(.deletePermanently, items: selection) }
     @objc func getInfo(_ sender: Any?) { commands.perform(.properties, items: selection.isEmpty ? [] : selection) }
     @objc func extractHere(_ sender: Any?) { commands.perform(.extract, items: selection) }
