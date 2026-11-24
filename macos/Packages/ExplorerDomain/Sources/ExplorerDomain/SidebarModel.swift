@@ -264,6 +264,8 @@ public final class SidebarModel {
             let path = home + "/" + name
             if exists(path) { nodes.append(SidebarNode(path: path, label: name, icon: SidebarModel.standardFolderIcon(path))) }
         }
+        // The Trash is always listed; its folder only appears once something has been trashed.
+        nodes.append(SidebarNode(path: home + "/.Trash", label: "Trash", icon: "trash", expandable: false))
         return SidebarSection(title: userSectionTitle(), nodes: nodes)
     }
 
