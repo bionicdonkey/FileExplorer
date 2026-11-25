@@ -137,21 +137,29 @@ final class FileCommands {
         operations.submit(.trash, sources: items.map(\.location))
     }
 
-    /// Asks Finder to put trashed items back where they came from; only Finder knows where that is.
+    /// Moves trashed items back to where Finder recorded they were deleted from.
     func putBack(_ items: [FileItem]) {
-        let paths = items.compactMap(\.location.localPath)
-        guard !paths.isEmpty else { return NSSound.beep() }
-        let list = paths.map { "POSIX file \"" + $0.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\"" }.joined(separator: ", ")
-        let source = "tell application \"Finder\" to put away {" + list + "}"
-        DispatchQueue.global().async { [weak self] in
-            var error: NSDictionary?
-            NSAppleScript(source: source)?.executeAndReturnError(&error)
-            DispatchQueue.main.async {
-                if let error {
-                    self?.showAlert("Can’t put back", (error[NSAppleScript.errorMessage] as? String) ?? "Finder couldn’t put the items back. Morin Explorer may need permission to control Finder in System Settings → Privacy & Security → Automation.")
-                }
-                self?.currentTab()?.refresh()
+        var failures: [String] = []
+        var origins: [String: [String: String]] = [:]
+        for item in items {
+            guard let path = item.location.localPath else { failures.append(item.name); continue }
+            let folder = (path as NSString).deletingLastPathComponent
+            if origins[folder] == nil {
+                let data = FileManager.default.contents(atPath: folder + "/.DS_Store") ?? Data()
+                // Paths are recorded relative to the volume: "/" for the home Trash, the mount point for another volume's.
+                let root = folder.range(of: "/.Trashes").map { String(folder[..<$0.lowerBound]) } ?? ""
+                origins[folder] = TrashOrigins.originalPaths(inDSStore: data, volumeRoot: root.isEmpty ? "/" : root)
             }
+            guard let original = origins[folder]?[(path as NSString).lastPathComponent] else { failures.append(item.name); continue }
+            let parent = (original as NSString).deletingLastPathComponent
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: parent, isDirectory: &isDirectory), isDirectory.boolValue else { failures.append(item.name); continue }
+            operations.submit(.move, sources: [item.location], destination: Location(localPath: parent), explicitTarget: Location(localPath: original))
+        }
+        if !failures.isEmpty {
+            showAlert("Can’t put back", failures.count == 1
+                ? "“\(failures[0])” has no recorded original location, or that folder no longer exists."
+                : "\(failures.count) items have no recorded original location, or their folders no longer exist.")
         }
     }
 
