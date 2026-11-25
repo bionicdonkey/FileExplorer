@@ -11,6 +11,11 @@
   <!-- Keep in step with `version` in Cargo.toml: the About page reads the crate
        version, and the CI release job refuses a tag that disagrees with it. -->
   <releases>
+    <release version="0.8.4" date="2026-11-25">
+      <description>
+        <p>Trash is in the sidebar. Open it to browse what you have deleted; right-click an item to Restore it or Delete it permanently, and right-click empty space or the sidebar entry to Empty Trash. The Delete key deletes for good inside the Trash. Folder names in large folders are now centred under their icons in the grid and hybrid views.</p>
+      </description>
+    </release>
     <release version="0.8.3" date="2026-11-23">
       <description>
         <p>Group headings now follow the sort direction. In grouped views, such as Date modified in the hybrid view, reversing the sort also reverses the headings, so the newest group can sit at the top. Headings no longer appear out of order in large folders or repeat when the group and sort fields differ.</p>
