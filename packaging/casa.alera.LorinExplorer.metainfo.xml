@@ -11,6 +11,11 @@
   <!-- Keep in step with `version` in Cargo.toml: the About page reads the crate
        version, and the CI release job refuses a tag that disagrees with it. -->
   <releases>
+    <release version="0.8.5" date="2026-11-25">
+      <description>
+        <p>Pasting a folder over a folder of the same name and choosing Replace now merges into it instead of failing with a conflict error. Files that clash are overwritten and the rest are kept; the same applies to cut and paste.</p>
+      </description>
+    </release>
     <release version="0.8.4" date="2026-11-25">
       <description>
         <p>Trash is in the sidebar. Open it to browse what you have deleted; right-click an item to Restore it or Delete it permanently, and right-click empty space or the sidebar entry to Empty Trash. The Delete key deletes for good inside the Trash. Folder names in large folders are now centred under their icons in the grid and hybrid views.</p>

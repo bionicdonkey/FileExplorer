@@ -188,6 +188,18 @@ public enum FileExecutor {
 
     /// Renames atomically where possible; across volumes it copies, then deletes the source.
     private static func move(_ source: String, _ target: String, replace: Bool, cancel: CancellationToken, progress: (UInt64) -> Void) throws {
+        if replace, PathInfo.at(source) == .directory, PathInfo.at(target) == .directory {
+            // A folder cannot be renamed over a folder: merge into it, then remove the source.
+            var changed = false
+            try copyTree(source, target, cancel, replace: true, changed: &changed, progress: progress)
+            var deleted = false
+            try deleteTree(source, cancel, changed: &deleted)
+            return
+        }
+        if replace, PathInfo.exists(target), (PathInfo.at(source) == .directory) != (PathInfo.at(target) == .directory) {
+            var removed = false
+            try deleteTree(target, cancel, changed: &removed)
+        }
         let result = replace ? rename(source, target) : renamex_np(source, target, UInt32(RENAME_EXCL))
         if result == 0 { return }
         let code = errno
@@ -231,8 +243,13 @@ public enum FileExecutor {
 
     static func copyTree(_ source: String, _ target: String, _ cancel: CancellationToken, replace: Bool, changed: inout Bool, progress: (UInt64) -> Void) throws {
         if cancel.isCancelled { throw OperationCancelled() }
+        let existing = replace ? PathInfo.at(target) : .missing
         if PathInfo.at(source) == .directory {
-            if mkdir(target, 0o777) != 0 { throw POSIXFailure() }
+            // Replacing a folder merges into it; a file in its way is removed first.
+            if existing != .directory {
+                if existing != .missing { var removed = false; try deleteTree(target, cancel, changed: &removed) }
+                if mkdir(target, 0o777) != 0 { throw POSIXFailure() }
+            }
             changed = true
             for name in try FileManager.default.contentsOfDirectory(atPath: source) {
                 try copyTree((source as NSString).appendingPathComponent(name), (target as NSString).appendingPathComponent(name), cancel,
@@ -242,6 +259,7 @@ public enum FileExecutor {
             _ = copyfile(source, target, nil, copyfile_flags_t(COPYFILE_METADATA | COPYFILE_NOFOLLOW))
             return
         }
+        if existing == .directory { var removed = false; try deleteTree(target, cancel, changed: &removed) }
         changed = true
         try copyFile(source, target, cancel, replace: replace, progress: progress)
     }
