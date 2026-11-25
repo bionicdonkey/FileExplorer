@@ -4,8 +4,14 @@ public enum ContextCommand: Equatable, CaseIterable {
     case open, openWith, extract, compressZip, compress7z, compressTarGz
     case openInNewTab, openInNewWindow, openInTerminal, newFolder
     case cut, copy, copyFilename, copyFullPath, copyTo, moveTo, paste
-    case rename, moveToTrash, deletePermanently, properties, refresh
+    case rename, moveToTrash, deletePermanently, restore, emptyTrash, properties, refresh
     case closeTab, closeOtherTabs, duplicateTab, toggleQuickAccess
+}
+
+/// Whether a location is the Trash or something inside it: the home Trash or a volume's `.Trashes`.
+public func isTrashLocation(_ location: Location) -> Bool {
+    guard let path = location.localPath else { return false }
+    return path.hasSuffix("/.Trash") || path.contains("/.Trash/") || path.contains("/.Trashes/")
 }
 
 /// Keyboard intent that routes to the same command as the menu and toolbar.
@@ -43,6 +49,7 @@ public struct CommandAvailability: Equatable {
     public var canOpenTerminal = false
     public var canTrash = false
     public var canDelete = false
+    public var canRestore = false
     public var canExtract = false
     public var canCompress = false
     public var disabledReason: String?
@@ -64,6 +71,7 @@ public struct CommandAvailability: Equatable {
         canOpenTerminal = canUseLocalAdapter && selection[0].isDirectory && canOpen
         canTrash = supportsAll(.trash)
         canDelete = supportsAll(.delete)
+        canRestore = !selection.isEmpty && selection.allSatisfy { isTrashLocation($0.location) }
         canExtract = !selection.isEmpty && selection.allSatisfy(isExtractable)
         canCompress = !selection.isEmpty && selection.allSatisfy { $0.location.localPath != nil }
         if !canTrash && !selection.isEmpty { disabledReason = "This location does not support Trash" }
@@ -95,6 +103,8 @@ public struct CommandAvailability: Equatable {
         case .rename: return canRename
         case .moveToTrash: return canTrash
         case .deletePermanently: return canDelete
+        case .restore: return canRestore
+        case .emptyTrash: return true
         case .refresh, .closeTab, .closeOtherTabs, .duplicateTab, .toggleQuickAccess: return true
         }
     }
@@ -116,6 +126,17 @@ public struct CommandAvailability: Equatable {
 
     /// The commands a context menu for `target` offers, in order.
     public static func itemCommands(for target: ContextTarget) -> [ContextCommand] {
+        switch target {
+        // Inside the Trash an item can only be put back or deleted for good.
+        case .file(let item), .folder(let item):
+            if isTrashLocation(item.location) { return [.restore, .deletePermanently, .properties] }
+            return nonTrashCommands(for: target)
+        case .background(let location) where isTrashLocation(location): return [.emptyTrash, .refresh]
+        default: return nonTrashCommands(for: target)
+        }
+    }
+
+    private static func nonTrashCommands(for target: ContextTarget) -> [ContextCommand] {
         switch target {
         case .file(let item):
             var commands: [ContextCommand] = [.open, .openWith]

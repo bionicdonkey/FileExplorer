@@ -29,6 +29,8 @@ enum CommandTitles {
         case .rename: return "Rename…"
         case .moveToTrash: return "Move to Trash"
         case .deletePermanently: return "Delete Immediately…"
+        case .restore: return "Put Back"
+        case .emptyTrash: return "Empty Trash…"
         case .properties: return "Get Info"
         case .refresh: return "Refresh"
         case .closeTab: return "Close Tab"
@@ -49,7 +51,9 @@ enum CommandMenuBuilder {
         let background = items.isEmpty
         if background {
             availability = CommandAvailability(selection: [], destinationCapabilities: tab.isSearching ? nil : tab.capabilities)
-            list = [.newFolder, .paste, .refresh, .openInTerminal, .toggleQuickAccess]
+            list = isTrashLocation(tab.location)
+                ? CommandAvailability.itemCommands(for: .background(tab.location))
+                : [.newFolder, .paste, .refresh, .openInTerminal, .toggleQuickAccess]
         } else {
             availability = CommandAvailability(selection: items, destinationCapabilities: nil)
             let first = items[0]
@@ -60,7 +64,7 @@ enum CommandMenuBuilder {
         let groups: [[ContextCommand]] = [[.open, .openWith, .openInNewTab, .openInNewWindow, .openInTerminal, .extract],
                                           [.compressZip, .compress7z, .compressTarGz],
                                           [.cut, .copy, .paste, .copyFilename, .copyFullPath, .copyTo, .moveTo],
-                                          [.newFolder, .rename, .moveToTrash, .deletePermanently],
+                                          [.newFolder, .rename, .moveToTrash, .restore, .deletePermanently, .emptyTrash],
                                           [.properties, .refresh, .toggleQuickAccess]]
         func group(of command: ContextCommand) -> Int { groups.firstIndex { $0.contains(command) } ?? 99 }
         let ordered = list.sorted { (group(of: $0), groups[safe: group(of: $0)]?.firstIndex(of: $0) ?? 0) < (group(of: $1), groups[safe: group(of: $1)]?.firstIndex(of: $1) ?? 0) }

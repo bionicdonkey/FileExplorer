@@ -111,6 +111,7 @@ final class ExplorerWindowController: NSWindowController, NSWindowDelegate, NSTo
         sidebar.onNavigate = { [weak self] location in self?.tab.navigate(to: location) }
         sidebar.onOpenNewTab = { [weak self] location in self.map { $0.manager.open(location, asTabIn: $0.window) } }
         sidebar.onOpenNewWindow = { [weak self] location in self?.manager.open(location) }
+        sidebar.onEmptyTrash = { [weak self] in self?.commands.emptyTrash() }
         sidebar.onDrop = { [weak self] sources, destination, copy in self?.commands.transfer(sources, to: destination, copy: copy) ?? false }
         split = NSSplitViewController()
         let sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebar)

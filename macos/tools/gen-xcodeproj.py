@@ -77,6 +77,8 @@ SPEC = {
                 "INFOPLIST_KEY_LSMinimumSystemVersion": "14.0",
                 "INFOPLIST_KEY_LSApplicationCategoryType": "public.app-category.utilities",
                 "INFOPLIST_KEY_NSHumanReadableCopyright": "GPL-3.0-or-later",
+                "INFOPLIST_KEY_NSAppleEventsUsageDescription": "Morin Explorer asks Finder to put items back from the Trash.",
+                "CODE_SIGN_ENTITLEMENTS": "App/MorinExplorer.entitlements",
                 "ENABLE_APP_SANDBOX": "NO",
             },
         },

@@ -131,8 +131,50 @@ final class FileCommands {
     }
 
     func trash(_ items: [FileItem]) {
+        // Nothing can be moved to the Trash from inside it, so the Delete key deletes immediately.
+        if !items.isEmpty, items.allSatisfy({ isTrashLocation($0.location) }) { return deletePermanently(items) }
         guard CommandAvailability(selection: items, destinationCapabilities: nil).canTrash else { return NSSound.beep() }
         operations.submit(.trash, sources: items.map(\.location))
+    }
+
+    /// Asks Finder to put trashed items back where they came from; only Finder knows where that is.
+    func putBack(_ items: [FileItem]) {
+        let paths = items.compactMap(\.location.localPath)
+        guard !paths.isEmpty else { return NSSound.beep() }
+        let list = paths.map { "POSIX file \"" + $0.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\"" }.joined(separator: ", ")
+        let source = "tell application \"Finder\" to put away {" + list + "}"
+        DispatchQueue.global().async { [weak self] in
+            var error: NSDictionary?
+            NSAppleScript(source: source)?.executeAndReturnError(&error)
+            DispatchQueue.main.async {
+                if let error {
+                    self?.showAlert("Can’t put back", (error[NSAppleScript.errorMessage] as? String) ?? "Finder couldn’t put the items back. Morin Explorer may need permission to control Finder in System Settings → Privacy & Security → Automation.")
+                }
+                self?.currentTab()?.refresh()
+            }
+        }
+    }
+
+    /// Asks, then permanently deletes everything in the home Trash.
+    func emptyTrash() {
+        let trash = NSHomeDirectory() + "/.Trash"
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: trash)) ?? []
+        let alert = NSAlert()
+        if names.isEmpty {
+            alert.messageText = "The Trash is empty"
+            alert.addButton(withTitle: "OK")
+        } else {
+            alert.alertStyle = .critical
+            alert.messageText = "Empty the Trash?"
+            alert.informativeText = "\(names.count) item\(names.count == 1 ? "" : "s") will be permanently deleted. This can’t be undone."
+            alert.addButton(withTitle: "Empty Trash")
+            alert.addButton(withTitle: "Cancel")
+        }
+        let run: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            guard response == .alertFirstButtonReturn, !names.isEmpty else { return }
+            self?.operations.submit(.delete, sources: names.map { Location(localPath: trash + "/" + $0) }, confirmedDelete: true)
+        }
+        if let window = window() { alert.beginSheetModal(for: window, completionHandler: run) } else { run(alert.runModal()) }
     }
 
     func deletePermanently(_ items: [FileItem]) {
@@ -230,6 +272,8 @@ final class FileCommands {
         case .rename: if let target { tab.onRenameRequested?(target) }
         case .moveToTrash: trash(items)
         case .deletePermanently: deletePermanently(items)
+        case .restore: putBack(items)
+        case .emptyTrash: emptyTrash()
         case .properties: items.forEach(showProperties)
         case .refresh: tab.refresh()
         case .toggleQuickAccess:
