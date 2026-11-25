@@ -1190,6 +1190,46 @@ fn explicit_replace_and_keep_both_are_applied_by_the_adapter() {
 }
 
 #[test]
+fn replacing_a_folder_merges_into_it_for_copy_and_move() {
+    use lorin_explorer::core::contracts::ConflictDecision;
+    for kind in [MutationKind::Copy, MutationKind::Move] {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("a/folder");
+        let target = directory.path().join("b/folder");
+        std::fs::create_dir_all(source.join("sub")).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(source.join("sub/new.txt"), "new").unwrap();
+        std::fs::write(source.join("same.txt"), "new").unwrap();
+        std::fs::write(target.join("same.txt"), "old").unwrap();
+        std::fs::write(target.join("keep.txt"), "keep").unwrap();
+        let request = OperationRequest {
+            id: OperationId(1),
+            kind,
+            sources: vec![Location::from_local_path(&source)],
+            destination: None,
+            explicit_target: Some(Location::from_local_path(&target)),
+            capability_version: 1,
+            cancellable: gio::Cancellable::new(),
+        };
+        let mut events = Vec::new();
+        lorin_explorer::infrastructure::gio_operations::execute_with_decision(
+            request,
+            ConflictDecision::Replace,
+            &mut |e| events.push(e),
+        );
+        assert!(
+            matches!(events.last(), Some(OperationEvent::Succeeded { .. })),
+            "{kind:?}: {:?}",
+            events.last()
+        );
+        assert_eq!(std::fs::read_to_string(target.join("same.txt")).unwrap(), "new");
+        assert_eq!(std::fs::read_to_string(target.join("keep.txt")).unwrap(), "keep");
+        assert_eq!(std::fs::read_to_string(target.join("sub/new.txt")).unwrap(), "new");
+        assert_eq!(source.exists(), kind == MutationKind::Copy);
+    }
+}
+
+#[test]
 fn capability_inspection_reports_missing_parent_instead_of_claiming_support() {
     let dir = tempfile::tempdir().unwrap();
     let context = glib::MainContext::new();

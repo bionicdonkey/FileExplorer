@@ -1196,8 +1196,19 @@ fn perform_with_flags(
                 gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS,
                 Some(cancel),
             )?;
+            let target = target.ok_or_else(invalid)?;
+            if replace
+                && source.query_file_type(gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS, Some(cancel))
+                    == gio::FileType::Directory
+                && target.query_file_type(gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS, Some(cancel))
+                    == gio::FileType::Directory
+            {
+                // GIO will not move a folder over a folder: merge, then remove.
+                copy_tree(source, target, cancel, flags, changed, &mut |_| {})?;
+                return delete_tree(source, cancel, changed);
+            }
             *changed = true;
-            source.move_(target.ok_or_else(invalid)?, flags, Some(cancel), None)
+            source.move_(target, flags, Some(cancel), None)
         }
         MutationKind::Create => {
             let result = source.make_directory(Some(cancel));
@@ -1231,8 +1242,21 @@ fn copy_tree(
         gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS,
         Some(cancel),
     )?;
+    let replacing = flags.contains(gio::FileCopyFlags::OVERWRITE);
+    let existing = if replacing {
+        target.query_file_type(gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS, Some(cancel))
+    } else {
+        gio::FileType::Unknown
+    };
     if info.file_type() == gio::FileType::Directory {
-        target.make_directory(Some(cancel))?;
+        // Replacing a folder merges into it, as other file managers do; a
+        // file in its way is removed first.
+        if existing != gio::FileType::Directory {
+            if existing != gio::FileType::Unknown {
+                delete_tree(target, cancel, changed)?;
+            }
+            target.make_directory(Some(cancel))?;
+        }
         *changed = true;
         let entries = source.enumerate_children(
             "standard::name",
@@ -1252,6 +1276,9 @@ fn copy_tree(
         entries.close(Some(cancel))?;
         Ok(())
     } else {
+        if existing == gio::FileType::Directory {
+            delete_tree(target, cancel, changed)?;
+        }
         *changed = true;
         let mut previous = 0;
         source.copy(
