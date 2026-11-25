@@ -4847,10 +4847,13 @@ fn column_factory_layout(
                 label.set_wrap(true);
                 label.set_lines(2);
                 label.set_max_width_chars(grid_options.grid_size.grid_layout().label_width_chars);
+                label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
                 label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+                // Centred under the icon, as in the other grid views.
+                label.set_justify(gtk::Justification::Center);
                 icon.set_pixel_size(grid_options.grid_size.icon_size());
             }
-            label.set_xalign(0.0);
+            label.set_xalign(if grid_cell { 0.5 } else { 0.0 });
             line.append(&icon);
             line.append(&label);
             let rename_item = list_item.downgrade();
