@@ -33,7 +33,7 @@ SPEC = {
         "CLANG_ENABLE_MODULES": "YES",
         "ENABLE_USER_SCRIPT_SANDBOXING": "NO",
         "ENABLE_HARDENED_RUNTIME": "YES",
-        "MARKETING_VERSION": "0.1.1",
+        "MARKETING_VERSION": "0.1.2",
         "ASSETCATALOG_COMPILER_APPICON_NAME": "AppIcon",
         "CURRENT_PROJECT_VERSION": "1",
         # Set to the signing team's identifier for release builds; empty pins only identifiers.
