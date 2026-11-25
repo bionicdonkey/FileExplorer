@@ -32,6 +32,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     var onNavigate: (Location) -> Void = { _ in }
     var onOpenNewTab: (Location) -> Void = { _ in }
     var onOpenNewWindow: (Location) -> Void = { _ in }
+    var onEmptyTrash: () -> Void = {}
     var onDrop: ([Location], Location, Bool) -> Bool = { _, _, _ in false }
 
     init(services: AppServices) {
@@ -275,6 +276,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         if isDirectory { add("Open in New Tab", #selector(menuNewTab(_:))); add("Open in New Window", #selector(menuNewWindow(_:))) }
         menu.addItem(.separator())
         add(services.sidebarPreferences.isPinned(location) ? "Remove from Quick Access" : "Add to Quick Access", #selector(menuTogglePin(_:)))
+        if isTrashLocation(location) { add("Empty Trash…", #selector(menuEmptyTrash(_:))) }
         if let path = location.localPath, services.volumes.mountedVolumes().first(where: { $0.path == path })?.isEjectable == true { add("Eject", #selector(menuEject(_:))) }
         return menu
     }
@@ -282,6 +284,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     private func location(from sender: NSMenuItem) -> Location? { (sender.representedObject as? String).flatMap { try? Location(uri: $0) } }
     @objc private func menuOpen(_ sender: NSMenuItem) { location(from: sender).map(onNavigate) }
     @objc private func menuNewTab(_ sender: NSMenuItem) { location(from: sender).map(onOpenNewTab) }
+    @objc private func menuEmptyTrash(_ sender: NSMenuItem) { onEmptyTrash() }
     @objc private func menuNewWindow(_ sender: NSMenuItem) { location(from: sender).map(onOpenNewWindow) }
     @objc private func menuEject(_ sender: NSMenuItem) { if let path = location(from: sender)?.localPath { SystemVolumes.eject(path: path) { [weak self] _ in self?.reload() } } }
     @objc private func menuTogglePin(_ sender: NSMenuItem) {

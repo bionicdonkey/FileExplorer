@@ -55,8 +55,35 @@ final class FileCommands {
         let target = destination ?? tab.location
         let sources = transferSources(locations, destination: target, action: action)
         guard !sources.isEmpty else { return NSSound.beep() }
-        let id = operations.submit(action == .cut ? MutationKind.move : MutationKind.copy, sources: sources, destination: target)
-        if action == .cut { services.clipboard.beginPaste(id) }
+        if action == .cut {
+            let id = operations.submit(MutationKind.move, sources: sources, destination: target)
+            services.clipboard.beginPaste(id)
+        } else {
+            submitCopies(sources, to: target)
+        }
+    }
+
+    /// Copies `sources` into `destination`. An item copied into the folder it came from becomes a
+    /// duplicate beside the original (`report (copy).txt`) instead of colliding with itself; the
+    /// rest go in one operation.
+    private func submitCopies(_ sources: [Location], to destination: Location) {
+        var others: [Location] = []
+        for source in sources {
+            guard source.parent == destination, source.localPath != nil else { others.append(source); continue }
+            var isDirectory: ObjCBool = false
+            let path = source.localPath ?? ""
+            _ = FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory)
+            let exists: (Location) -> Bool = { location in
+                // `attributesOfItem` also sees a dangling symlink, which `fileExists` does not.
+                location.localPath.map { (try? FileManager.default.attributesOfItem(atPath: $0)) != nil } ?? false
+            }
+            if let duplicate = try? copySibling(of: source, isDirectory: isDirectory.boolValue, exists: exists) {
+                operations.submit(MutationKind.copy, sources: [source], destination: destination, explicitTarget: duplicate)
+            } else {
+                others.append(source)
+            }
+        }
+        if !others.isEmpty { operations.submit(MutationKind.copy, sources: others, destination: destination) }
     }
 
     // MARK: transfer (drag and drop, copy to / move to)
@@ -64,7 +91,7 @@ final class FileCommands {
     func transfer(_ sources: [Location], to destination: Location, copy: Bool) -> Bool {
         let accepted = transferSources(sources, destination: destination, action: copy ? ClipboardAction.copy : ClipboardAction.cut)
         guard !accepted.isEmpty else { return false }
-        operations.submit(copy ? MutationKind.copy : MutationKind.move, sources: accepted, destination: destination)
+        if copy { submitCopies(accepted, to: destination) } else { operations.submit(MutationKind.move, sources: accepted, destination: destination) }
         return true
     }
 
@@ -104,8 +131,58 @@ final class FileCommands {
     }
 
     func trash(_ items: [FileItem]) {
+        // Nothing can be moved to the Trash from inside it, so the Delete key deletes immediately.
+        if !items.isEmpty, items.allSatisfy({ isTrashLocation($0.location) }) { return deletePermanently(items) }
         guard CommandAvailability(selection: items, destinationCapabilities: nil).canTrash else { return NSSound.beep() }
         operations.submit(.trash, sources: items.map(\.location))
+    }
+
+    /// Moves trashed items back to where Finder recorded they were deleted from.
+    func putBack(_ items: [FileItem]) {
+        var failures: [String] = []
+        var origins: [String: [String: String]] = [:]
+        for item in items {
+            guard let path = item.location.localPath else { failures.append(item.name); continue }
+            let folder = (path as NSString).deletingLastPathComponent
+            if origins[folder] == nil {
+                let data = FileManager.default.contents(atPath: folder + "/.DS_Store") ?? Data()
+                // Paths are recorded relative to the volume: "/" for the home Trash, the mount point for another volume's.
+                let root = folder.range(of: "/.Trashes").map { String(folder[..<$0.lowerBound]) } ?? ""
+                origins[folder] = TrashOrigins.originalPaths(inDSStore: data, volumeRoot: root.isEmpty ? "/" : root)
+            }
+            guard let original = origins[folder]?[(path as NSString).lastPathComponent] else { failures.append(item.name); continue }
+            let parent = (original as NSString).deletingLastPathComponent
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: parent, isDirectory: &isDirectory), isDirectory.boolValue else { failures.append(item.name); continue }
+            operations.submit(.move, sources: [item.location], destination: Location(localPath: parent), explicitTarget: Location(localPath: original))
+        }
+        if !failures.isEmpty {
+            showAlert("Can’t put back", failures.count == 1
+                ? "“\(failures[0])” has no recorded original location, or that folder no longer exists."
+                : "\(failures.count) items have no recorded original location, or their folders no longer exist.")
+        }
+    }
+
+    /// Asks, then permanently deletes everything in the home Trash.
+    func emptyTrash() {
+        let trash = NSHomeDirectory() + "/.Trash"
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: trash)) ?? []
+        let alert = NSAlert()
+        if names.isEmpty {
+            alert.messageText = "The Trash is empty"
+            alert.addButton(withTitle: "OK")
+        } else {
+            alert.alertStyle = .critical
+            alert.messageText = "Empty the Trash?"
+            alert.informativeText = "\(names.count) item\(names.count == 1 ? "" : "s") will be permanently deleted. This can’t be undone."
+            alert.addButton(withTitle: "Empty Trash")
+            alert.addButton(withTitle: "Cancel")
+        }
+        let run: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            guard response == .alertFirstButtonReturn, !names.isEmpty else { return }
+            self?.operations.submit(.delete, sources: names.map { Location(localPath: trash + "/" + $0) }, confirmedDelete: true)
+        }
+        if let window = window() { alert.beginSheetModal(for: window, completionHandler: run) } else { run(alert.runModal()) }
     }
 
     func deletePermanently(_ items: [FileItem]) {
@@ -203,6 +280,8 @@ final class FileCommands {
         case .rename: if let target { tab.onRenameRequested?(target) }
         case .moveToTrash: trash(items)
         case .deletePermanently: deletePermanently(items)
+        case .restore: putBack(items)
+        case .emptyTrash: emptyTrash()
         case .properties: items.forEach(showProperties)
         case .refresh: tab.refresh()
         case .toggleQuickAccess:

@@ -34,6 +34,13 @@ final class SidebarTests: XCTestCase {
         XCTAssertEqual(sections[2].nodes.first?.location.label, "Macintosh HD")
     }
 
+    func testPersonalFoldersEndWithTheTrash() {
+        let trash = model().sections()[1].nodes.last
+        XCTAssertEqual(trash?.location.label, "Trash")
+        XCTAssertEqual(trash?.location.location, Location(localPath: "/Users/ada/.Trash"))
+        XCTAssertEqual(trash?.isExpandable, false)
+    }
+
     func testUserSectionPrefersTheAccountNameAndFallsBackToTheHomeFolder() {
         XCTAssertEqual(model(name: "Ada Lovelace").sections()[1].title, "Ada Lovelace")
         XCTAssertEqual(model(name: "  ").sections()[1].title, "ada")

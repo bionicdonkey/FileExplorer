@@ -10,6 +10,24 @@ final class CommandAvailabilityTests: XCTestCase {
 
     private let everything: Set<Capability> = [.open, .copy, .move, .rename, .trash, .delete, .create]
 
+    func testTheTrashOffersPutBackAndEmptyNotMoveToTrash() {
+        let trashed = item("old.txt", uri: "file:///Users/ada/.Trash/old.txt", caps: everything)
+        XCTAssertEqual(CommandAvailability.itemCommands(for: .file(trashed)), [.restore, .deletePermanently, .properties])
+        XCTAssertTrue(CommandAvailability(selection: [trashed], destinationCapabilities: nil).canRestore)
+        XCTAssertEqual(CommandAvailability.itemCommands(for: .background(Location(localPath: "/Users/ada/.Trash"))), [.emptyTrash, .refresh])
+
+        let ordinary = item("report.txt", caps: everything)
+        XCTAssertTrue(CommandAvailability.itemCommands(for: .file(ordinary)).contains(.moveToTrash))
+        XCTAssertFalse(CommandAvailability(selection: [ordinary], destinationCapabilities: nil).canRestore)
+        XCTAssertTrue(isTrashLocation(Location(localPath: "/Volumes/USB/.Trashes/501/old.txt")))
+        XCTAssertFalse(isTrashLocation(Location(localPath: "/Users/ada/Documents/Trash notes.txt")))
+    }
+
+    func testGarbageIsNotADSStore() {
+        XCTAssertTrue(TrashOrigins.originalPaths(inDSStore: Data([1, 2, 3])).isEmpty)
+        XCTAssertTrue(TrashOrigins.originalPaths(inDSStore: Data(repeating: 0, count: 64)).isEmpty)
+    }
+
     func testWriteAccessDoesNotImplyRename() {
         let item = item("file", caps: [.open, .copy, .create])
         let availability = CommandAvailability(selection: [item], destinationCapabilities: nil)

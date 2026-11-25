@@ -111,6 +111,7 @@ final class ExplorerWindowController: NSWindowController, NSWindowDelegate, NSTo
         sidebar.onNavigate = { [weak self] location in self?.tab.navigate(to: location) }
         sidebar.onOpenNewTab = { [weak self] location in self.map { $0.manager.open(location, asTabIn: $0.window) } }
         sidebar.onOpenNewWindow = { [weak self] location in self?.manager.open(location) }
+        sidebar.onEmptyTrash = { [weak self] in self?.commands.emptyTrash() }
         sidebar.onDrop = { [weak self] sources, destination, copy in self?.commands.transfer(sources, to: destination, copy: copy) ?? false }
         split = NSSplitViewController()
         let sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebar)
@@ -385,6 +386,10 @@ final class ExplorerWindowController: NSWindowController, NSWindowDelegate, NSTo
     @objc func renameItem(_ sender: Any?) { commands.perform(.rename, items: selection) }
     @objc func moveToTrash(_ sender: Any?) { commands.perform(.moveToTrash, items: selection) }
     @objc override func deleteBackward(_ sender: Any?) { moveToTrash(sender) }
+    /// The Delete key on a PC keyboard sends forward delete: it trashes, and with Shift deletes for good.
+    @objc override func deleteForward(_ sender: Any?) {
+        if NSApp.currentEvent?.modifierFlags.contains(.shift) == true { deletePermanently(sender) } else { moveToTrash(sender) }
+    }
     @objc func deletePermanently(_ sender: Any?) { commands.perform(.deletePermanently, items: selection) }
     @objc func getInfo(_ sender: Any?) { commands.perform(.properties, items: selection.isEmpty ? [] : selection) }
     @objc func extractHere(_ sender: Any?) { commands.perform(.extract, items: selection) }
