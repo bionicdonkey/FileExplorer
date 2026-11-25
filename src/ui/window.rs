@@ -430,6 +430,16 @@ impl ExplorerWindow {
                 sidebar_model_actions.clone(),
                 sidebar_holder_actions.clone(),
             ),
+            SidebarAction::EmptyTrash => {
+                let view = {
+                    let data = sidebar_context_data.borrow();
+                    selected_index(&sidebar_context_tabs, &sidebar_context_data)
+                        .and_then(|index| data.get(index).map(|tab| tab.view.clone()))
+                };
+                if let Some(view) = view {
+                    empty_trash(&view, sidebar_context_operations.clone());
+                }
+            }
             SidebarAction::Unmount(uri) => {
                 let mount = sidebar_model_actions.borrow().mount_for_uri(uri.uri());
                 if let Some(mount) = mount {
@@ -1338,7 +1348,18 @@ fn wire_tab(
         }
     });
     view.set_application_handler(move |intent| {
-        let command = intent.kind;
+        let mut command = intent.kind;
+        // Nothing can be moved to the Trash from inside it, so the Delete key and
+        // the toolbar button delete for good (after the usual confirmation).
+        if command == ContextCommand::MoveToTrash
+            && !intent.selection.is_empty()
+            && intent
+                .selection
+                .iter()
+                .all(crate::application::commands::is_trash_location)
+        {
+            command = ContextCommand::DeletePermanently;
+        }
         let target = command_view
             .selected_target()
             .unwrap_or_else(|| ContextTarget::Background(intent.destination.clone()));
@@ -1680,12 +1701,27 @@ fn wire_tab(
             }
             ContextCommand::DeletePermanently => {
                 if !intent.selection.is_empty() {
+                    let selection = if intent
+                        .selection
+                        .iter()
+                        .all(crate::application::commands::is_trash_location)
+                    {
+                        as_trash_locations(intent.selection)
+                    } else {
+                        intent.selection
+                    };
                     confirm_permanent_delete(
                         &command_view,
-                        intent.selection,
+                        selection,
                         command_operations.clone(),
                     );
                 }
+            }
+            ContextCommand::Restore => {
+                restore_from_trash(&command_view, &intent.selection);
+            }
+            ContextCommand::EmptyTrash => {
+                empty_trash(&command_view, command_operations.clone());
             }
             ContextCommand::Properties => {
                 if let Some(location) = intent.selection.first() {
@@ -2470,6 +2506,144 @@ fn show_operation_error(view: &FileView, error: &str) {
 }
 
 #[allow(deprecated)]
+/// A top-level entry of the Trash: its `trash:///` file, where GIO says it
+/// really lives, and where it was deleted from.
+struct TrashEntry {
+    file: gio::File,
+    target_uri: String,
+    original: Option<String>,
+}
+
+fn trash_entries() -> Vec<TrashEntry> {
+    let trash = gio::File::for_uri("trash:///");
+    trash
+        .enumerate_children(
+            "standard::name,standard::target-uri,trash::orig-path",
+            gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS,
+            gio::Cancellable::NONE,
+        )
+        .map(|children| {
+            children
+                .flatten()
+                .map(|info| TrashEntry {
+                    file: trash.child(info.name()),
+                    target_uri: info
+                        .attribute_as_string("standard::target-uri")
+                        .map(|uri| uri.to_string())
+                        .unwrap_or_default(),
+                    original: info
+                        .attribute_byte_string("trash::orig-path")
+                        .map(|path| path.to_string()),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The `trash:///` form of locations GIO lists under their real folder, which is
+/// what Restore and permanent deletion must act on so the Trash's bookkeeping
+/// stays in step. Locations that match no entry are returned unchanged.
+fn as_trash_locations(locations: Vec<Location>) -> Vec<Location> {
+    let entries = trash_entries();
+    locations
+        .into_iter()
+        .map(|location| {
+            entries
+                .iter()
+                .find(|entry| entry.target_uri == location.uri())
+                .and_then(|entry| Location::try_from_file(entry.file.clone()).ok())
+                .unwrap_or(location)
+        })
+        .collect()
+}
+
+/// Puts trashed items back where they were deleted from.
+fn restore_from_trash(view: &FileView, locations: &[Location]) {
+    let entries = trash_entries();
+    for location in locations {
+        let entry = entries
+            .iter()
+            .find(|entry| entry.target_uri == location.uri() || entry.file.uri() == location.uri());
+        let result = match entry {
+            Some(TrashEntry {
+                file,
+                original: Some(original),
+                ..
+            }) => file.move_(
+                &gio::File::for_path(original),
+                gio::FileCopyFlags::NONE,
+                gio::Cancellable::NONE,
+                None,
+            ),
+            _ => Err(glib::Error::new(
+                gio::IOErrorEnum::NotFound,
+                "Original location unknown",
+            )),
+        };
+        if let Err(error) = result {
+            show_operation_error(
+                view,
+                crate::core::contracts::OperationError::from_gio(&error, Some(location), None)
+                    .message_key,
+            );
+        }
+    }
+    view.refresh();
+}
+
+/// Asks, then permanently deletes everything in the Trash.
+pub fn empty_trash(view: &FileView, operations: OperationManager) {
+    let trash = gio::File::for_uri("trash:///");
+    let items: Vec<Location> = trash
+        .enumerate_children(
+            "standard::name",
+            gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS,
+            gio::Cancellable::NONE,
+        )
+        .map(|children| {
+            children
+                .flatten()
+                .filter_map(|info| Location::try_from_file(trash.child(info.name())).ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    let parent = view.widget.root().and_downcast::<gtk::Window>();
+    if items.is_empty() {
+        let dialog = adw::MessageDialog::new(parent.as_ref(), Some("The Trash is empty"), None);
+        dialog.add_response("ok", "OK");
+        dialog.present();
+        return;
+    }
+    let dialog = adw::MessageDialog::new(
+        parent.as_ref(),
+        Some("Empty the Trash?"),
+        Some(&format!(
+            "{} item(s) will be permanently deleted. This cannot be undone.",
+            items.len()
+        )),
+    );
+    dialog.add_responses(&[("empty", "Empty Trash"), ("cancel", "Cancel")]);
+    dialog.set_default_response(Some("cancel"));
+    dialog.set_close_response("cancel");
+    dialog.set_response_appearance("empty", adw::ResponseAppearance::Destructive);
+    let reload = view.clone();
+    dialog.connect_response(None, move |_, response| {
+        if response == "empty" {
+            let id = operations.submit_locations(
+                MutationKind::Delete,
+                items.clone(),
+                None,
+                None,
+                None,
+                true,
+            );
+            schedule_refresh(reload.clone(), operations.clone(), id);
+        }
+        reload.widget.grab_focus();
+    });
+    dialog.present();
+}
+
 pub fn confirm_permanent_delete(
     view: &FileView,
     locations: Vec<Location>,

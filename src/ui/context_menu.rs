@@ -26,6 +26,7 @@ pub struct CommandAvailability {
     pub can_open_terminal: bool,
     pub can_trash: bool,
     pub can_delete: bool,
+    pub can_restore: bool,
     pub can_extract: bool,
     pub can_compress: bool,
     pub disabled_reason: Option<&'static str>,
@@ -63,6 +64,10 @@ impl CommandAvailability {
         let can_open_terminal = can_use_local_adapter && selection[0].is_dir() && can_open;
         let can_trash = supports_all(Capability::Trash);
         let can_delete = supports_all(Capability::Delete);
+        let can_restore = !selection.is_empty()
+            && selection
+                .iter()
+                .all(|item| crate::application::commands::is_trash_location(item.location()));
         let can_extract = !selection.is_empty()
             && selection
                 .iter()
@@ -88,6 +93,7 @@ impl CommandAvailability {
             can_open_terminal,
             can_trash,
             can_delete,
+            can_restore,
             can_extract,
             can_compress,
             disabled_reason,
@@ -114,6 +120,8 @@ impl CommandAvailability {
             ContextCommand::Rename => self.can_rename,
             ContextCommand::MoveToTrash => self.can_trash,
             ContextCommand::DeletePermanently => self.can_delete,
+            ContextCommand::Restore => self.can_restore,
+            ContextCommand::EmptyTrash => true,
             ContextCommand::Refresh
             | ContextCommand::CloseTab
             | ContextCommand::CloseOtherTabs
@@ -162,6 +170,7 @@ impl CommandAvailability {
                 can_open_terminal: true,
                 can_trash: true,
                 can_delete: true,
+                can_restore: false,
                 can_extract: true,
                 can_compress: true,
                 disabled_reason: None,
@@ -205,7 +214,21 @@ pub fn delete_label(shift_held: bool) -> &'static str {
 }
 
 pub fn item_commands(target: &ContextTarget) -> Vec<ContextCommand> {
+    use crate::application::commands::is_trash_location;
     match target {
+        // Inside the Trash an item can only be put back or deleted for good.
+        ContextTarget::File(item) | ContextTarget::Folder(item)
+            if is_trash_location(item.location()) =>
+        {
+            vec![
+                ContextCommand::Restore,
+                ContextCommand::DeletePermanently,
+                ContextCommand::Properties,
+            ]
+        }
+        ContextTarget::Background(location) if is_trash_location(location) => {
+            vec![ContextCommand::EmptyTrash, ContextCommand::Refresh]
+        }
         ContextTarget::File(item) => {
             let mut commands = vec![ContextCommand::Open, ContextCommand::OpenWith];
             if crate::core::activation::is_extractable(item) {
@@ -352,6 +375,38 @@ mod tests {
             !CommandAvailability::for_selection(&[], None).can_compress,
             "nothing selected, nothing to compress"
         );
+    }
+
+    #[test]
+    fn the_trash_offers_restore_and_empty_not_move_to_trash() {
+        let background = item_commands(&ContextTarget::Background(
+            crate::core::Location::from_uri("trash:///").unwrap(),
+        ));
+        assert_eq!(background, [ContextCommand::EmptyTrash, ContextCommand::Refresh]);
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("gone.txt");
+        std::fs::write(&path, "x").unwrap();
+        let item = FileItem::from_path(&path).unwrap();
+        assert!(item_commands(&ContextTarget::File(item))
+            .contains(&ContextCommand::MoveToTrash));
+    }
+
+    #[test]
+    fn trashed_items_are_recognised_by_their_real_trash_folder() {
+        use crate::application::commands::is_trash_location;
+        use crate::core::Location;
+        for uri in [
+            "trash:///report.txt",
+            "file:///home/ada/.local/share/Trash/files/report.txt",
+            "file:///mnt/usb/.Trash-1000/files/report.txt",
+            "file:///mnt/usb/.Trash/1000/files/report.txt",
+        ] {
+            assert!(is_trash_location(&Location::from_uri(uri).unwrap()), "{uri}");
+        }
+        assert!(!is_trash_location(
+            &Location::from_uri("file:///home/ada/files/report.txt").unwrap()
+        ));
     }
 
     #[test]

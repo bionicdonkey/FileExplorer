@@ -4723,6 +4723,8 @@ fn context_command_label(command: ContextCommand) -> &'static str {
         ContextCommand::Rename => "Rename",
         ContextCommand::MoveToTrash => "Move to Trash",
         ContextCommand::DeletePermanently => "Delete Permanently…",
+        ContextCommand::Restore => "Restore",
+        ContextCommand::EmptyTrash => "Empty Trash…",
         ContextCommand::Properties => "Properties",
         ContextCommand::NewFolder => "New Folder",
         ContextCommand::Paste => "Paste",

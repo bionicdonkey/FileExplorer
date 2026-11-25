@@ -516,6 +516,14 @@ impl SidebarModel {
                 nodes.push(SidebarNode::local(path, name, icon, true));
             }
         }
+        if let Ok(trash) = Location::from_uri("trash:///") {
+            nodes.push(SidebarNode::remote(
+                trash,
+                "Trash",
+                "user-trash-symbolic",
+                false,
+            ));
+        }
         SidebarSection {
             title: user_section_title(&glib::real_name(), &self.home),
             nodes,
@@ -967,6 +975,20 @@ mod tests {
             !restored.occurrence_expanded(&nested),
             "the same URI under another ancestor is a different branch"
         );
+    }
+
+    #[test]
+    fn personal_folders_end_with_the_trash() {
+        let temporary = tempfile::tempdir().unwrap();
+        let home = temporary.path().join("user");
+        fs::create_dir_all(&home).unwrap();
+        let model = SidebarModel::new(SidebarPreferences::in_memory(), home);
+
+        let sections = model.sections();
+        let trash = sections[1].nodes.last().unwrap();
+        assert_eq!(trash.location.label(), "Trash");
+        assert_eq!(trash.location.uri(), "trash:///");
+        assert!(!trash.expandable);
     }
 
     #[test]

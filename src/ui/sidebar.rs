@@ -48,6 +48,7 @@ pub enum SidebarAction {
     Unpin(Location),
     AddNetworkLocation,
     Unmount(Location),
+    EmptyTrash,
     OpenOperations,
 }
 
@@ -823,6 +824,16 @@ impl Sidebar {
                         action(command.clone());
                     });
                     menu.append(&button);
+                }
+                if crate::application::commands::is_trash_location(location.location()) {
+                    let empty = Button::with_label("Empty Trash…");
+                    let action = action.clone();
+                    let popover_for_empty = popover.clone();
+                    empty.connect_clicked(move |_| {
+                        popover_for_empty.popdown();
+                        action(SidebarAction::EmptyTrash);
+                    });
+                    menu.append(&empty);
                 }
                 if model.borrow().mount_for_location(&location).is_some() {
                     let unmount = Button::with_label("Unmount");
