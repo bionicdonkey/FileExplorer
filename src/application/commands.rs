@@ -27,6 +27,8 @@ pub enum ContextCommand {
     Rename,
     MoveToTrash,
     DeletePermanently,
+    Restore,
+    EmptyTrash,
     Properties,
     Refresh,
     CloseTab,
@@ -53,6 +55,18 @@ impl From<Shortcut> for ContextCommand {
             Shortcut::DeletePermanently => Self::DeletePermanently,
         }
     }
+}
+/// Whether a location is the Trash or something inside it.
+///
+/// GIO lists `trash:///` entries under the real folder they live in, so a trashed
+/// item usually carries a `file://` location inside a freedesktop trash folder
+/// (`~/.local/share/Trash/files`, `<mount>/.Trash-<uid>/files`, `<mount>/.Trash/<uid>/files`).
+pub fn is_trash_location(location: &Location) -> bool {
+    let uri = location.uri();
+    uri.starts_with("trash:///")
+        || (uri.starts_with("file://")
+            && (uri.contains("/Trash/files") || uri.contains("/.Trash-") || uri.contains("/.Trash/"))
+            && uri.contains("/files"))
 }
 pub fn route(command: impl Into<ContextCommand>) -> ContextCommand {
     command.into()
