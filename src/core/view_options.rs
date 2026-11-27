@@ -78,6 +78,25 @@ mod tests {
     }
 
     #[test]
+    fn compact_rows_default_off_and_apply_to_lists_and_hybrid_folders() {
+        let old: ViewOptions = serde_json::from_str(
+            r#"{"view_mode":"hybrid","grid_size":"medium","sort_field":"name","sort_direction":"ascending","folders_first":true,"group_field":"none","thumbnails":true}"#,
+        )
+        .unwrap();
+        assert!(!old.is_compact() && !old.compact_folder_tiles());
+        let compact = ViewOptions {
+            compact_rows: true,
+            ..old.clone()
+        };
+        assert!(compact.is_compact() && compact.compact_folder_tiles());
+        let list = ViewOptions {
+            view_mode: ViewMode::CompactList,
+            ..old
+        };
+        assert!(list.is_compact() && !list.compact_folder_tiles());
+    }
+
+    #[test]
     fn small_icon_tiles_use_compact_padding_without_forcing_height() {
         let small = GridSize::Small.grid_layout();
 
@@ -370,6 +389,21 @@ pub struct ViewOptions {
     pub show_hidden: bool,
     #[serde(default)]
     pub list_columns: ListColumnLayout,
+    /// Tighter rows in the lists, and in hybrid view tighter folder tiles too.
+    #[serde(default)]
+    pub compact_rows: bool,
+}
+
+impl ViewOptions {
+    /// Whether list rows are drawn tight: the Compact List layout, or Compact rows.
+    pub fn is_compact(&self) -> bool {
+        self.compact_rows || self.view_mode == ViewMode::CompactList
+    }
+
+    /// Hybrid view's folders become single-line tiles, icon beside the name.
+    pub fn compact_folder_tiles(&self) -> bool {
+        self.compact_rows && self.view_mode == ViewMode::Hybrid
+    }
 }
 
 impl Default for ViewOptions {
@@ -384,6 +418,7 @@ impl Default for ViewOptions {
             thumbnails: true,
             show_hidden: false,
             list_columns: ListColumnLayout::default(),
+            compact_rows: false,
         }
     }
 }

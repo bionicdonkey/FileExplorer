@@ -277,3 +277,11 @@ columnview row:focus-visible, tab:focus-visible {
   background-color: alpha(@accent_bg_color, 0.1);
   font-size: 0.95em;
 }
+
+/* Compact rows: the list cells lose their default padding and height. */
+columnview.compact-file-list > listview > row > cell,
+.compact-file-list row cell {
+  padding-top: 0;
+  padding-bottom: 0;
+  min-height: 0;
+}

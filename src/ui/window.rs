@@ -1710,11 +1710,7 @@ fn wire_tab(
                     } else {
                         intent.selection
                     };
-                    confirm_permanent_delete(
-                        &command_view,
-                        selection,
-                        command_operations.clone(),
-                    );
+                    confirm_permanent_delete(&command_view, selection, command_operations.clone());
                 }
             }
             ContextCommand::Restore => {
@@ -2966,6 +2962,17 @@ fn view_menu_body(
             append_separator(&menu);
             append_check(
                 &menu,
+                "Compact rows",
+                options.is_compact(),
+                options.view_mode != ViewMode::IconGrid
+                    && options.view_mode != ViewMode::CompactList,
+                "View:Toggle compact rows",
+                data,
+                tabs,
+                preferences,
+            );
+            append_check(
+                &menu,
                 "Show thumbnails",
                 options.thumbnails,
                 true,
@@ -3117,6 +3124,7 @@ fn update_active_options(
         "View:Medium icons" => options.grid_size = GridSize::Medium,
         "View:Large icons" => options.grid_size = GridSize::Large,
         "View:Extra Large icons" => options.grid_size = GridSize::ExtraLarge,
+        "View:Toggle compact rows" => options.compact_rows = !options.compact_rows,
         "View:Toggle thumbnails" => options.thumbnails = !options.thumbnails,
         "View:Toggle hidden files" => options.show_hidden = !options.show_hidden,
         _ => return,
