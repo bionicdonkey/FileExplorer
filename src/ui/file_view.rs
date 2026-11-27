@@ -832,9 +832,7 @@ impl FileView {
     }
 
     pub fn from_location(initial: Location) -> Self {
-        let repository = Rc::new(DirectoryRouter::new(
-            glib::MainContext::ref_thread_default(),
-        ));
+        let repository = Rc::new(DirectoryRouter::new(glib::MainContext::ref_thread_default()));
         let view = Self::new_with_repository(initial, repository.clone());
         let widget = view.widget.downgrade();
         repository.set_mount_operation(move || {
@@ -2383,7 +2381,10 @@ impl FileView {
             // No provider here searches inside files. Rather than an empty page that says
             // "unavailable", run the search on names and say so above the results.
             if mode == crate::core::contracts::SearchMode::Content
-                && matches!(outcome, crate::core::contracts::SearchOutcome::Unsupported { .. })
+                && matches!(
+                    outcome,
+                    crate::core::contracts::SearchOutcome::Unsupported { .. }
+                )
             {
                 *view.search_notice.borrow_mut() = Some(
                     "Searching inside files isn't available here, so these are file name matches."
@@ -3321,7 +3322,7 @@ impl FileView {
         ]);
         view.set_reorderable(true);
         view.set_show_row_separators(true);
-        view.add_css_class(if options.view_mode == ViewMode::CompactList {
+        view.add_css_class(if options.is_compact() {
             "compact-file-list"
         } else {
             "detailed-file-list"
@@ -3967,23 +3968,51 @@ impl FileView {
     /// tiles built later by an in-place refresh behave like the originals.
     fn grid_tile_widget(&self, item: &FileItem, options: &ViewOptions) -> GtkBox {
         let layout = options.grid_size.grid_layout();
-        let tile = GtkBox::new(Orientation::Vertical, layout.gap / 2);
+        let compact = options.compact_folder_tiles();
+        let tile = GtkBox::new(
+            if compact {
+                Orientation::Horizontal
+            } else {
+                Orientation::Vertical
+            },
+            if compact { 8 } else { layout.gap / 2 },
+        );
         tile.add_css_class("icon-grid-tile");
         if self.pending_cut.borrow().contains(item.location()) {
             tile.add_css_class("cut-pending");
         }
-        tile.set_size_request(layout.tile_width, -1);
+        tile.set_size_request(
+            if compact {
+                COMPACT_TILE_WIDTH
+            } else {
+                layout.tile_width
+            },
+            -1,
+        );
         tile.set_halign(gtk::Align::Center);
         tile.set_valign(gtk::Align::Start);
         tile.set_vexpand(false);
         tile.set_tooltip_text(Some(item.name()));
-        tile.set_margin_top(layout.vertical_padding);
-        tile.set_margin_bottom(layout.vertical_padding);
+        let padding = if compact { 1 } else { layout.vertical_padding };
+        tile.set_margin_top(padding);
+        tile.set_margin_bottom(padding);
         let icon = item_image(item, options.thumbnails);
-        icon.set_pixel_size(options.grid_size.icon_size());
+        icon.set_pixel_size(if compact {
+            20
+        } else {
+            options.grid_size.icon_size()
+        });
         self.request_flowbox_thumbnail_metadata(&icon, item, options.thumbnails);
         tile.append(&icon);
         let name_label = grid_tile_label(item.name(), layout.label_width_chars);
+        if compact {
+            name_label.set_wrap(false);
+            name_label.set_lines(1);
+            name_label.set_width_chars(0);
+            name_label.set_max_width_chars(24);
+            name_label.set_justify(gtk::Justification::Left);
+            name_label.set_xalign(0.0);
+        }
         tile.append(&name_label);
         let renamed = item.clone();
         self.attach_inline_rename(&name_label, move || Some(renamed.clone()));
@@ -4391,6 +4420,8 @@ fn uses_native_row_sorting(group_field: GroupField) -> bool {
     group_field == GroupField::None
 }
 
+const COMPACT_TILE_WIDTH: i32 = 210;
+
 fn grid_tile_label(name: &str, width_chars: i32) -> Label {
     let label = Label::new(Some(name));
     label.set_wrap(true);
@@ -4656,11 +4687,7 @@ fn show_submenu(parent: &Button, menu: &GtkBox) {
 }
 
 #[allow(deprecated)]
-fn show_application_chooser(
-    parent: &Button,
-    content_type: String,
-    view: FileView,
-) {
+fn show_application_chooser(parent: &Button, content_type: String, view: FileView) {
     let window = parent.root().and_downcast::<gtk::Window>();
     let dialog = gtk::AppChooserDialog::for_content_type(
         window.as_ref(),
@@ -4840,12 +4867,23 @@ fn column_factory_layout(
             }
             line.set_margin_start(10);
             line.set_margin_end(10);
-            line.set_margin_top(6);
-            line.set_margin_bottom(6);
+            let compact_rows = !grid_cell && grid_options.is_compact();
+            let compact_tile = grid_cell && grid_options.compact_folder_tiles();
+            if compact_tile {
+                line.set_orientation(Orientation::Horizontal);
+                line.set_size_request(COMPACT_TILE_WIDTH, -1);
+            }
+            let vertical = if compact_rows || compact_tile { 1 } else { 6 };
+            line.set_margin_top(vertical);
+            line.set_margin_bottom(vertical);
             let icon = Image::new();
-            icon.set_pixel_size(20);
+            icon.set_pixel_size(if compact_rows { 16 } else { 20 });
             let label = Label::new(None);
-            if grid_cell {
+            if compact_tile {
+                label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+                label.set_max_width_chars(24);
+                icon.set_pixel_size(20);
+            } else if grid_cell {
                 label.set_wrap(true);
                 label.set_lines(2);
                 label.set_max_width_chars(grid_options.grid_size.grid_layout().label_width_chars);
@@ -4855,7 +4893,7 @@ fn column_factory_layout(
                 label.set_justify(gtk::Justification::Center);
                 icon.set_pixel_size(grid_options.grid_size.icon_size());
             }
-            label.set_xalign(if grid_cell { 0.5 } else { 0.0 });
+            label.set_xalign(if grid_cell && !compact_tile { 0.5 } else { 0.0 });
             line.append(&icon);
             line.append(&label);
             let rename_item = list_item.downgrade();
@@ -4933,7 +4971,7 @@ fn column_factory_layout(
             let drag_source = gtk::DragSource::new();
             drag_source.set_actions(gtk::gdk::DragAction::COPY | gtk::gdk::DragAction::MOVE);
             drag_source.connect_prepare(move |source, _, _| {
-                        let object = drag_item
+                let object = drag_item
                     .upgrade()?
                     .item()
                     .and_downcast::<glib::BoxedAnyObject>()?;
@@ -5833,7 +5871,11 @@ mod tests {
             },
         });
         let (second, _) = search.0.borrow_mut().remove(0);
-        assert_eq!(second.mode, SearchMode::Filename, "the search is retried on names");
+        assert_eq!(
+            second.mode,
+            SearchMode::Filename,
+            "the search is retried on names"
+        );
         assert_eq!(second.query, "*.deb");
         assert!(view.search_notice.borrow().is_some());
 
@@ -7804,8 +7846,7 @@ fn drop_action(
 /// Set when Escape cancels an in-flight drag. The source side ends immediately,
 /// but GTK's X11 backend still delivers the drop to the target, so targets
 /// consult and clear this flag to decline that trailing drop.
-static DRAG_CANCELLED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static DRAG_CANCELLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn attach_async_drop(
     widget: &impl IsA<gtk::Widget>,
