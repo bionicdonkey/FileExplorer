@@ -20,7 +20,7 @@ futures-util = "0.3"
 compress-tools = "0.16"
 # Writing archives. These are pure Rust, so no archiver programs are needed.
 flate2 = "1"
-sevenz-rust2 = { version = "0.24", default-features = false, features = ["compress"] }
+sevenz-rust2 = { version = "0.25", default-features = false, features = ["compress"] }
 tar = { version = "0.4", default-features = false }
 zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 # Keep the proc-macro dependency compatible with the Rust 1.75 toolchain.
